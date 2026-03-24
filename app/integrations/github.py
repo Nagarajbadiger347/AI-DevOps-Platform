@@ -186,3 +186,50 @@ def create_incident_pr(incident_id: str, title: str, body: str,
         return {"success": False, "error": str(e)}
     except GithubException as e:
         return {"success": False, "error": str(e)}
+
+
+def get_pr_for_review(pr_number: int) -> dict:
+    """Fetch a PR's metadata, changed files, and diffs for AI review."""
+    try:
+        repo = _repo()
+        pr   = repo.get_pull(pr_number)
+        files = [
+            {
+                "filename":  f.filename,
+                "status":    f.status,
+                "additions": f.additions,
+                "deletions": f.deletions,
+                "patch":     (f.patch or "")[:3000],
+            }
+            for f in pr.get_files()
+        ]
+        return {
+            "success":     True,
+            "number":      pr.number,
+            "title":       pr.title,
+            "author":      pr.user.login,
+            "base_branch": pr.base.ref,
+            "head_branch": pr.head.ref,
+            "body":        pr.body or "",
+            "additions":   pr.additions,
+            "deletions":   pr.deletions,
+            "url":         pr.html_url,
+            "files":       files,
+        }
+    except RuntimeError as e:
+        return {"success": False, "error": str(e)}
+    except GithubException as e:
+        return {"success": False, "error": str(e)}
+
+
+def post_pr_review_comment(pr_number: int, body: str) -> dict:
+    """Post an AI-generated review comment on a PR."""
+    try:
+        repo = _repo()
+        pr   = repo.get_pull(pr_number)
+        pr.create_issue_comment(body)
+        return {"success": True, "pr_number": pr_number, "url": pr.html_url}
+    except RuntimeError as e:
+        return {"success": False, "error": str(e)}
+    except GithubException as e:
+        return {"success": False, "error": str(e)}

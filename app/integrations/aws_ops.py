@@ -500,3 +500,76 @@ def collect_diagnosis_context(resource_type: str, resource_id: str,
         ctx["error_logs"]   = search_logs(log_group, "ERROR", hours=hours)
 
     return ctx
+
+
+# ── Predictive Scaling Context ────────────────────────────────
+
+def get_scaling_metrics(resource_type: str, resource_id: str, hours: int = 6) -> dict:
+    """Collect CPU, memory, request-count and error metrics for scaling prediction.
+
+    Returns time-series data that Claude can analyse to decide if scaling is needed.
+    Supports: ecs, ec2, alb, lambda.
+    """
+    ctx: dict = {
+        "resource_type": resource_type,
+        "resource_id":   resource_id,
+        "region":        AWS_REGION,
+        "hours":         hours,
+    }
+
+    if resource_type == "ecs":
+        ctx["cpu"]    = get_metric(
+            "AWS/ECS", "CPUUtilization",
+            [{"Name": "ClusterName", "Value": resource_id}], hours=hours, period=300
+        )
+        ctx["memory"] = get_metric(
+            "AWS/ECS", "MemoryUtilization",
+            [{"Name": "ClusterName", "Value": resource_id}], hours=hours, period=300
+        )
+        ctx["services"] = list_ecs_services(resource_id)
+
+    elif resource_type == "ec2":
+        ctx["cpu"] = get_metric(
+            "AWS/EC2", "CPUUtilization",
+            [{"Name": "InstanceId", "Value": resource_id}], hours=hours, period=300
+        )
+        ctx["network_in"] = get_metric(
+            "AWS/EC2", "NetworkIn",
+            [{"Name": "InstanceId", "Value": resource_id}], hours=hours, period=300
+        )
+
+    elif resource_type == "alb":
+        ctx["request_count"] = get_metric(
+            "AWS/ApplicationELB", "RequestCount",
+            [{"Name": "LoadBalancer", "Value": resource_id}],
+            hours=hours, period=300, stat="Sum"
+        )
+        ctx["target_response_time"] = get_metric(
+            "AWS/ApplicationELB", "TargetResponseTime",
+            [{"Name": "LoadBalancer", "Value": resource_id}], hours=hours, period=300
+        )
+        ctx["5xx_errors"] = get_metric(
+            "AWS/ApplicationELB", "HTTPCode_Target_5XX_Count",
+            [{"Name": "LoadBalancer", "Value": resource_id}],
+            hours=hours, period=300, stat="Sum"
+        )
+
+    elif resource_type == "lambda":
+        ctx["invocations"] = get_metric(
+            "AWS/Lambda", "Invocations",
+            [{"Name": "FunctionName", "Value": resource_id}],
+            hours=hours, period=300, stat="Sum"
+        )
+        ctx["duration"] = get_metric(
+            "AWS/Lambda", "Duration",
+            [{"Name": "FunctionName", "Value": resource_id}],
+            hours=hours, period=300, stat="Average"
+        )
+        ctx["throttles"] = get_metric(
+            "AWS/Lambda", "Throttles",
+            [{"Name": "FunctionName", "Value": resource_id}],
+            hours=hours, period=300, stat="Sum"
+        )
+
+    ctx["active_alarms"] = list_cloudwatch_alarms(state="ALARM")
+    return ctx

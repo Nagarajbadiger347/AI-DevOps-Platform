@@ -21,3 +21,37 @@ def create_incident(summary: str = "AI DevOps Incident", description: str = "Gen
     }
     issue = jira.create_issue(fields=issue_dict)
     return {"incident_id": issue.key, "url": f"{JIRA_URL}/browse/{issue.key}"}
+
+
+def add_comment(issue_key: str, body: str) -> dict:
+    """Post a comment on an existing Jira issue."""
+    if not (JIRA_URL and JIRA_USER and JIRA_TOKEN):
+        return {"error": "JIRA_URL/JIRA_USER/JIRA_TOKEN not configured"}
+    try:
+        jira    = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
+        comment = jira.add_comment(issue_key, body)
+        return {"success": True, "comment_id": comment.id, "issue_key": issue_key}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def get_issue(issue_key: str) -> dict:
+    """Fetch a Jira issue's fields for processing."""
+    if not (JIRA_URL and JIRA_USER and JIRA_TOKEN):
+        return {"error": "JIRA_URL/JIRA_USER/JIRA_TOKEN not configured"}
+    try:
+        jira  = JIRA(server=JIRA_URL, basic_auth=(JIRA_USER, JIRA_TOKEN))
+        issue = jira.issue(issue_key)
+        return {
+            "success":    True,
+            "key":        issue.key,
+            "summary":    issue.fields.summary,
+            "description": issue.fields.description or "",
+            "issue_type": issue.fields.issuetype.name,
+            "status":     issue.fields.status.name,
+            "reporter":   issue.fields.reporter.displayName if issue.fields.reporter else "",
+            "labels":     list(issue.fields.labels),
+            "url":        f"{JIRA_URL}/browse/{issue.key}",
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}

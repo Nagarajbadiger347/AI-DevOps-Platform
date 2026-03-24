@@ -1,13 +1,14 @@
 import re
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import List, Any
+from typing import List, Any, Optional
 
 from app.correlation.engine import correlate_events
 from app.plugins.aws_checker import check_aws_infrastructure
 from app.plugins.linux_checker import check_linux_node
 from app.plugins.k8s_checker import check_k8s_cluster, check_k8s_nodes, check_k8s_pods, check_k8s_deployments
+from app.integrations.github import get_recent_commits as _get_recent_commits
 from app.integrations.k8s_ops import restart_deployment, scale_deployment, get_pod_logs
 from app.integrations.aws_ops import (
     list_ec2_instances, get_ec2_status_checks, get_ec2_console_output,
@@ -17,17 +18,43 @@ from app.integrations.aws_ops import (
     list_lambda_functions, get_lambda_errors,
     list_rds_instances, get_rds_events,
     get_target_health, get_cloudtrail_events,
-    collect_diagnosis_context,
+    collect_diagnosis_context, get_scaling_metrics,
 )
-from app.llm.claude import analyze_context, diagnose_aws_resource
+from app.llm.claude import (
+    analyze_context, diagnose_aws_resource, review_pr, predict_scaling,
+    assess_deployment, interpret_jira_for_pr,
+)
 from app.agents.incident_pipeline import run_incident_pipeline
 from app.integrations.slack import create_war_room
-from app.integrations.jira import create_incident
+from app.integrations.jira import create_incident, add_comment as jira_add_comment
 from app.integrations.opsgenie import notify_on_call
-from app.integrations.github import create_issue, create_pull_request
+from app.integrations.github import (
+    create_issue, create_pull_request,
+    get_pr_for_review, post_pr_review_comment,
+    create_incident_pr,
+)
 from app.integrations.vscode import trigger_code_action, open_file_in_vscode
-from app.memory.vector_db import store_incident
+from app.memory.vector_db import store_incident, search_similar_incidents
 from app.security.rbac import check_access, assign_role, revoke_role
+
+
+# ── RBAC helper ───────────────────────────────────────────────
+
+def _rbac_guard(x_user: Optional[str], required_action: str):
+    """Raise 403 if x_user header is missing or lacks the required permission."""
+    if not x_user:
+        raise HTTPException(
+            status_code=403,
+            detail="X-User header required for this endpoint. "
+                   "Assign a role via POST /security/roles first."
+        )
+    result = check_access(x_user, required_action)
+    if not result.get("allowed"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"User '{x_user}' lacks '{required_action}' permission. "
+                   f"Role: {result.get('role', 'none')}."
+        )
 
 app = FastAPI(
     title="AI DevOps Intelligence Platform",
@@ -567,14 +594,16 @@ def k8s_deployments(namespace: str = "default"):
     return {"k8s_deployments": check_k8s_deployments(namespace)}
 
 @app.post("/k8s/restart")
-def k8s_restart(req: K8sRestartRequest):
+def k8s_restart(req: K8sRestartRequest, x_user: Optional[str] = Header(default=None)):
+    _rbac_guard(x_user, "deploy")
     result = restart_deployment(req.namespace, req.deployment)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return {"result": result}
 
 @app.post("/k8s/scale")
-def k8s_scale(req: K8sScaleRequest):
+def k8s_scale(req: K8sScaleRequest, x_user: Optional[str] = Header(default=None)):
+    _rbac_guard(x_user, "deploy")
     if req.replicas < 0:
         raise HTTPException(status_code=400, detail="replicas must be >= 0")
     result = scale_deployment(req.namespace, req.deployment, req.replicas)
@@ -661,13 +690,17 @@ def security_revoke_role(user: str):
     return {"result": result}
 
 @app.post("/incident/run")
-def incident_run(req: IncidentRunRequest):
+def incident_run(req: IncidentRunRequest, x_user: Optional[str] = Header(default=None)):
     """End-to-end autonomous incident response pipeline.
 
     Collects AWS + K8s + GitHub observability data, runs AI root cause analysis,
     executes recommended actions (GitHub PR, Jira, Slack, OpsGenie, K8s ops),
     stores the incident in memory, and returns a full incident report.
+
+    Requires X-User header with 'deploy' permission for auto_remediate=true.
     """
+    if req.auto_remediate:
+        _rbac_guard(x_user, "deploy")
     report = run_incident_pipeline(
         incident_id    = req.incident_id,
         description    = req.description,
@@ -678,6 +711,199 @@ def incident_run(req: IncidentRunRequest):
         hours          = req.hours,
     )
     return report
+
+
+# ── GitHub PR Review ──────────────────────────────────────────
+
+class PRReviewRequest(BaseModel):
+    pr_number: int
+    post_comment: bool = False   # if True, post review as comment on the PR
+
+@app.post("/github/review-pr")
+def github_review_pr(req: PRReviewRequest):
+    """AI-powered PR review — security, infra, and code quality analysis via Claude.
+
+    Fetches the PR diff from GitHub, runs Claude analysis, and optionally posts
+    the review as a comment directly on the PR.
+    """
+    pr_data = get_pr_for_review(req.pr_number)
+    if not pr_data.get("success"):
+        raise HTTPException(status_code=400, detail=pr_data.get("error"))
+
+    review = review_pr(pr_data)
+
+    result = {
+        "pr_number": req.pr_number,
+        "pr_url":    pr_data.get("url"),
+        "review":    review,
+    }
+
+    if req.post_comment and review.get("comment"):
+        comment_result = post_pr_review_comment(req.pr_number, review["comment"])
+        result["comment_posted"] = comment_result
+
+    return result
+
+
+# ── Predictive Scaling ────────────────────────────────────────
+
+class PredictScalingRequest(BaseModel):
+    resource_type: str   # ecs | ec2 | alb | lambda
+    resource_id:   str
+    hours:         int = 6   # lookback window for trend analysis
+
+@app.post("/aws/predict-scaling")
+def aws_predict_scaling(req: PredictScalingRequest):
+    """Analyse CloudWatch metric trends and predict if scaling is needed.
+
+    Collects CPU, memory, request-count, and error metrics then feeds them
+    to Claude AI which returns a scaling recommendation with confidence score.
+    """
+    metrics = get_scaling_metrics(req.resource_type, req.resource_id, req.hours)
+    prediction = predict_scaling(metrics)
+    return {
+        "resource_type": req.resource_type,
+        "resource_id":   req.resource_id,
+        "hours_analysed": req.hours,
+        "prediction":    prediction,
+    }
+
+
+# ── Pre-deployment Assessment ─────────────────────────────────
+
+class DeployAssessRequest(BaseModel):
+    deployment:  str
+    namespace:   str = "default"
+    new_image:   str = ""
+    description: str = ""
+    hours:       int = 2   # lookback for recent incidents + commits
+
+@app.post("/deploy/assess")
+def deploy_assess(req: DeployAssessRequest, x_user: Optional[str] = Header(default=None)):
+    """Pre-deployment risk assessment — go / no-go decision before any deploy.
+
+    Collects current K8s state, past similar incidents from ChromaDB memory,
+    active AWS alarms, and recent GitHub commits, then feeds everything to
+    Claude AI for a structured risk assessment with a checklist.
+
+    Requires X-User header with 'deploy' permission.
+    """
+    _rbac_guard(x_user, "deploy")
+
+    k8s_state = {
+        "cluster":     check_k8s_cluster(),
+        "pods":        check_k8s_pods(req.namespace),
+        "deployments": check_k8s_deployments(req.namespace),
+    }
+    aws_alarms     = list_cloudwatch_alarms(state="ALARM")
+    recent_commits = _get_recent_commits(hours=req.hours)
+    past_incidents = search_similar_incidents(
+        f"{req.deployment} {req.description}", n_results=3
+    )
+
+    assessment = assess_deployment({
+        "deployment":       req.deployment,
+        "namespace":        req.namespace,
+        "new_image":        req.new_image,
+        "description":      req.description,
+        "k8s_state":        k8s_state,
+        "recent_incidents": past_incidents,
+        "aws_alarms":       aws_alarms,
+        "recent_commits":   recent_commits,
+    })
+
+    return {
+        "deployment":  req.deployment,
+        "namespace":   req.namespace,
+        "new_image":   req.new_image,
+        "assessment":  assessment,
+    }
+
+
+# ── Jira Webhook → Auto-create PR ────────────────────────────
+
+class JiraWebhookPayload(BaseModel):
+    """Jira sends this shape on issue_created / issue_updated events."""
+    webhookEvent: str = ""
+    issue: dict = {}
+
+_AUTO_PR_ISSUE_TYPES = {"change request", "change-request", "task", "story"}
+_AUTO_PR_LABELS      = {"auto-pr", "auto_pr", "create-pr"}
+
+@app.post("/jira/webhook")
+def jira_webhook(payload: JiraWebhookPayload):
+    """Jira webhook receiver — auto-creates a GitHub PR for change-request tickets.
+
+    Configure in Jira: Project Settings → Webhooks → point to this URL.
+    Triggers on: issue_created events where issue type is Change Request
+                 OR the issue has an 'auto-pr' label.
+
+    Flow:
+      1. Parse Jira issue fields
+      2. Claude interprets the ticket → generates PR plan + optional file patches
+      3. GitHub PR is created on a branch named jira/<ticket-key>-<slug>
+      4. Jira issue gets a comment with the PR link
+    """
+    issue_fields = payload.issue.get("fields", {})
+    issue_key    = payload.issue.get("key", "")
+
+    if not issue_key:
+        return {"skipped": True, "reason": "No issue key in payload"}
+
+    issue_type = (issue_fields.get("issuetype", {}).get("name", "") or "").lower()
+    labels     = [str(l).lower() for l in (issue_fields.get("labels") or [])]
+
+    # Only act on change-request types or explicit auto-pr label
+    if issue_type not in _AUTO_PR_ISSUE_TYPES and not any(l in _AUTO_PR_LABELS for l in labels):
+        return {
+            "skipped":     True,
+            "issue_key":   issue_key,
+            "reason":      f"Issue type '{issue_type}' with labels {labels} does not trigger auto-PR",
+        }
+
+    jira_data = {
+        "key":         issue_key,
+        "summary":     issue_fields.get("summary", ""),
+        "description": issue_fields.get("description", "") or "",
+        "issue_type":  issue_fields.get("issuetype", {}).get("name", ""),
+        "reporter":    (issue_fields.get("reporter") or {}).get("displayName", ""),
+        "labels":      labels,
+    }
+
+    # Step 1: Claude interprets the ticket
+    pr_plan = interpret_jira_for_pr(jira_data)
+
+    if pr_plan.get("error"):
+        return {"error": pr_plan["error"], "issue_key": issue_key}
+
+    # Step 2: Create GitHub PR
+    pr_result = create_incident_pr(
+        incident_id  = issue_key,
+        title        = pr_plan.get("pr_title", jira_data["summary"]),
+        body         = pr_plan.get("pr_body", ""),
+        file_changes = pr_plan.get("file_patches") or None,
+    )
+
+    # Step 3: Comment on Jira with the PR link
+    comment_result = {"skipped": True}
+    if pr_result.get("success"):
+        pr_url = pr_result.get("url", "")
+        comment_body = (
+            f"🤖 *AI DevOps Platform* automatically created a GitHub PR for this ticket.\n\n"
+            f"*PR:* [{pr_plan.get('pr_title')}|{pr_url}]\n"
+            f"*Branch:* `{pr_result.get('branch')}`\n\n"
+            f"_Confidence: {pr_plan.get('confidence', 0):.0%}_\n"
+            + (f"\n*Target files:* {', '.join(pr_plan.get('target_files', []))}"
+               if pr_plan.get("target_files") else "")
+        )
+        comment_result = jira_add_comment(issue_key, comment_body)
+
+    return {
+        "issue_key":      issue_key,
+        "pr_plan":        pr_plan,
+        "pr_created":     pr_result,
+        "jira_commented": comment_result,
+    }
 
 
 @app.websocket("/realtime/events")

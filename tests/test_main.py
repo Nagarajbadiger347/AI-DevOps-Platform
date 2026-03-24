@@ -190,20 +190,28 @@ def test_k8s_deployments():
 
 
 def test_k8s_restart():
+    from app.security import rbac as _rbac_mod
+    _rbac_mod.assign_role("k8s-test-user", "developer")
     with patch("app.integrations.k8s_ops._load_config", return_value=True), \
          patch("app.integrations.k8s_ops.client.AppsV1Api") as mock_apps:
         mock_apps.return_value.patch_namespaced_deployment.return_value = MagicMock()
-        response = client.post("/k8s/restart", json={"namespace": "default", "deployment": "my-app"})
+        response = client.post("/k8s/restart",
+                               json={"namespace": "default", "deployment": "my-app"},
+                               headers={"X-User": "k8s-test-user"})
 
     assert response.status_code == 200
     assert response.json()["result"]["success"] is True
 
 
 def test_k8s_scale():
+    from app.security import rbac as _rbac_mod
+    _rbac_mod.assign_role("k8s-test-user", "developer")
     with patch("app.integrations.k8s_ops._load_config", return_value=True), \
          patch("app.integrations.k8s_ops.client.AppsV1Api") as mock_apps:
         mock_apps.return_value.patch_namespaced_deployment_scale.return_value = MagicMock()
-        response = client.post("/k8s/scale", json={"namespace": "default", "deployment": "my-app", "replicas": 3})
+        response = client.post("/k8s/scale",
+                               json={"namespace": "default", "deployment": "my-app", "replicas": 3},
+                               headers={"X-User": "k8s-test-user"})
 
     assert response.status_code == 200
     assert response.json()["result"]["success"] is True
@@ -512,6 +520,8 @@ def test_incident_run_with_aws_k8s():
         captured.update(kwargs)
         return _MOCK_PIPELINE_REPORT
 
+    from app.security import rbac as _rbac_mod
+    _rbac_mod.assign_role("pipeline-test-user", "admin")
     with patch("app.orchestrator.main.run_incident_pipeline", side_effect=fake_pipeline):
         response = client.post("/incident/run", json={
             "incident_id":    "INC-002",
@@ -521,7 +531,7 @@ def test_incident_run_with_aws_k8s():
             "k8s":            {"namespace": "production"},
             "auto_remediate": True,
             "hours":          4,
-        })
+        }, headers={"X-User": "pipeline-test-user"})
     assert response.status_code == 200
     assert captured["incident_id"] == "INC-002"
     assert captured["severity"] == "critical"
@@ -675,3 +685,382 @@ def test_github_create_incident_pr_duplicate_branch():
     assert result["pr_number"] == 99
     # create_git_ref should NOT have been called (branch already existed)
     mock_repo.create_git_ref.assert_not_called()
+
+
+# ── RBAC guards ────────────────────────────────────────────────
+
+def test_k8s_restart_no_user_header():
+    """k8s/restart returns 403 when X-User header is missing."""
+    response = client.post("/k8s/restart", json={"namespace": "default", "deployment": "my-app"})
+    assert response.status_code == 403
+    assert "X-User header required" in response.json()["detail"]
+
+
+def test_k8s_scale_no_user_header():
+    """k8s/scale returns 403 when X-User header is missing."""
+    response = client.post("/k8s/scale",
+                           json={"namespace": "default", "deployment": "my-app", "replicas": 3})
+    assert response.status_code == 403
+
+
+def test_k8s_restart_insufficient_role():
+    """k8s/restart returns 403 when user lacks deploy permission."""
+    response = client.post(
+        "/k8s/restart",
+        json={"namespace": "default", "deployment": "my-app"},
+        headers={"X-User": "readonly-user"},   # no role assigned → no permission
+    )
+    assert response.status_code == 403
+
+
+def test_k8s_restart_with_deploy_permission():
+    """k8s/restart succeeds when user has deploy permission."""
+    from app.security import rbac as _rbac_mod
+    _rbac_mod.assign_role("deploy-user", "developer")   # developer has deploy permission
+    with patch("app.orchestrator.main.restart_deployment",
+               return_value={"success": True, "deployment": "my-app"}):
+        response = client.post(
+            "/k8s/restart",
+            json={"namespace": "default", "deployment": "my-app"},
+            headers={"X-User": "deploy-user"},
+        )
+    assert response.status_code == 200
+
+
+def test_incident_run_auto_remediate_requires_user():
+    """POST /incident/run with auto_remediate=true requires X-User with deploy permission."""
+    response = client.post("/incident/run", json={
+        "incident_id":    "INC-RBAC",
+        "description":    "test",
+        "auto_remediate": True,
+    })
+    assert response.status_code == 403
+
+
+def test_incident_run_no_remediate_no_auth_needed():
+    """POST /incident/run with auto_remediate=false doesn't need X-User."""
+    with patch("app.orchestrator.main.run_incident_pipeline",
+               return_value=_MOCK_PIPELINE_REPORT):
+        response = client.post("/incident/run", json={
+            "incident_id":    "INC-NORBAC",
+            "description":    "test",
+            "auto_remediate": False,
+        })
+    assert response.status_code == 200
+
+
+# ── GitHub PR review endpoint ──────────────────────────────────
+
+def test_github_review_pr_success():
+    """POST /github/review-pr returns review when GitHub and Claude are mocked."""
+    mock_pr_data = {
+        "success":     True,
+        "number":      42,
+        "title":       "Add new feature",
+        "author":      "dev",
+        "base_branch": "main",
+        "head_branch": "feature/xyz",
+        "body":        "Description",
+        "additions":   50,
+        "deletions":   10,
+        "url":         "https://github.com/test/pr/42",
+        "files":       [{"filename": "app.py", "status": "modified",
+                         "additions": 50, "deletions": 10, "patch": "@@ -1 +1 @@\n+new line"}],
+    }
+    mock_review = {
+        "verdict":           "approve",
+        "summary":           "Looks good overall.",
+        "issues":            [],
+        "security_concerns": [],
+        "infra_changes":     [],
+        "recommendations":   ["Add tests"],
+        "comment":           "LGTM",
+    }
+    with patch("app.orchestrator.main.get_pr_for_review", return_value=mock_pr_data), \
+         patch("app.orchestrator.main.review_pr", return_value=mock_review):
+        response = client.post("/github/review-pr", json={"pr_number": 42})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["pr_number"] == 42
+    assert data["review"]["verdict"] == "approve"
+
+
+def test_github_review_pr_github_error():
+    """POST /github/review-pr returns 400 when GitHub fetch fails."""
+    with patch("app.orchestrator.main.get_pr_for_review",
+               return_value={"success": False, "error": "Not Found"}):
+        response = client.post("/github/review-pr", json={"pr_number": 999})
+    assert response.status_code == 400
+    assert "Not Found" in response.json()["detail"]
+
+
+def test_github_review_pr_post_comment():
+    """POST /github/review-pr posts comment when post_comment=true."""
+    mock_pr_data = {
+        "success": True, "number": 10, "title": "Fix bug", "author": "dev",
+        "base_branch": "main", "head_branch": "fix/bug", "body": "",
+        "additions": 5, "deletions": 2, "url": "https://github.com/test/pr/10",
+        "files": [],
+    }
+    mock_review = {"verdict": "request_changes", "summary": "Issues found.",
+                   "issues": [{"severity": "high", "file": "main.py", "description": "SQL injection"}],
+                   "security_concerns": ["SQL injection risk"],
+                   "infra_changes": [], "recommendations": [], "comment": "Please fix SQL injection"}
+    with patch("app.orchestrator.main.get_pr_for_review", return_value=mock_pr_data), \
+         patch("app.orchestrator.main.review_pr", return_value=mock_review), \
+         patch("app.orchestrator.main.post_pr_review_comment",
+               return_value={"success": True, "pr_number": 10}) as mock_post:
+        response = client.post("/github/review-pr",
+                               json={"pr_number": 10, "post_comment": True})
+    assert response.status_code == 200
+    mock_post.assert_called_once_with(10, "Please fix SQL injection")
+    assert response.json()["comment_posted"]["success"] is True
+
+
+# ── Predictive scaling endpoint ────────────────────────────────
+
+def test_aws_predict_scaling_success():
+    """POST /aws/predict-scaling returns prediction when mocked."""
+    mock_metrics = {"resource_type": "ecs", "resource_id": "my-cluster",
+                    "cpu": {"datapoints": [{"Average": 82.0}]}}
+    mock_prediction = {
+        "should_scale": True, "direction": "up", "confidence": 0.87,
+        "urgency": "soon", "current_utilization": "CPU 82% avg",
+        "trend": "increasing", "reasoning": "CPU trending up over 6h",
+        "recommended_action": "Scale ECS service to 6 tasks",
+        "predicted_breach_in_minutes": 45,
+    }
+    with patch("app.orchestrator.main.get_scaling_metrics", return_value=mock_metrics), \
+         patch("app.orchestrator.main.predict_scaling", return_value=mock_prediction):
+        response = client.post("/aws/predict-scaling",
+                               json={"resource_type": "ecs", "resource_id": "my-cluster"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["prediction"]["should_scale"] is True
+    assert data["prediction"]["direction"] == "up"
+    assert data["prediction"]["confidence"] == 0.87
+    assert data["resource_type"] == "ecs"
+
+
+# ── Claude review_pr / predict_scaling functions ───────────────
+
+def test_claude_review_pr_no_api_key():
+    """review_pr returns error dict when no API key configured."""
+    from app.llm.claude import review_pr as _review_pr
+    with patch("app.llm.claude.client", None):
+        result = _review_pr({"title": "test", "files": []})
+    assert "error" in result
+    assert result["issues"] == []
+
+
+def test_claude_predict_scaling_no_api_key():
+    """predict_scaling returns safe default when no API key configured."""
+    from app.llm.claude import predict_scaling as _predict_scaling
+    with patch("app.llm.claude.client", None):
+        result = _predict_scaling({"resource_type": "ecs"})
+    assert result["should_scale"] is False
+    assert "error" in result
+
+
+# ── Auto-patch: file_patches from AI used in PR ────────────────
+
+def test_pipeline_auto_patch_uses_file_patches():
+    """_exec_github_pr uses file_patches from AI action params."""
+    from app.agents.incident_pipeline import _exec_github_pr
+
+    patches = [{"path": "requirements.txt", "content": "flask==2.3.0\n"}]
+    synthesis = {"root_cause": "Old flask version", "findings": ["Flask 1.x CVE"]}
+    params = {"title": "Fix deps", "body": "Update flask", "file_patches": patches}
+
+    with patch("app.agents.incident_pipeline.github.create_incident_pr",
+               return_value={"success": True, "pr_number": 7, "url": "https://github.com/test/pr/7"}) as mock_pr:
+        result = _exec_github_pr("INC-PATCH", params, synthesis)
+
+    assert result["success"] is True
+    # Verify file_patches were passed as file_changes
+    call_kwargs = mock_pr.call_args[1]
+    assert call_kwargs["file_changes"] == patches
+
+
+# ── Pre-deployment assessment ──────────────────────────────────
+
+_MOCK_ASSESSMENT = {
+    "go_no_go":    "go_with_caution",
+    "risk_level":  "medium",
+    "risk_score":  0.45,
+    "summary":     "Cluster is healthy but 1 alarm active.",
+    "concerns":    ["Active CloudWatch alarm: HighCPU"],
+    "checklist":   [{"item": "Verify rollback plan", "required": True}],
+    "recommendations": ["Deploy during low-traffic window"],
+    "safe_window": "After 22:00 UTC",
+}
+
+
+def test_deploy_assess_no_user():
+    """POST /deploy/assess returns 403 without X-User header."""
+    response = client.post("/deploy/assess",
+                           json={"deployment": "api-server", "namespace": "prod"})
+    assert response.status_code == 403
+
+
+def test_deploy_assess_success():
+    """POST /deploy/assess returns assessment when all deps mocked."""
+    from app.security import rbac as _rbac_mod
+    _rbac_mod.assign_role("sre-user", "developer")
+
+    with patch("app.orchestrator.main.check_k8s_cluster",
+               return_value={"status": "healthy", "nodes": 3}), \
+         patch("app.orchestrator.main.check_k8s_pods",
+               return_value={"pods": [], "running": 0}), \
+         patch("app.orchestrator.main.check_k8s_deployments",
+               return_value={"deployments": []}), \
+         patch("app.orchestrator.main.list_cloudwatch_alarms",
+               return_value={"alarms": [], "count": 0}), \
+         patch("app.orchestrator.main._get_recent_commits",
+               return_value={"success": True, "commits": [], "count": 0}), \
+         patch("app.orchestrator.main.search_similar_incidents",
+               return_value=[]), \
+         patch("app.orchestrator.main.assess_deployment",
+               return_value=_MOCK_ASSESSMENT):
+        response = client.post(
+            "/deploy/assess",
+            json={"deployment": "api-server", "namespace": "prod",
+                  "new_image": "myapp:v2.1", "description": "Add new feature"},
+            headers={"X-User": "sre-user"},
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["deployment"] == "api-server"
+    assert data["assessment"]["go_no_go"] == "go_with_caution"
+    assert data["assessment"]["risk_score"] == 0.45
+
+
+def test_deploy_assess_viewer_role_blocked():
+    """Viewer role cannot access /deploy/assess."""
+    from app.security import rbac as _rbac_mod
+    _rbac_mod.assign_role("viewer-user", "viewer")
+    response = client.post("/deploy/assess",
+                           json={"deployment": "api-server"},
+                           headers={"X-User": "viewer-user"})
+    assert response.status_code == 403
+    assert "lacks" in response.json()["detail"]
+
+
+# ── Jira webhook → auto PR ─────────────────────────────────────
+
+_JIRA_CHANGE_REQUEST_PAYLOAD = {
+    "webhookEvent": "jira:issue_created",
+    "issue": {
+        "key": "DEVOPS-42",
+        "fields": {
+            "summary":     "Update Flask version to 2.3.0 to fix CVE-2023-1234",
+            "description": "Flask 1.x has a known CVE. Update requirements.txt to flask==2.3.0",
+            "issuetype":   {"name": "Change Request"},
+            "reporter":    {"displayName": "Nagaraj"},
+            "labels":      [],
+        },
+    },
+}
+
+_MOCK_PR_PLAN = {
+    "pr_title":     "fix(deps): update Flask to 2.3.0 [DEVOPS-42]",
+    "pr_body":      "Resolves DEVOPS-42\n\nUpdates Flask to fix CVE-2023-1234.",
+    "branch_name":  "jira/devops-42-update-flask",
+    "target_files": ["requirements.txt"],
+    "file_patches": [{"path": "requirements.txt", "content": "flask==2.3.0\n"}],
+    "confidence":   0.92,
+}
+
+
+def test_jira_webhook_creates_pr():
+    """POST /jira/webhook creates a PR and comments on Jira for change requests."""
+    with patch("app.orchestrator.main.interpret_jira_for_pr", return_value=_MOCK_PR_PLAN), \
+         patch("app.orchestrator.main.create_incident_pr",
+               return_value={"success": True, "pr_number": 55,
+                             "branch": "jira/devops-42-update-flask",
+                             "url": "https://github.com/test/pr/55"}), \
+         patch("app.orchestrator.main.jira_add_comment",
+               return_value={"success": True, "comment_id": "10001"}):
+        response = client.post("/jira/webhook", json=_JIRA_CHANGE_REQUEST_PAYLOAD)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["issue_key"] == "DEVOPS-42"
+    assert data["pr_created"]["success"] is True
+    assert data["pr_created"]["pr_number"] == 55
+    assert data["jira_commented"]["success"] is True
+
+
+def test_jira_webhook_skips_non_change_request():
+    """POST /jira/webhook skips tickets that are not change requests."""
+    payload = {
+        "webhookEvent": "jira:issue_created",
+        "issue": {
+            "key": "DEVOPS-99",
+            "fields": {
+                "summary":   "Investigate slow query",
+                "issuetype": {"name": "Bug"},
+                "labels":    [],
+                "reporter":  {"displayName": "Dev"},
+                "description": "",
+            },
+        },
+    }
+    response = client.post("/jira/webhook", json=payload)
+    assert response.status_code == 200
+    assert response.json()["skipped"] is True
+
+
+def test_jira_webhook_auto_pr_label_triggers():
+    """POST /jira/webhook triggers for any issue type when 'auto-pr' label is set."""
+    payload = {
+        "webhookEvent": "jira:issue_created",
+        "issue": {
+            "key": "DEVOPS-100",
+            "fields": {
+                "summary":     "Update Nginx config",
+                "description": "Change nginx.conf worker_processes to 4",
+                "issuetype":   {"name": "Bug"},   # Not a change request
+                "labels":      ["auto-pr"],        # But has the label
+                "reporter":    {"displayName": "Dev"},
+            },
+        },
+    }
+    with patch("app.orchestrator.main.interpret_jira_for_pr",
+               return_value={**_MOCK_PR_PLAN, "pr_title": "Update Nginx config [DEVOPS-100]"}), \
+         patch("app.orchestrator.main.create_incident_pr",
+               return_value={"success": True, "pr_number": 56,
+                             "branch": "jira/devops-100-nginx", "url": "https://github.com/test/pr/56"}), \
+         patch("app.orchestrator.main.jira_add_comment",
+               return_value={"success": True, "comment_id": "10002"}):
+        response = client.post("/jira/webhook", json=payload)
+    assert response.status_code == 200
+    assert response.json()["pr_created"]["success"] is True
+
+
+def test_jira_webhook_no_issue_key():
+    """POST /jira/webhook skips gracefully when issue key is missing."""
+    response = client.post("/jira/webhook", json={"webhookEvent": "jira:issue_created", "issue": {}})
+    assert response.status_code == 200
+    assert response.json()["skipped"] is True
+
+
+# ── Claude assess_deployment / interpret_jira_for_pr ──────────
+
+def test_claude_assess_deployment_no_api_key():
+    """assess_deployment returns no_go when no API key."""
+    from app.llm.claude import assess_deployment as _assess
+    with patch("app.llm.claude.client", None):
+        result = _assess({"deployment": "api", "namespace": "prod"})
+    assert result["go_no_go"] == "no_go"
+    assert "error" in result
+
+
+def test_claude_interpret_jira_no_api_key():
+    """interpret_jira_for_pr returns safe defaults when no API key."""
+    from app.llm.claude import interpret_jira_for_pr as _interp
+    with patch("app.llm.claude.client", None):
+        result = _interp({"key": "DEV-1", "summary": "Update deps", "labels": []})
+    assert result["pr_title"] == "Update deps"
+    assert result["file_patches"] == []
+    assert "jira/dev-1" in result["branch_name"]
