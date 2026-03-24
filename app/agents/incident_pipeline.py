@@ -1,0 +1,304 @@
+"""Autonomous end-to-end incident response pipeline.
+
+Flow:
+  1. Collect observability data in parallel (AWS + K8s + GitHub)
+  2. AI synthesis  → structured action plan
+  3. Execute actions (K8s restarts/scale, GitHub PR, Jira, Slack, OpsGenie)
+  4. Store incident in ChromaDB memory
+  5. Return full incident report
+"""
+
+import datetime
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from app.integrations import aws_ops, github, k8s_ops, jira, opsgenie, slack
+from app.llm.claude import synthesize_incident
+from app.memory.vector_db import store_incident
+from app.plugins import k8s_checker
+
+
+# ── Data collection ────────────────────────────────────────────
+
+
+def _unavailable(source: str, reason: str) -> dict:
+    """Sentinel dict Claude can clearly identify as 'data not available'."""
+    return {
+        "_data_available": False,
+        "_source":         source,
+        "_reason":         reason,
+        "_note":           "No real observability data — base analysis on incident description only.",
+    }
+
+
+def _collect_aws(aws_cfg: dict, hours: int) -> dict:
+    if not aws_cfg or not aws_cfg.get("resource_type"):
+        return _unavailable("aws", "no aws config provided")
+    try:
+        result = aws_ops.collect_diagnosis_context(
+            resource_type=aws_cfg.get("resource_type", ""),
+            resource_id=aws_cfg.get("resource_id", ""),
+            log_group=aws_cfg.get("log_group", ""),
+            hours=hours,
+        )
+        # If the result itself signals an error, wrap it clearly
+        if isinstance(result, dict) and result.get("error"):
+            return _unavailable("aws", result["error"])
+        return result
+    except Exception as exc:
+        return _unavailable("aws", str(exc))
+
+
+def _collect_k8s(k8s_cfg: dict) -> dict:
+    namespace = k8s_cfg.get("namespace", "default") if k8s_cfg else "default"
+    try:
+        cluster = k8s_checker.check_k8s_cluster()
+        # K8s not configured — surface clearly
+        if isinstance(cluster, dict) and cluster.get("status") == "error":
+            return _unavailable("k8s", cluster.get("details", "K8s unavailable"))
+        pods    = k8s_checker.check_k8s_pods(namespace)
+        deploys = k8s_checker.check_k8s_deployments(namespace)
+        return {
+            "_data_available": True,
+            "cluster_summary": cluster,
+            "pods":            pods,
+            "deployments":     deploys,
+            "namespace":       namespace,
+        }
+    except Exception as exc:
+        return _unavailable("k8s", str(exc))
+
+
+def _collect_github(hours: int) -> dict:
+    try:
+        commits = github.get_recent_commits(hours=hours)
+        prs     = github.get_recent_prs(hours=hours * 12)  # wider window for PRs
+        if not commits.get("success") and not prs.get("success"):
+            return _unavailable("github", commits.get("error", "GitHub unavailable"))
+        return {
+            "_data_available": True,
+            "recent_commits":  commits,
+            "recent_prs":      prs,
+        }
+    except Exception as exc:
+        return _unavailable("github", str(exc))
+
+
+def _collect_all(aws_cfg: dict, k8s_cfg: dict, hours: int) -> dict:
+    """Run all data collectors concurrently and return combined context."""
+    results = {}
+    tasks = {
+        "aws":    lambda: _collect_aws(aws_cfg, hours),
+        "k8s":    lambda: _collect_k8s(k8s_cfg),
+        "github": lambda: _collect_github(hours),
+    }
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(fn): name for name, fn in tasks.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                results[name] = future.result()
+            except Exception as exc:
+                results[name] = _unavailable(name, str(exc))
+    return results
+
+
+# ── Action executors ───────────────────────────────────────────
+
+
+def _exec_k8s_restart(params: dict) -> dict:
+    ns   = params.get("namespace", "default")
+    dep  = params.get("deployment", "")
+    if not dep:
+        return {"success": False, "error": "deployment name required"}
+    return k8s_ops.restart_deployment(ns, dep)
+
+
+def _exec_k8s_scale(params: dict) -> dict:
+    ns       = params.get("namespace", "default")
+    dep      = params.get("deployment", "")
+    replicas = params.get("replicas", 2)
+    if not dep:
+        return {"success": False, "error": "deployment name required"}
+    return k8s_ops.scale_deployment(ns, dep, replicas)
+
+
+def _exec_github_pr(incident_id: str, params: dict, synthesis: dict) -> dict:
+    title = params.get("title", f"Incident {incident_id} — AI suggested fix")
+    body  = params.get("body", synthesis.get("root_cause", ""))
+    # Append AI findings to PR body
+    findings = synthesis.get("findings", [])
+    if findings:
+        body += "\n\n## AI Findings\n" + "\n".join(f"- {f}" for f in findings)
+    body += f"\n\n*Auto-generated by AI DevOps Platform for incident `{incident_id}`*"
+    file_changes = params.get("file_changes")  # optional: [{path, content}]
+    return github.create_incident_pr(
+        incident_id=incident_id,
+        title=title,
+        body=body,
+        file_changes=file_changes,
+    )
+
+
+def _exec_jira(incident_id: str, params: dict, synthesis: dict) -> dict:
+    summary = params.get("title", f"[Incident {incident_id}] {synthesis.get('summary', '')}")
+    body    = params.get(
+        "body",
+        f"**Root Cause:** {synthesis.get('root_cause', 'Unknown')}\n\n"
+        f"**Confidence:** {synthesis.get('confidence', 0)}\n\n"
+        f"**Severity:** {synthesis.get('severity', 'unknown')}\n\n"
+        "**Findings:**\n" + "\n".join(f"- {f}" for f in synthesis.get("findings", []))
+    )
+    return jira.create_incident(summary=summary, description=body)
+
+
+def _exec_slack(incident_id: str, params: dict, synthesis: dict) -> dict:
+    topic = params.get(
+        "title",
+        f"Incident {incident_id} | {synthesis.get('severity', 'unknown').upper()} | "
+        f"{synthesis.get('summary', '')}"
+    )
+    return slack.create_war_room(topic=topic)
+
+
+def _exec_opsgenie(incident_id: str, params: dict, synthesis: dict) -> dict:
+    message = params.get("message", f"Incident {incident_id}: {synthesis.get('summary', '')}")
+    alias   = params.get("alias", f"incident-{incident_id}")
+    return opsgenie.notify_on_call(message=message, alias=alias)
+
+
+def _execute_actions(incident_id: str, actions: list, synthesis: dict,
+                     auto_remediate: bool) -> list:
+    """Execute each recommended action and return results."""
+    results = []
+    for action in actions:
+        action_type = action.get("type", "none")
+        params      = action.get("params", {})
+        reason      = action.get("reason", "")
+
+        if action_type == "none":
+            results.append({"type": "none", "skipped": True, "reason": reason})
+            continue
+
+        # Control-plane actions only run when auto_remediate is True
+        if action_type in ("k8s_restart", "k8s_scale") and not auto_remediate:
+            results.append({
+                "type":    action_type,
+                "skipped": True,
+                "reason":  "auto_remediate=false — manual approval required",
+                "params":  params,
+            })
+            continue
+
+        try:
+            if action_type == "k8s_restart":
+                res = _exec_k8s_restart(params)
+            elif action_type == "k8s_scale":
+                res = _exec_k8s_scale(params)
+            elif action_type == "github_pr":
+                res = _exec_github_pr(incident_id, params, synthesis)
+            elif action_type == "jira_ticket":
+                res = _exec_jira(incident_id, params, synthesis)
+            elif action_type == "slack_warroom":
+                res = _exec_slack(incident_id, params, synthesis)
+            elif action_type == "opsgenie_alert":
+                res = _exec_opsgenie(incident_id, params, synthesis)
+            else:
+                res = {"success": False, "error": f"Unknown action type: {action_type}"}
+
+            results.append({"type": action_type, "reason": reason, "result": res})
+        except Exception as exc:
+            results.append({
+                "type":   action_type,
+                "reason": reason,
+                "result": {"success": False, "error": str(exc), "trace": traceback.format_exc()},
+            })
+
+    return results
+
+
+# ── Main pipeline entry point ──────────────────────────────────
+
+
+def run_incident_pipeline(
+    incident_id: str,
+    description: str,
+    severity: str = "high",
+    aws_cfg: dict = None,
+    k8s_cfg: dict = None,
+    auto_remediate: bool = False,
+    hours: int = 2,
+) -> dict:
+    """Run the full autonomous incident response pipeline.
+
+    Returns a complete incident report dict.
+    """
+    started_at = datetime.datetime.utcnow().isoformat()
+
+    # ── Step 1: Collect all observability data ─────────────────
+    obs = _collect_all(aws_cfg or {}, k8s_cfg or {}, hours)
+
+    # ── Step 2: AI synthesis ───────────────────────────────────
+    synthesis = synthesize_incident({
+        "incident_id":    incident_id,
+        "description":    description,
+        "severity":       severity,
+        "aws_context":    obs.get("aws", {}),
+        "k8s_context":    obs.get("k8s", {}),
+        "github_context": obs.get("github", {}),
+    })
+
+    # ── Step 3: Execute recommended actions ────────────────────
+    actions_taken = _execute_actions(
+        incident_id    = incident_id,
+        actions        = synthesis.get("actions_to_take", []),
+        synthesis      = synthesis,
+        auto_remediate = auto_remediate,
+    )
+
+    # ── Step 4: Store in ChromaDB memory ──────────────────────
+    try:
+        store_incident({
+            "id":         incident_id,
+            "type":       "incident_pipeline",
+            "source":     "ai_orchestrator",
+            "payload": {
+                "description":    description,
+                "severity":       severity,
+                "root_cause":     synthesis.get("root_cause", ""),
+                "summary":        synthesis.get("summary", ""),
+                "actions_taken":  len(actions_taken),
+            },
+        })
+    except Exception:
+        pass  # memory failures should not block the report
+
+    # ── Step 5: Build and return full report ───────────────────
+    return {
+        "incident_id":          incident_id,
+        "started_at":           started_at,
+        "completed_at":         datetime.datetime.utcnow().isoformat(),
+        "description":          description,
+        "reported_severity":    severity,
+        # AI analysis
+        "summary":              synthesis.get("summary", ""),
+        "root_cause":           synthesis.get("root_cause", ""),
+        "confidence":           synthesis.get("confidence", 0.0),
+        "ai_severity":          synthesis.get("severity", severity),
+        "findings":             synthesis.get("findings", []),
+        # Observability data (summarised)
+        "observability": {
+            "aws_collected":    obs.get("aws", {}).get("_data_available", False),
+            "k8s_collected":    obs.get("k8s", {}).get("_data_available", False),
+            "github_collected": obs.get("github", {}).get("_data_available", False),
+        },
+        # Actions
+        "auto_remediate":       auto_remediate,
+        "actions_taken":        actions_taken,
+        # Raw context for downstream use / audit
+        "raw_context": {
+            "aws":    obs.get("aws", {}),
+            "k8s":    obs.get("k8s", {}),
+            "github": obs.get("github", {}),
+        },
+    }

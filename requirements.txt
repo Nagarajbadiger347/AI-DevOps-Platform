@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+langgraph
+anthropic
+slack_sdk
+jira
+opsgenie-sdk
+boto3
+pytest
+PyGithub
+chromadb
+kubernetes
