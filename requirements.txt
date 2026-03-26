@@ -1,6 +1,5 @@
 fastapi>=0.128.8
 uvicorn>=0.39.0
-langgraph>=0.6.11
 anthropic>=0.86.0
 slack_sdk>=3.41.0
 jira>=3.8.0

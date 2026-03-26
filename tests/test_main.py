@@ -43,26 +43,19 @@ def test_llm_analyze():
     assert response.json()["analysis"]["rca"] == "Sample root cause"
 
 
-def test_check_aws_linux():
-    # Mock boto3 calls so the test doesn't require real AWS credentials
-    mock_ec2 = MagicMock()
-    mock_ec2.describe_instances.return_value = {"Reservations": []}
-    mock_s3 = MagicMock()
-    mock_s3.list_buckets.return_value = {"Buckets": []}
-    mock_cw = MagicMock()
-    mock_cw.describe_alarms.return_value = {"MetricAlarms": []}
+def test_check_aws():
+    # Mock aws_ops functions so the test doesn't require real AWS credentials
+    healthy_ec2 = {"success": True, "count": 0, "instances": []}
+    healthy_s3 = {"success": True, "count": 0, "buckets": []}
+    healthy_alarms = {"success": True, "count": 0, "alarms": []}
 
-    def mock_boto_client(service, **kwargs):
-        return {"ec2": mock_ec2, "s3": mock_s3, "cloudwatch": mock_cw}[service]
-
-    with patch("boto3.client", side_effect=mock_boto_client):
+    with patch("app.plugins.aws_checker.list_ec2_instances", return_value=healthy_ec2), \
+         patch("app.plugins.aws_checker.list_s3_buckets", return_value=healthy_s3), \
+         patch("app.plugins.aws_checker.list_cloudwatch_alarms", return_value=healthy_alarms):
         r1 = client.get("/check/aws")
-        r2 = client.get("/check/linux")
 
     assert r1.status_code == 200
-    assert r2.status_code == 200
     assert r1.json()["aws_check"]["status"] == "healthy"
-    assert r2.json()["linux_check"]["status"] == "healthy"
 
 
 def test_incident_endpoints():

@@ -11,16 +11,22 @@ from kubernetes.client.rest import ApiException
 
 
 def _load_config() -> bool:
-    """Load K8s config. Returns True on success."""
+    """Load K8s config. Returns True on success.
+
+    Only connects if explicitly configured — never falls back to ~/.kube/config
+    automatically, to avoid silently using a local cluster the user didn't intend.
+    """
     if os.getenv("K8S_IN_CLUSTER", "").lower() == "true":
         try:
             config.load_incluster_config()
             return True
         except config.ConfigException:
             return False
-    kubeconfig = os.getenv("KUBECONFIG", "")
+    kubeconfig = os.getenv("KUBECONFIG", "").strip()
+    if not kubeconfig:
+        return False  # Not configured — don't silently use ~/.kube/config
     try:
-        config.load_kube_config(config_file=kubeconfig or None)
+        config.load_kube_config(config_file=kubeconfig)
         return True
     except config.ConfigException:
         return False

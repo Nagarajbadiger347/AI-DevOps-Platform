@@ -41,7 +41,7 @@ def _llm(system: str, messages: list, max_tokens: int = 1024) -> str:
     """Unified LLM call — Anthropic / Groq / Ollama (local, no key)."""
     if _provider == "anthropic":
         resp = client.messages.create(
-            model="claude-3-haiku-20240307",
+            model="claude-sonnet-4-6",
             max_tokens=max_tokens,
             system=system,
             messages=messages,
@@ -560,46 +560,55 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
 
 def chat_devops(message: str, history: list, context: dict) -> str:
-    """Conversational DevOps assistant with live context from all integrations."""
+    """Conversational DevOps assistant — answers any question, uses live context when relevant."""
     if not _provider:
-        return "No LLM configured. Install Ollama (free): https://ollama.com — or add ANTHROPIC_API_KEY / GROQ_API_KEY to .env"
+        return (
+            "No LLM configured. Add ANTHROPIC_API_KEY or GROQ_API_KEY to your .env file "
+            "(use the Secrets panel in the sidebar), then restart the server."
+        )
 
     configured = context.get("configured", [])
-    sources_str = ", ".join(configured) if configured else "none detected"
+    has_context = bool(configured)
+    sources_str = ", ".join(configured) if configured else "none"
 
-    SYSTEM = f"""You are an expert DevOps AI assistant with live observability data from: {sources_str}.
+    # Build the list of integrations that are NOT returning data
+    all_integrations = {"aws", "grafana", "k8s", "github", "gitlab"}
+    missing = sorted(all_integrations - set(configured))
 
-Data you have access to:
-- AWS: EC2 instances & status checks, CloudWatch alarms (firing/all), ECS services & stopped tasks, Lambda functions, RDS databases, S3 buckets, SQS queues, DynamoDB tables, Route53 health checks, CloudTrail recent events
-- Grafana: firing alerts and recent annotations (deployments, events)
-- Kubernetes: all pods with restart counts, deployments with ready/desired counts, cluster Warning events
-- GitHub: recent commits and pull requests
-- GitLab: recent pipelines, failed pipelines, deployments
+    SYSTEM = f"""You are an expert AI assistant embedded in a DevOps intelligence platform.
+You can answer any question — general knowledge, coding, architecture, debugging, cloud, Kubernetes, CI/CD, security, scripting, and more.
 
-When users report a problem:
-1. Scan ALL the provided context — not just AWS — to find relevant signals
-2. Correlate across sources: a GitLab pipeline failure + restarting K8s pods + a CloudWatch alarm may all be the same incident
-3. Name specific resource IDs, pod names, pipeline IDs, alarm names from the actual data
-4. Clearly flag anything that looks wrong (stopped instances, firing alarms, OOMKilled pods, failed pipelines)
-5. Give a concise root cause assessment and 2-3 specific actions
+CRITICAL RULE — NEVER FABRICATE INFRASTRUCTURE DATA:
+- Only reference resource names, pod names, instance IDs, alarm names, metrics, or logs that appear VERBATIM in the live context provided below.
+- If an integration is not configured or has no data, say so plainly. Do NOT invent example data, placeholder names, or hypothetical scenarios as if they were real.
+- If the user asks about infrastructure and you have no real data for it, respond with what IS configured and offer to help once they connect that integration.
 
-Format: short paragraphs and bullet points. Be direct and precise — this is live incident triage."""
+Currently configured integrations with live data: {sources_str if has_context else "none"}
+Integrations NOT configured / no data available: {", ".join(missing) if missing else "none"}
+
+Guidelines:
+- Be direct and conversational — match the tone of the question
+- For infrastructure questions WITH real context: reference only actual resource names/IDs from the data
+- For infrastructure questions WITHOUT real context: clearly state the integration is not connected, explain what to set in the Secrets panel to enable it
+- For general questions (concepts, how-tos, code): answer fully from your knowledge
+- For code/script requests: provide working code with brief explanation
+- Use markdown (bullets, code blocks) when it helps readability"""
 
     messages = []
-    for h in history[-10:]:
-        messages.append({"role": h["role"], "content": h["content"]})
+    for h in history[-12:]:
+        role = h.get("role", "user")
+        if role in ("user", "assistant"):
+            messages.append({"role": role, "content": h["content"]})
 
-    # Trim context to fit token budget — keep the most signal-rich parts first
-    ctx_str = json.dumps(context, default=str, indent=2)
-    if len(ctx_str) > 6000:
-        ctx_str = ctx_str[:6000] + "\n... (truncated)"
+    # Attach real context only if we have it; otherwise tell the model explicitly there's none
+    if has_context:
+        raw = json.dumps(context, default=str)
+        if len(raw) > 8000:
+            raw = raw[:8000] + "\n...(truncated)"
+        ctx_block = f"\n\n[LIVE CONTEXT — use only this data, do not invent anything]\n{raw}\n[END CONTEXT]"
+    else:
+        ctx_block = "\n\n[NO LIVE CONTEXT — no integrations are connected. Do not fabricate any infrastructure data.]"
 
-    full_message = f"""{message}
+    messages.append({"role": "user", "content": message + ctx_block})
 
---- Live Infrastructure Context ({sources_str}) ---
-{ctx_str}
---- End Context ---"""
-
-    messages.append({"role": "user", "content": full_message})
-
-    return _llm(SYSTEM, messages, max_tokens=1500)
+    return _llm(SYSTEM, messages, max_tokens=2048)
