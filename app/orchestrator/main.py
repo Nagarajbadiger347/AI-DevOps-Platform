@@ -1,8 +1,14 @@
 import re
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Dict
 
 from app.correlation.engine import correlate_events
 from app.plugins.aws_checker import check_aws_infrastructure
@@ -19,13 +25,16 @@ from app.integrations.aws_ops import (
     list_rds_instances, get_rds_events,
     get_target_health, get_cloudtrail_events,
     collect_diagnosis_context, get_scaling_metrics,
+    list_s3_buckets, list_sqs_queues, list_dynamodb_tables,
+    list_route53_healthchecks, list_sns_topics,
 )
 from app.llm.claude import (
     analyze_context, diagnose_aws_resource, review_pr, predict_scaling,
-    assess_deployment, interpret_jira_for_pr,
+    assess_deployment, interpret_jira_for_pr, chat_devops,
 )
 from app.agents.incident_pipeline import run_incident_pipeline
-from app.integrations.slack import create_war_room
+from app.integrations.slack import create_war_room, create_incident_channel, post_incident_summary, post_message
+from app.integrations.universal_collector import collect_all_context, summarize_health
 from app.integrations.jira import create_incident, add_comment as jira_add_comment
 from app.integrations.opsgenie import notify_on_call
 from app.integrations.github import (
@@ -60,6 +69,15 @@ app = FastAPI(
     title="AI DevOps Intelligence Platform",
     description="Autonomous DevOps management powered by multi-agent AI — built by Nagaraj",
     version="1.0.0",
+)
+
+_CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 class Event(BaseModel):
@@ -127,290 +145,604 @@ def root():
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>AI DevOps Platform — Nagaraj</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>AI DevOps Platform</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
   <style>
     *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
     :root{
-      --bg:#060810;--surface:#0c0f1d;--border:#1a1f38;
-      --purple:#7c3aed;--indigo:#4f46e5;--cyan:#06b6d4;--green:#10b981;
-      --amber:#f59e0b;--pink:#ec4899;--text:#f1f5f9;--muted:#64748b;
+      --bg:#0d1117;--bg2:#010409;--surface:#161b22;--surface2:#21262d;
+      --border:#30363d;--border2:#484f58;
+      --text:#e6edf3;--text2:#8b949e;--muted:#484f58;
+      --blue:#58a6ff;--green:#3fb950;--purple:#bc8cff;--red:#ff7b72;--amber:#d29922;
     }
-    body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:2rem 1rem;overflow-x:hidden}
-    body::before,body::after{content:'';position:fixed;border-radius:50%;filter:blur(130px);opacity:.14;pointer-events:none;animation:drift 14s ease-in-out infinite alternate}
-    body::before{width:700px;height:700px;background:radial-gradient(circle,#7c3aed,#4f46e5);top:-250px;left:-200px}
-    body::after{width:500px;height:500px;background:radial-gradient(circle,#06b6d4,#10b981);bottom:-150px;right:-150px;animation-delay:-7s}
-    @keyframes drift{from{transform:translate(0,0) scale(1)}to{transform:translate(50px,40px) scale(1.1)}}
-    .wrap{position:relative;z-index:1;max-width:1000px;margin:0 auto}
-    /* HERO */
-    .hero{text-align:center;padding:2rem 0 2.5rem}
-    .pill{display:inline-flex;align-items:center;gap:7px;background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);color:#34d399;border-radius:999px;font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:5px 14px;margin-bottom:1.4rem}
-    .dot{width:7px;height:7px;background:#34d399;border-radius:50%;animation:blink 2s ease-in-out infinite}
-    @keyframes blink{0%,100%{opacity:1;box-shadow:0 0 6px #34d399}50%{opacity:.2}}
-    h1{font-size:clamp(2rem,4.5vw,3rem);font-weight:900;line-height:1.1;letter-spacing:-.03em;margin-bottom:.9rem}
-    .grad{background:linear-gradient(135deg,#a78bfa,#60a5fa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-    .sub{color:var(--muted);font-size:.95rem;max-width:500px;margin:0 auto .9rem;line-height:1.65}
-    .author{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,rgba(124,58,237,.15),rgba(6,182,212,.15));border:1px solid rgba(124,58,237,.3);border-radius:999px;padding:5px 16px;font-size:.82rem;color:#c4b5fd;font-weight:500}
-    .av{width:24px;height:24px;background:linear-gradient(135deg,#7c3aed,#06b6d4);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.65rem;font-weight:700;color:#fff}
-    /* STATS */
-    .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.9rem;margin-bottom:1.8rem}
-    .stat{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.1rem 1rem;text-align:center;position:relative;overflow:hidden;transition:transform .2s,box-shadow .2s}
-    .stat:hover{transform:translateY(-3px)}
-    .stat::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:3px 3px 0 0}
-    .stat:nth-child(1)::before{background:linear-gradient(90deg,#7c3aed,#a78bfa)}
-    .stat:nth-child(2)::before{background:linear-gradient(90deg,#06b6d4,#67e8f9)}
-    .stat:nth-child(3)::before{background:linear-gradient(90deg,#10b981,#6ee7b7)}
-    .stat:nth-child(4)::before{background:linear-gradient(90deg,#f59e0b,#fcd34d)}
-    .stat:hover:nth-child(1){box-shadow:0 8px 30px rgba(124,58,237,.2)}
-    .stat:hover:nth-child(2){box-shadow:0 8px 30px rgba(6,182,212,.2)}
-    .stat:hover:nth-child(3){box-shadow:0 8px 30px rgba(16,185,129,.2)}
-    .stat:hover:nth-child(4){box-shadow:0 8px 30px rgba(245,158,11,.2)}
-    .sn{font-size:1.8rem;font-weight:800;line-height:1;margin-bottom:.2rem}
-    .stat:nth-child(1) .sn{color:#a78bfa}.stat:nth-child(2) .sn{color:#67e8f9}
-    .stat:nth-child(3) .sn{color:#6ee7b7}.stat:nth-child(4) .sn{color:#fcd34d}
-    .sl{font-size:.7rem;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.07em}
-    /* SEARCH */
-    .search-wrap{position:relative;margin-bottom:1rem}
-    .search-wrap svg{position:absolute;left:.85rem;top:50%;transform:translateY(-50%);opacity:.4;pointer-events:none}
-    #search{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.65rem .9rem .65rem 2.5rem;color:var(--text);font-size:.83rem;font-family:'Inter',sans-serif;outline:none;transition:border-color .18s}
-    #search:focus{border-color:rgba(124,58,237,.5);box-shadow:0 0 0 3px rgba(124,58,237,.1)}
+    html{scroll-behavior:smooth}
+    body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex}
+    ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+    .sidebar{width:215px;flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;height:100vh;position:sticky;top:0;overflow-y:auto}
+    .sb-header{padding:14px 14px 12px;border-bottom:1px solid var(--border)}
+    .logo{display:flex;align-items:center;gap:9px}
+    .logo-mark{width:28px;height:28px;background:#1f6feb;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+    .logo-name{font-size:13px;font-weight:700}
+    .logo-tag{font-size:10px;color:var(--text2);margin-top:1px}
+    .sb-section{padding:10px 8px 4px}
+    .sb-label{font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:0 6px 5px;display:block}
+    .nav-link{display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:5px;font-size:12.5px;font-weight:500;color:var(--text2);cursor:pointer;border:none;background:transparent;width:100%;text-align:left;text-decoration:none;transition:background .1s,color .1s}
+    .nav-link:hover{background:var(--surface2);color:var(--text)}
+    .nav-link.active{background:rgba(88,166,255,.1);color:var(--blue)}
+    .nav-link .ico{width:15px;font-size:12px;text-align:center;flex-shrink:0}
+    .nav-link .cnt{margin-left:auto;font-size:10px;background:var(--surface2);padding:1px 5px;border-radius:999px;color:var(--muted)}
+    .sb-footer{margin-top:auto;padding:10px 14px;border-top:1px solid var(--border)}
+    .user-row{display:flex;align-items:center;gap:8px}
+    .avatar{width:24px;height:24px;border-radius:50%;background:#1f6feb;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0}
+    .user-name{font-size:12px;font-weight:600}
+    .user-role{font-size:10px;color:var(--text2)}
+    .main{flex:1;min-width:0;display:flex;flex-direction:column;height:100vh;overflow-y:auto}
+    .topbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:8px 20px;display:flex;align-items:center;gap:10px;flex-shrink:0;position:sticky;top:0;z-index:10}
+    .status-dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2.5s ease-in-out infinite;flex-shrink:0}
+    @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(63,185,80,.4)}50%{box-shadow:0 0 0 5px rgba(63,185,80,0)}}
+    .status-lbl{font-size:11px;color:var(--green);font-weight:600}
+    .topbar-title{font-size:12.5px;font-weight:600;color:var(--text2);margin-left:6px}
+    .tb-spacer{flex:1}
+    .tb-btn{display:flex;align-items:center;gap:4px;padding:4px 9px;border-radius:5px;background:var(--surface2);border:1px solid var(--border);font-size:11px;font-weight:500;color:var(--text2);text-decoration:none;transition:all .12s;cursor:pointer}
+    .tb-btn:hover{background:var(--surface);border-color:var(--border2);color:var(--text)}
+    .tb-btn.pri{background:#1f6feb;border-color:#388bfd;color:#fff}
+    .tb-btn.pri:hover{background:#388bfd}
+    .content{padding:18px 20px;flex:1}
+    .stats-row{display:flex;gap:8px;margin-bottom:16px}
+    .stat-chip{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:10px 12px;display:flex;align-items:center;gap:9px}
+    .stat-ico{font-size:15px;flex-shrink:0}
+    .stat-val{font-size:17px;font-weight:700;line-height:1}
+    .stat-lbl{font-size:10px;color:var(--text2);margin-top:2px;font-weight:500}
+    .int-row{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:16px}
+    .int-chip{display:flex;align-items:center;gap:5px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:11px;font-weight:500;color:var(--text2)}
+    .int-chip.on{border-color:rgba(63,185,80,.3);color:#7ee787}
+    .int-dot{width:5px;height:5px;border-radius:50%;background:var(--muted)}
+    .int-chip.on .int-dot{background:var(--green);box-shadow:0 0 4px var(--green)}
+    .search-wrap{position:relative;margin-bottom:14px}
+    .search-wrap svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
+    #search{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:6px 9px 6px 30px;color:var(--text);font-size:12px;font-family:'Inter',sans-serif;outline:none;transition:border-color .15s}
+    #search:focus{border-color:#1f6feb}
     #search::placeholder{color:var(--muted)}
-    /* TABS */
-    .tabs{display:flex;gap:.4rem;margin-bottom:1.2rem;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:.4rem}
-    .tab{flex:1;padding:.5rem .8rem;border-radius:8px;border:none;background:transparent;color:var(--muted);font-size:.78rem;font-weight:600;cursor:pointer;transition:all .18s;font-family:'Inter',sans-serif}
-    .tab:hover{color:var(--text);background:rgba(255,255,255,.05)}
-    .tab.active{background:linear-gradient(135deg,rgba(124,58,237,.3),rgba(79,70,229,.3));color:#c4b5fd;border:1px solid rgba(124,58,237,.35)}
-    .tab-panel{display:none}.tab-panel.active{display:block}
-    /* CARD */
-    .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:1.6rem;margin-bottom:1rem}
-    .sh{display:flex;align-items:center;gap:8px;margin-bottom:1.1rem}
-    .si{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:.9rem}
-    .st{font-size:.72rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
-    /* ENDPOINTS */
-    .epg{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
-    .ep{display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:9px;padding:.65rem .9rem;text-decoration:none;color:inherit;transition:all .18s;position:relative;overflow:hidden}
-    .ep:hover{transform:translateY(-2px)}
-    .get-ep:hover{border-color:rgba(16,185,129,.4);box-shadow:0 4px 20px rgba(16,185,129,.12);background:rgba(16,185,129,.06)}
-    .get-ep:hover .ep-path{color:#6ee7b7}
-    .post-ep:hover{border-color:rgba(124,58,237,.45);box-shadow:0 4px 20px rgba(124,58,237,.15);background:rgba(124,58,237,.07)}
-    .post-ep:hover .ep-path{color:#c4b5fd}
-    .ws-ep:hover{border-color:rgba(245,158,11,.4);box-shadow:0 4px 20px rgba(245,158,11,.12);background:rgba(245,158,11,.06)}
-    .ws-ep:hover .ep-path{color:#fcd34d}
-    .ep::after{content:'→';position:absolute;right:.8rem;font-size:.72rem;opacity:0;transform:translateX(-4px);transition:opacity .15s,transform .15s;color:#64748b}
-    .ep:hover::after{opacity:1;transform:translateX(0)}
-    .badge{font-size:.58rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:3px 8px;border-radius:5px;flex-shrink:0;min-width:40px;text-align:center}
-    .get{background:rgba(16,185,129,.15);color:#34d399;border:1px solid rgba(16,185,129,.2)}
-    .post{background:rgba(124,58,237,.15);color:#a78bfa;border:1px solid rgba(124,58,237,.2)}
-    .ws{background:rgba(245,158,11,.15);color:#fcd34d;border:1px solid rgba(245,158,11,.2)}
-    .ep-text{flex:1;min-width:0;padding-right:1.2rem}
-    .ep-path{font-family:'JetBrains Mono',monospace;font-size:.77rem;color:#94a3b8;display:block;transition:color .15s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .ep-desc{font-size:.65rem;color:var(--muted);margin-top:1px}
-    /* PIPELINE */
-    .pipe-card{background:linear-gradient(135deg,rgba(236,72,153,.07),rgba(124,58,237,.07));border:1px solid rgba(236,72,153,.3);border-radius:16px;padding:1.6rem;margin-bottom:1rem}
-    .flow{display:flex;align-items:stretch;gap:0;margin:1.2rem 0;overflow-x:auto}
-    .fstep{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:.9rem .8rem;min-width:130px;flex:1;text-align:center}
-    .fstep .ic{font-size:1.4rem;display:block;margin-bottom:.35rem}
-    .fstep .lb{font-size:.72rem;font-weight:700;margin-bottom:.15rem}
-    .fstep .sb{font-size:.62rem;color:var(--muted);line-height:1.4}
-    .farr{display:flex;align-items:center;padding:0 .3rem;color:#334155;font-size:1.1rem;flex-shrink:0}
-    .fstep.s1{border-color:rgba(6,182,212,.3)}.fstep.s1 .lb{color:#67e8f9}
-    .fstep.s2{border-color:rgba(124,58,237,.3)}.fstep.s2 .lb{color:#c4b5fd}
-    .fstep.s3{border-color:rgba(236,72,153,.3)}.fstep.s3 .lb{color:#f9a8d4}
-    .fstep.s4{border-color:rgba(16,185,129,.3)}.fstep.s4 .lb{color:#6ee7b7}
-    .pipe-ep{display:flex;align-items:center;gap:10px;background:rgba(236,72,153,.08);border:1px solid rgba(236,72,153,.4);border-radius:10px;padding:.8rem 1rem;text-decoration:none;color:inherit;transition:all .18s;position:relative}
-    .pipe-ep:hover{background:rgba(236,72,153,.15);border-color:rgba(236,72,153,.6);transform:translateY(-2px);box-shadow:0 6px 24px rgba(236,72,153,.2)}
-    .pipe-ep:hover .ep-path{color:#fda4af}
-    .pipe-ep::after{content:'→';position:absolute;right:.8rem;font-size:.72rem;opacity:0;transform:translateX(-4px);transition:opacity .15s,transform .15s;color:#64748b}
-    .pipe-ep:hover::after{opacity:1;transform:translateX(0)}
-    .tags{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.9rem}
-    .tag{font-size:.7rem;padding:.25rem .7rem;border-radius:999px;font-weight:600;text-decoration:none;transition:all .15s;cursor:pointer}
-    .tag:hover{transform:translateY(-1px);opacity:.85}
-    pre.sample{background:#080b16;border:1px solid var(--border);border-radius:10px;padding:.9rem 1rem;font-family:'JetBrains Mono',monospace;font-size:.71rem;color:#e2e8f0;line-height:1.75;overflow-x:auto;margin-top:.7rem;white-space:pre-wrap}
-    /* LINKS */
-    .links{display:flex;gap:.7rem;margin-bottom:.9rem}
-    .lbtn{flex:1;display:flex;align-items:center;justify-content:center;gap:8px;padding:.75rem;border-radius:10px;font-size:.82rem;font-weight:600;text-decoration:none;transition:all .18s;border:1px solid transparent}
-    .lbtn.pri{background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;box-shadow:0 4px 20px rgba(124,58,237,.35)}
-    .lbtn.pri:hover{box-shadow:0 6px 30px rgba(124,58,237,.55);transform:translateY(-2px)}
-    .lbtn.sec{background:rgba(6,182,212,.08);color:#67e8f9;border-color:rgba(6,182,212,.25)}
-    .lbtn.sec:hover{background:rgba(6,182,212,.15);border-color:rgba(6,182,212,.5);transform:translateY(-2px)}
-    .lbtn.ter{background:rgba(16,185,129,.08);color:#6ee7b7;border-color:rgba(16,185,129,.25)}
-    .lbtn.ter:hover{background:rgba(16,185,129,.15);border-color:rgba(16,185,129,.5);transform:translateY(-2px)}
-    .footer{text-align:center;font-size:.71rem;color:#2d3748;padding-top:.3rem}
-    .footer span{color:#475569}
+    .ep-group{background:var(--surface);border:1px solid var(--border);border-radius:7px;overflow:hidden;margin-bottom:8px}
+    .ep-group-hdr{display:flex;align-items:center;gap:7px;padding:8px 12px;background:var(--surface2);border-bottom:1px solid var(--border)}
+    .g-ico{font-size:13px}
+    .g-name{font-size:12px;font-weight:600;color:var(--text);flex:1}
+    .g-cnt{font-size:10px;color:var(--muted)}
+    .ep-row{display:flex;align-items:center;gap:9px;padding:7px 12px;text-decoration:none;color:inherit;border-top:1px solid var(--border);transition:background .1s}
+    .ep-row:hover{background:rgba(255,255,255,.025)}
+    .ep-row:hover .ep-path{color:var(--blue)}
+    .method{font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:2px 5px;border-radius:3px;min-width:34px;text-align:center;flex-shrink:0}
+    .get{background:rgba(63,185,80,.1);color:#7ee787;border:1px solid rgba(63,185,80,.2)}
+    .post{background:rgba(188,140,255,.1);color:#d2a8ff;border:1px solid rgba(188,140,255,.2)}
+    .del{background:rgba(255,123,114,.1);color:#ffa198;border:1px solid rgba(255,123,114,.2)}
+    .ws{background:rgba(210,153,34,.1);color:#e3b341;border:1px solid rgba(210,153,34,.2)}
+    .ep-path{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .1s}
+    .ep-desc{font-size:11px;color:var(--muted);flex:1.5;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ep-lock{font-size:9px;opacity:.45;flex-shrink:0}
+    .ep-arrow{font-size:11px;color:var(--muted);opacity:0;transition:opacity .1s;flex-shrink:0}
+    .ep-row:hover .ep-arrow{opacity:1}
+    .pipeline-card{background:var(--surface);border:1px solid rgba(31,111,235,.4);border-radius:7px;overflow:hidden;margin-bottom:8px}
+    .pipeline-hdr{display:flex;align-items:center;gap:7px;padding:8px 12px;background:rgba(31,111,235,.08);border-bottom:1px solid rgba(31,111,235,.25)}
+    .pipeline-hdr .g-name{color:#79c0ff}
+    .flow-row{display:flex;align-items:center;padding:12px;gap:0;overflow-x:auto;border-bottom:1px solid var(--border)}
+    .fstep{flex:1;min-width:80px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:7px 8px;text-align:center}
+    .fstep-ic{font-size:15px;display:block;margin-bottom:3px}
+    .fstep-lb{font-size:10px;font-weight:600;color:var(--text)}
+    .fstep-sb{font-size:9px;color:var(--muted);margin-top:1px}
+    .farr{padding:0 6px;color:var(--muted);font-size:13px;flex-shrink:0}
+    pre.sample{margin:0;padding:9px 12px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2);line-height:1.65;overflow-x:auto;background:var(--bg2);white-space:pre-wrap}
+    /* SECRETS PANEL */
+    .secrets-panel{display:none}
+    .secrets-panel.active{display:block}
+    .sec-group{background:var(--surface);border:1px solid var(--border);border-radius:7px;overflow:hidden;margin-bottom:8px}
+    .sec-group-hdr{display:flex;align-items:center;gap:7px;padding:8px 12px;background:var(--surface2);border-bottom:1px solid var(--border)}
+    .sec-row{display:flex;align-items:center;gap:10px;padding:7px 12px;border-top:1px solid var(--border)}
+    .sec-key{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2);width:220px;flex-shrink:0}
+    .sec-input{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;transition:border-color .15s}
+    .sec-input:focus{border-color:var(--blue)}
+    .sec-input::placeholder{color:var(--muted)}
+    .sec-status{width:14px;flex-shrink:0;font-size:11px}
+    .sec-actions{display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px}
+    .sec-user-wrap{display:flex;flex-direction:column;gap:3px;flex:1}
+    .sec-user-lbl{font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.07em}
+    .sec-user-input{background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;transition:border-color .15s;width:160px}
+    .sec-user-input:focus{border-color:var(--blue)}
+    .save-btn{padding:5px 14px;background:#1f6feb;border:1px solid #388bfd;border-radius:5px;font-size:11px;font-weight:600;color:#fff;cursor:pointer;transition:background .12s;flex-shrink:0}
+    .save-btn:hover{background:#388bfd}
+    .save-btn:disabled{background:var(--surface2);border-color:var(--border);color:var(--muted);cursor:not-allowed}
+    .sec-msg{font-size:11px;font-weight:500;padding:3px 8px;border-radius:4px;flex-shrink:0}
+    .sec-msg.ok{background:rgba(63,185,80,.1);color:#7ee787;border:1px solid rgba(63,185,80,.2)}
+    .sec-msg.err{background:rgba(255,123,114,.1);color:#ffa198;border:1px solid rgba(255,123,114,.2)}
+    .footer{padding:10px 20px;border-top:1px solid var(--border);text-align:center;font-size:11px;color:var(--muted);flex-shrink:0}
+    .footer span{color:var(--text2)}
+    .inc-result-hdr{display:flex;align-items:center;gap:7px;padding:8px 12px;background:var(--surface2);border-bottom:1px solid var(--border)}
+    .inc-result-hdr .g-name{font-size:12px;font-weight:600;flex:1}
+    .inc-result-hdr.ok .g-name{color:#7ee787}
+    .inc-result-hdr.err .g-name{color:#ffa198}
+    .inc-result-body{padding:12px;font-size:12px;line-height:1.7;color:var(--text2)}
+    .inc-result-body h4{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:12px 0 4px}
+    .inc-result-body h4:first-child{margin-top:0}
+    .inc-result-body p{color:var(--text);margin-bottom:4px}
+    .inc-action-item{display:flex;align-items:flex-start;gap:7px;padding:4px 0;border-top:1px solid var(--border);margin-top:4px}
+    .inc-action-type{font-size:9px;font-weight:700;text-transform:uppercase;padding:2px 5px;border-radius:3px;background:rgba(88,166,255,.12);color:var(--blue);border:1px solid rgba(88,166,255,.2);flex-shrink:0;margin-top:2px}
+    .inc-action-desc{font-size:11px;color:var(--text2)}
+    pre.inc-pre{background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text2);overflow-x:auto;white-space:pre-wrap;margin-top:4px}
+    /* CHAT PANEL */
+    .chat-panel{display:none;flex-direction:column;flex:1;min-height:0}
+    .chat-panel.active{display:flex}
+    .chat-messages{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+    .chat-messages::-webkit-scrollbar{width:4px}
+    .chat-messages::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+    .chat-bubble{max-width:78%;padding:9px 13px;border-radius:10px;font-size:12.5px;line-height:1.65;word-break:break-word;white-space:pre-wrap}
+    .chat-bubble.user{background:#1f6feb;color:#fff;align-self:flex-end;border-bottom-right-radius:3px}
+    .chat-bubble.ai{background:var(--surface);border:1px solid var(--border);color:var(--text);align-self:flex-start;border-bottom-left-radius:3px}
+    .chat-bubble.typing{color:var(--muted);font-style:italic}
+    .chat-meta{font-size:10px;color:var(--muted);margin-bottom:2px}
+    .chat-meta.right{text-align:right}
+    .chat-row{display:flex;flex-direction:column}
+    .chat-row.user{align-items:flex-end}
+    .chat-row.ai{align-items:flex-start}
+    .chat-input-bar{padding:12px 16px;border-top:1px solid var(--border);background:var(--bg2);display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
+    #chat-input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 11px;font-size:12.5px;font-family:'Inter',sans-serif;color:var(--text);outline:none;resize:none;max-height:120px;min-height:36px;line-height:1.5;transition:border-color .15s}
+    #chat-input:focus{border-color:#1f6feb}
+    #chat-input::placeholder{color:var(--muted)}
+    .chat-send-btn{padding:7px 14px;background:#1f6feb;border:1px solid #388bfd;border-radius:6px;font-size:12px;font-weight:600;color:#fff;cursor:pointer;transition:background .12s;flex-shrink:0}
+    .chat-send-btn:hover{background:#388bfd}
+    .chat-send-btn:disabled{background:var(--surface2);border-color:var(--border);color:var(--muted);cursor:not-allowed}
+    .chat-warroom-btn{padding:7px 11px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:11px;font-weight:600;color:var(--amber);cursor:pointer;transition:all .12s;flex-shrink:0}
+    .chat-warroom-btn:hover{background:rgba(210,153,34,.15);border-color:var(--amber)}
+    .chat-warroom-btn:disabled{opacity:.4;cursor:not-allowed}
+    .chat-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--muted);text-align:center;padding:20px}
+    .chat-empty-icon{font-size:36px;opacity:.4}
+    .chat-empty-title{font-size:13px;font-weight:600;color:var(--text2)}
+    .chat-empty-sub{font-size:11px;line-height:1.6;max-width:280px}
+    .chat-suggestion{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:11px;color:var(--text2);cursor:pointer;transition:all .12s;margin:2px}
+    .chat-suggestion:hover{background:var(--surface2);border-color:var(--border2);color:var(--text)}
+    .chat-suggestions{display:flex;flex-wrap:wrap;justify-content:center;gap:4px;margin-top:8px}
     .hidden{display:none!important}
-    @media(max-width:620px){
-      .stats{grid-template-columns:repeat(2,1fr)}
-      .epg{grid-template-columns:1fr}
-      .links{flex-direction:column}
-      .tabs{flex-wrap:wrap}
-      .flow{flex-direction:column}
-    }
+    @media(max-width:860px){.sidebar{display:none}.stats-row{flex-wrap:wrap}.stat-chip{min-width:calc(50% - 4px)}.ep-desc{display:none}}
   </style>
 </head>
 <body>
-<div class="wrap">
 
-  <div class="hero">
-    <div class="pill"><span class="dot"></span> System Online</div>
-    <h1>AI <span class="grad">DevOps Intelligence</span><br>Platform</h1>
-    <p class="sub">Autonomous incident management, root cause analysis, and multi-agent AI orchestration — built for production.</p>
-    <div class="author"><div class="av">N</div>&nbsp;Built by <strong>Nagaraj</strong></div>
-  </div>
-
-  <div class="stats">
-    <div class="stat"><div class="sn">35+</div><div class="sl">API Endpoints</div></div>
-    <div class="stat"><div class="sn">6</div><div class="sl">Integrations</div></div>
-    <div class="stat"><div class="sn">3</div><div class="sl">RBAC Roles</div></div>
-    <div class="stat"><div class="sn">v1.0</div><div class="sl">Version</div></div>
-  </div>
-
-  <div class="search-wrap">
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-    <input id="search" type="text" placeholder="Search endpoints  (e.g. k8s, aws, lambda, incident…)" oninput="filterEps(this.value)"/>
-  </div>
-
-  <div class="tabs">
-    <button class="tab active" onclick="switchTab('all',this)">⚡ All</button>
-    <button class="tab" onclick="switchTab('general',this)">General &amp; AI</button>
-    <button class="tab" onclick="switchTab('k8s',this)">☸ Kubernetes</button>
-    <button class="tab" onclick="switchTab('aws',this)">☁ AWS</button>
-    <button class="tab" onclick="switchTab('pipeline',this)">🤖 Pipeline</button>
-  </div>
-
-  <div id="tab-all" class="tab-panel active">
-
-    <div class="card" data-section="general">
-      <div class="sh"><div class="si" style="background:rgba(124,58,237,.15)">⚡</div><span class="st">General &amp; AI</span></div>
-      <div class="epg">
-        <a class="ep get-ep" href="/health" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/health</span><span class="ep-desc">System health status</span></div></a>
-        <a class="ep get-ep" href="/docs" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/docs</span><span class="ep-desc">Interactive Swagger UI</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/correlate_correlate_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/correlate</span><span class="ep-desc">Correlate events &amp; find patterns</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/llm_analyze_llm_analyze_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/llm/analyze</span><span class="ep-desc">Claude AI root cause analysis</span></div></a>
-        <a class="ep get-ep" href="/check/aws" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/check/aws</span><span class="ep-desc">AWS infra health check</span></div></a>
-        <a class="ep get-ep" href="/check/linux" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/check/linux</span><span class="ep-desc">Linux node health</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/incident_war_room_incident_war_room_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/incident/war-room</span><span class="ep-desc">Open Slack war room</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/incident_jira_incident_jira_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/incident/jira</span><span class="ep-desc">Create Jira incident ticket</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/memory_incident_memory_incidents_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/memory/incidents</span><span class="ep-desc">Store incident in ChromaDB</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/security_check_security_check_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/security/check</span><span class="ep-desc">RBAC access check</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/security_assign_role_security_roles_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/security/roles</span><span class="ep-desc">Assign role to user</span></div></a>
-        <a class="ep ws-ep" href="/docs#/default/websocket_events_realtime_events_ws" target="_blank" data-ep><span class="badge ws">WS</span><div class="ep-text"><span class="ep-path">/realtime/events</span><span class="ep-desc">Live event stream via WebSocket</span></div></a>
-      </div>
+<nav class="sidebar">
+  <div class="sb-header">
+    <div class="logo">
+      <div class="logo-mark">&#x1F916;</div>
+      <div><div class="logo-name">AI DevOps</div><div class="logo-tag">Intelligence Platform</div></div>
     </div>
-
-    <div class="card" data-section="k8s">
-      <div class="sh"><div class="si" style="background:rgba(6,182,212,.15)">☸</div><span class="st">Kubernetes</span></div>
-      <div class="epg">
-        <a class="ep get-ep" href="/check/k8s" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/check/k8s</span><span class="ep-desc">Cluster summary</span></div></a>
-        <a class="ep get-ep" href="/check/k8s/nodes" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/check/k8s/nodes</span><span class="ep-desc">Per-node ready status</span></div></a>
-        <a class="ep get-ep" href="/check/k8s/pods" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/check/k8s/pods</span><span class="ep-desc">Pod health by namespace</span></div></a>
-        <a class="ep get-ep" href="/check/k8s/deployments" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/check/k8s/deployments</span><span class="ep-desc">Deployment rollout status</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/k8s_restart_k8s_restart_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/k8s/restart</span><span class="ep-desc">Rolling restart a deployment</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/k8s_scale_k8s_scale_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/k8s/scale</span><span class="ep-desc">Scale deployment replicas</span></div></a>
-        <a class="ep get-ep" href="/k8s/logs?namespace=default&pod=my-pod&tail_lines=50" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/k8s/logs</span><span class="ep-desc">Fetch pod logs (tail N lines)</span></div></a>
-      </div>
+  </div>
+  <div class="sb-section">
+    <span class="sb-label">Navigation</span>
+    <button type="button" class="nav-link active" onclick="showView('endpoints','all',this)" data-v="endpoints" data-s="all"><span class="ico">&#x26A1;</span>All Endpoints<span class="cnt">40+</span></button>
+    <button type="button" class="nav-link" onclick="showView('endpoints','general',this)" data-v="endpoints" data-s="general"><span class="ico">&#x1F527;</span>General &amp; AI<span class="cnt">12</span></button>
+    <button type="button" class="nav-link" onclick="showView('endpoints','k8s',this)" data-v="endpoints" data-s="k8s"><span class="ico">&#x2638;</span>Kubernetes<span class="cnt">7</span></button>
+    <button type="button" class="nav-link" onclick="showView('endpoints','aws',this)" data-v="endpoints" data-s="aws"><span class="ico">&#x2601;</span>AWS<span class="cnt">16</span></button>
+    <button type="button" class="nav-link" onclick="showView('endpoints','pipeline',this)" data-v="endpoints" data-s="pipeline"><span class="ico">&#x1F916;</span>Pipeline<span class="cnt">1</span></button>
+    <button type="button" class="nav-link" onclick="showView('endpoints','deploy',this)" data-v="endpoints" data-s="deploy"><span class="ico">&#x1F680;</span>Deploy &amp; Jira<span class="cnt">4</span></button>
+  </div>
+  <div class="sb-section">
+    <span class="sb-label">Config</span>
+    <button type="button" class="nav-link" onclick="showView('secrets','',this)" data-v="secrets"><span class="ico">&#x1F511;</span>Secrets / Env Vars</button>
+    <button type="button" class="nav-link" onclick="showView('chat','',this)" data-v="chat"><span class="ico">&#x1F4AC;</span>AI Chat</button>
+  </div>
+  <div class="sb-section">
+    <span class="sb-label">Links</span>
+    <a class="nav-link" href="/docs" target="_blank"><span class="ico">&#x1F4D6;</span>Swagger UI</a>
+    <a class="nav-link" href="/redoc" target="_blank"><span class="ico">&#x1F4C4;</span>ReDoc</a>
+    <a class="nav-link" href="/health" target="_blank"><span class="ico">&#x1F49A;</span>Health Check</a>
+  </div>
+  <div class="sb-footer">
+    <div class="user-row">
+      <div class="avatar">N</div>
+      <div><div class="user-name">Nagaraj</div><div class="user-role">Platform Owner</div></div>
     </div>
+  </div>
+</nav>
 
-    <div class="card" data-section="aws">
-      <div class="sh"><div class="si" style="background:rgba(245,158,11,.15)">☁</div><span class="st">AWS Observability &amp; AI Diagnosis</span></div>
-      <div class="epg">
-        <a class="ep get-ep" href="/aws/ec2/instances" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/ec2/instances</span><span class="ep-desc">List EC2 instances &amp; states</span></div></a>
-        <a class="ep get-ep" href="/docs#/default/aws_ec2_status_aws_ec2_status_get" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/ec2/status</span><span class="ep-desc">EC2 system status checks</span></div></a>
-        <a class="ep get-ep" href="/docs#/default/aws_ec2_console_aws_ec2_console_get" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/ec2/console</span><span class="ep-desc">Serial console output (crash/boot)</span></div></a>
-        <a class="ep get-ep" href="/aws/logs/groups" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/logs/groups</span><span class="ep-desc">List CloudWatch Log Groups</span></div></a>
-        <a class="ep get-ep" href="/docs#/default/aws_logs_recent_aws_logs_recent_get" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/logs/recent</span><span class="ep-desc">Fetch recent log events</span></div></a>
-        <a class="ep get-ep" href="/docs#/default/aws_logs_search_aws_logs_search_get" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/logs/search</span><span class="ep-desc">Search logs by pattern</span></div></a>
-        <a class="ep get-ep" href="/aws/cloudwatch/alarms" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/cloudwatch/alarms</span><span class="ep-desc">Firing CloudWatch alarms</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/aws_cw_metrics_aws_cloudwatch_metrics_post" target="_blank" data-ep><span class="badge post">POST</span><div class="ep-text"><span class="ep-path">/aws/cloudwatch/metrics</span><span class="ep-desc">Fetch any CloudWatch metric series</span></div></a>
-        <a class="ep get-ep" href="/aws/ecs/services" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/ecs/services</span><span class="ep-desc">ECS running vs desired counts</span></div></a>
-        <a class="ep get-ep" href="/aws/ecs/stopped-tasks" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/ecs/stopped-tasks</span><span class="ep-desc">Stopped task stop-reasons &amp; exit codes</span></div></a>
-        <a class="ep get-ep" href="/docs#/default/aws_lambda_errors_aws_lambda_errors_get" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/lambda/errors</span><span class="ep-desc">Lambda error &amp; throttle metrics</span></div></a>
-        <a class="ep get-ep" href="/docs#/default/aws_rds_events_aws_rds_events_get" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/rds/events</span><span class="ep-desc">RDS events — failovers, restarts</span></div></a>
-        <a class="ep get-ep" href="/docs#/default/aws_elb_health_aws_elb_target_health_get" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/elb/target-health</span><span class="ep-desc">ALB target group health</span></div></a>
-        <a class="ep get-ep" href="/aws/cloudtrail/events" target="_blank" data-ep><span class="badge get">GET</span><div class="ep-text"><span class="ep-path">/aws/cloudtrail/events</span><span class="ep-desc">Recent API changes (who did what)</span></div></a>
-        <a class="ep post-ep" href="/docs#/default/aws_diagnose_aws_diagnose_post" target="_blank" data-ep style="border-color:rgba(124,58,237,.4);background:rgba(124,58,237,.07)"><span class="badge post" style="background:rgba(124,58,237,.25);color:#c4b5fd;border-color:rgba(124,58,237,.4)">POST</span><div class="ep-text"><span class="ep-path" style="color:#c4b5fd">/aws/diagnose</span><span class="ep-desc">AI root cause analysis from live AWS data</span></div></a>
-      </div>
-    </div>
+<div class="main">
+  <div class="topbar">
+    <div class="status-dot"></div>
+    <span class="status-lbl">System Online</span>
+    <span class="topbar-title">AI DevOps Intelligence Platform</span>
+    <div class="tb-spacer"></div>
+    <a class="tb-btn pri" href="/docs" target="_blank">&#x1F4D6; Swagger</a>
+    <a class="tb-btn" href="/health" target="_blank">Health</a>
+    <a class="tb-btn" href="/redoc" target="_blank">ReDoc</a>
+  </div>
 
-    <div class="pipe-card" data-section="pipeline">
-      <div class="sh">
-        <div class="si" style="background:linear-gradient(135deg,rgba(236,72,153,.3),rgba(124,58,237,.3));font-size:1rem">🤖</div>
-        <span class="st" style="background:linear-gradient(90deg,#ec4899,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent">Autonomous Incident Pipeline</span>
+  <div class="content" id="content-wrap">
+
+    <div id="view-endpoints">
+      <div class="stats-row">
+        <div class="stat-chip"><span class="stat-ico">&#x1F50C;</span><div><div class="stat-val">40+</div><div class="stat-lbl">API Endpoints</div></div></div>
+        <div class="stat-chip"><span class="stat-ico">&#x1F517;</span><div><div class="stat-val">7</div><div class="stat-lbl">Integrations</div></div></div>
+        <div class="stat-chip"><span class="stat-ico">&#x1F6E1;</span><div><div class="stat-val">3</div><div class="stat-lbl">RBAC Roles</div></div></div>
+        <div class="stat-chip"><span class="stat-ico">&#x2705;</span><div><div class="stat-val">68</div><div class="stat-lbl">Tests Passing</div></div></div>
       </div>
-      <p style="font-size:.82rem;color:#cbd5e1;line-height:1.65;margin-bottom:1rem">
-        One API call triggers the full response loop — collects data from
-        <strong style="color:#67e8f9">AWS</strong>, <strong style="color:#c4b5fd">Kubernetes</strong>, and
-        <strong style="color:#6ee7b7">GitHub</strong>, runs Claude AI root cause analysis, then executes remediation automatically.
-      </p>
-      <div class="flow">
-        <div class="fstep s1"><span class="ic">📡</span><div class="lb">Collect</div><div class="sb">AWS · K8s · GitHub<br>in parallel</div></div>
-        <div class="farr">›</div>
-        <div class="fstep s2"><span class="ic">🧠</span><div class="lb">Synthesize</div><div class="sb">Claude AI<br>root cause analysis</div></div>
-        <div class="farr">›</div>
-        <div class="fstep s3"><span class="ic">⚡</span><div class="lb">Remediate</div><div class="sb">K8s restart · GitHub PR<br>Jira · Slack · OpsGenie</div></div>
-        <div class="farr">›</div>
-        <div class="fstep s4"><span class="ic">📋</span><div class="lb">Report</div><div class="sb">Full incident report<br>stored in ChromaDB</div></div>
+      <div class="int-row" id="int-row">
+        <div class="int-chip" id="int-claude"><span class="int-dot"></span>Claude AI</div>
+        <div class="int-chip" id="int-aws"><span class="int-dot"></span>AWS</div>
+        <div class="int-chip" id="int-grafana"><span class="int-dot"></span>Grafana</div>
+        <div class="int-chip" id="int-github"><span class="int-dot"></span>GitHub</div>
+        <div class="int-chip" id="int-gitlab"><span class="int-dot"></span>GitLab</div>
+        <div class="int-chip" id="int-k8s"><span class="int-dot"></span>Kubernetes</div>
+        <div class="int-chip" id="int-slack"><span class="int-dot"></span>Slack</div>
+        <div class="int-chip" id="int-jira"><span class="int-dot"></span>Jira</div>
+        <div class="int-chip" id="int-opsgenie"><span class="int-dot"></span>OpsGenie</div>
       </div>
-      <a class="pipe-ep" href="/docs#/default/incident_run_incident_run_post" target="_blank" data-ep>
-        <span class="badge post" style="background:rgba(236,72,153,.25);color:#f9a8d4;border-color:rgba(236,72,153,.5)">POST</span>
-        <div class="ep-text"><span class="ep-path" style="color:#f9a8d4">/incident/run</span><span class="ep-desc">Full autonomous pipeline — collect → analyse → act → report</span></div>
-      </a>
-      <pre class="sample">{ "incident_id": "INC-001",  "description": "High 5xx rate on API",  "severity": "critical",
+      <div class="search-wrap">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <input id="search" type="text" placeholder="Search endpoints&#x2026;" oninput="filterEps(this.value)"/>
+      </div>
+      <div id="ep-content">
+        <div class="ep-group" data-section="general">
+          <div class="ep-group-hdr"><span class="g-ico">&#x1F527;</span><span class="g-name">General &amp; AI</span><span class="g-cnt">12 endpoints</span></div>
+          <a class="ep-row" href="/health" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/health</span><span class="ep-desc">System health status</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/docs</span><span class="ep-desc">Interactive Swagger UI</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/redoc" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/redoc</span><span class="ep-desc">ReDoc API reference</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/correlate_correlate_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/correlate</span><span class="ep-desc">Correlate events &amp; find patterns</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/llm_analyze_llm_analyze_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/llm/analyze</span><span class="ep-desc">Claude AI root cause analysis</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/check/aws" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/check/aws</span><span class="ep-desc">AWS infrastructure health</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/check/linux" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/check/linux</span><span class="ep-desc">Linux node health</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/incident_war_room_incident_war_room_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/incident/war-room</span><span class="ep-desc">Create Slack war room</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/incident_jira_incident_jira_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/incident/jira</span><span class="ep-desc">Create Jira incident ticket</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/memory_incident_memory_incidents_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/memory/incidents</span><span class="ep-desc">Store incident in ChromaDB</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/security_check_security_check_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/security/check</span><span class="ep-desc">RBAC access check</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/security_assign_role_security_roles_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/security/roles</span><span class="ep-desc">Assign role to user</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/websocket_events_realtime_events_ws" target="_blank" data-ep><span class="method ws">WS</span><span class="ep-path">/realtime/events</span><span class="ep-desc">Live event stream</span><span class="ep-arrow">&#x2197;</span></a>
+        </div>
+        <div class="ep-group" data-section="k8s">
+          <div class="ep-group-hdr"><span class="g-ico">&#x2638;</span><span class="g-name">Kubernetes</span><span class="g-cnt">7 endpoints</span></div>
+          <a class="ep-row" href="/check/k8s" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/check/k8s</span><span class="ep-desc">Cluster summary</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/check/k8s/nodes" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/check/k8s/nodes</span><span class="ep-desc">Per-node ready status</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/check/k8s/pods" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/check/k8s/pods</span><span class="ep-desc">Pod health by namespace</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/check/k8s/deployments" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/check/k8s/deployments</span><span class="ep-desc">Deployment rollout status</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/k8s_restart_k8s_restart_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/k8s/restart</span><span class="ep-desc">Rolling restart &#x2014; requires X-User</span><span class="ep-lock">&#x1F512;</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/k8s_scale_k8s_scale_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/k8s/scale</span><span class="ep-desc">Scale replicas &#x2014; requires X-User</span><span class="ep-lock">&#x1F512;</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/k8s/logs?namespace=default&pod=my-pod&tail_lines=50" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/k8s/logs</span><span class="ep-desc">Fetch pod logs</span><span class="ep-arrow">&#x2197;</span></a>
+        </div>
+        <div class="ep-group" data-section="aws">
+          <div class="ep-group-hdr"><span class="g-ico">&#x2601;</span><span class="g-name">AWS Observability &amp; AI Diagnosis</span><span class="g-cnt">21 endpoints</span></div>
+          <a class="ep-row" href="/aws/ec2/instances" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/ec2/instances</span><span class="ep-desc">List EC2 instances</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_ec2_status_aws_ec2_status_get" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/ec2/status</span><span class="ep-desc">Status checks</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_ec2_console_aws_ec2_console_get" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/ec2/console</span><span class="ep-desc">Serial console output</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/logs/groups" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/logs/groups</span><span class="ep-desc">CloudWatch log groups</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_logs_recent_aws_logs_recent_get" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/logs/recent</span><span class="ep-desc">Recent log events</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_logs_search_aws_logs_search_get" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/logs/search</span><span class="ep-desc">Search logs by pattern</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/cloudwatch/alarms" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/cloudwatch/alarms</span><span class="ep-desc">Firing alarms</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_cw_metrics_aws_cloudwatch_metrics_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/aws/cloudwatch/metrics</span><span class="ep-desc">Fetch metric series</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/ecs/services" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/ecs/services</span><span class="ep-desc">ECS running vs desired</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/ecs/stopped-tasks" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/ecs/stopped-tasks</span><span class="ep-desc">Stop reasons &amp; exit codes</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_lambda_errors_aws_lambda_errors_get" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/lambda/errors</span><span class="ep-desc">Lambda error metrics</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_rds_events_aws_rds_events_get" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/rds/events</span><span class="ep-desc">RDS events</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_elb_health_aws_elb_target_health_get" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/elb/target-health</span><span class="ep-desc">ALB target health</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/cloudtrail/events" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/cloudtrail/events</span><span class="ep-desc">Recent API changes (CloudTrail)</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_diagnose_aws_diagnose_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/aws/diagnose</span><span class="ep-desc">AI root cause analysis from live AWS data</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_predict_scaling_aws_predict_scaling_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/aws/predict-scaling</span><span class="ep-desc">Predict scaling from CloudWatch trends</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/s3/buckets" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/s3/buckets</span><span class="ep-desc">List S3 buckets</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/sqs/queues" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/sqs/queues</span><span class="ep-desc">SQS queues &amp; message depths</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/dynamodb/tables" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/dynamodb/tables</span><span class="ep-desc">DynamoDB tables &amp; status</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/route53/healthchecks" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/route53/healthchecks</span><span class="ep-desc">Route53 health check statuses</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/aws/sns/topics" target="_blank" data-ep><span class="method get">GET</span><span class="ep-path">/aws/sns/topics</span><span class="ep-desc">SNS topics</span><span class="ep-arrow">&#x2197;</span></a>
+        </div>
+        <div class="pipeline-card" data-section="pipeline">
+          <div class="pipeline-hdr"><span class="g-ico">&#x1F916;</span><span class="g-name">Autonomous Incident Pipeline</span><span class="g-cnt" style="color:var(--text2)">Flagship feature</span></div>
+          <div class="flow-row">
+            <div class="fstep"><span class="fstep-ic">&#x1F4E1;</span><div class="fstep-lb">Collect</div><div class="fstep-sb">AWS &#xB7; K8s &#xB7; GitHub</div></div>
+            <div class="farr">&#x2192;</div>
+            <div class="fstep"><span class="fstep-ic">&#x1F9E0;</span><div class="fstep-lb">Synthesise</div><div class="fstep-sb">Claude AI RCA</div></div>
+            <div class="farr">&#x2192;</div>
+            <div class="fstep"><span class="fstep-ic">&#x26A1;</span><div class="fstep-lb">Remediate</div><div class="fstep-sb">K8s &#xB7; PR &#xB7; Jira &#xB7; Slack</div></div>
+            <div class="farr">&#x2192;</div>
+            <div class="fstep"><span class="fstep-ic">&#x1F4CB;</span><div class="fstep-lb">Report</div><div class="fstep-sb">ChromaDB memory</div></div>
+          </div>
+          <a class="ep-row" href="/docs#/default/incident_run_incident_run_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/incident/run</span><span class="ep-desc">Full autonomous pipeline &#x2014; collect &#x2192; analyse &#x2192; remediate &#x2192; report</span><span class="ep-lock">&#x1F512;</span><span class="ep-arrow">&#x2197;</span></a>
+          <pre class="sample">POST /incident/run
+{ "incident_id": "INC-001", "description": "High 5xx rate on API", "severity": "critical",
   "aws": { "resource_type": "ecs", "resource_id": "my-cluster" },
-  "k8s": { "namespace": "production" },
-  "auto_remediate": true,  "hours": 2 }</pre>
-      <div class="tags">
-        <a class="tag" href="/docs#/default/correlate_correlate_post" target="_blank" style="background:rgba(6,182,212,.12);border:1px solid rgba(6,182,212,.3);color:#67e8f9">✦ Parallel data collection</a>
-        <a class="tag" href="/docs#/default/llm_analyze_llm_analyze_post" target="_blank" style="background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.3);color:#c4b5fd">✦ Claude AI synthesis</a>
-        <a class="tag" href="/docs#/default/incident_run_incident_run_post" target="_blank" style="background:rgba(236,72,153,.12);border:1px solid rgba(236,72,153,.3);color:#f9a8d4">✦ Auto remediation</a>
-        <a class="tag" href="/docs#/default/memory_incident_memory_incidents_post" target="_blank" style="background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);color:#fcd34d">✦ ChromaDB memory</a>
+  "k8s": { "namespace": "production" }, "auto_remediate": true, "hours": 2 }</pre>
+        </div>
+        <div class="ep-group" data-section="deploy">
+          <div class="ep-group-hdr"><span class="g-ico">&#x1F680;</span><span class="g-name">Deploy &amp; Jira Automation</span><span class="g-cnt">4 endpoints</span></div>
+          <a class="ep-row" href="/docs#/default/deploy_assess_deploy_assess_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/deploy/assess</span><span class="ep-desc">Pre-deploy risk assessment &#x2014; go / no-go</span><span class="ep-lock">&#x1F512;</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/jira_webhook_jira_webhook_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/jira/webhook</span><span class="ep-desc">Jira change-request &#x2192; auto GitHub PR</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/github_review_pr_github_review_pr_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/github/review-pr</span><span class="ep-desc">AI PR review &#x2014; security &amp; infra analysis</span><span class="ep-arrow">&#x2197;</span></a>
+          <a class="ep-row" href="/docs#/default/aws_predict_scaling_aws_predict_scaling_post" target="_blank" data-ep><span class="method post">POST</span><span class="ep-path">/aws/predict-scaling</span><span class="ep-desc">Scale prediction from CloudWatch trends</span><span class="ep-arrow">&#x2197;</span></a>
+        </div>
+      </div>
+    </div>
+
+    <div id="view-secrets" class="secrets-panel">
+      <div class="sec-actions">
+        <div class="sec-user-wrap">
+          <div class="sec-user-lbl">Admin User (X-User header)</div>
+          <input id="sec-user" class="sec-user-input" type="text" placeholder="e.g. nagaraj" value="nagaraj"/>
+        </div>
+        <button class="save-btn" onclick="saveSecrets()" id="save-btn">Save to .env</button>
+        <span id="sec-msg" class="sec-msg" style="display:none"></span>
+      </div>
+      <div class="sec-group">
+        <div class="sec-group-hdr"><span class="g-ico">&#x1F916;</span><span class="g-name">Claude AI</span></div>
+        <div class="sec-row"><span class="sec-key">ANTHROPIC_API_KEY</span><input class="sec-input" type="password" id="ANTHROPIC_API_KEY" placeholder="sk-ant-&#x2026;"/><span class="sec-status" id="st-ANTHROPIC_API_KEY"></span></div>
+      </div>
+      <div class="sec-group">
+        <div class="sec-group-hdr"><span class="g-ico">&#x2601;</span><span class="g-name">AWS</span></div>
+        <div class="sec-row"><span class="sec-key">AWS_ACCESS_KEY_ID</span><input class="sec-input" type="password" id="AWS_ACCESS_KEY_ID" placeholder="AKIA&#x2026;"/><span class="sec-status" id="st-AWS_ACCESS_KEY_ID"></span></div>
+        <div class="sec-row"><span class="sec-key">AWS_SECRET_ACCESS_KEY</span><input class="sec-input" type="password" id="AWS_SECRET_ACCESS_KEY" placeholder="&#x2026;"/><span class="sec-status" id="st-AWS_SECRET_ACCESS_KEY"></span></div>
+        <div class="sec-row"><span class="sec-key">AWS_DEFAULT_REGION</span><input class="sec-input" type="text" id="AWS_DEFAULT_REGION" placeholder="us-east-1"/><span class="sec-status" id="st-AWS_DEFAULT_REGION"></span></div>
+      </div>
+      <div class="sec-group">
+        <div class="sec-group-hdr"><span class="g-ico">&#x1F4BB;</span><span class="g-name">GitHub</span></div>
+        <div class="sec-row"><span class="sec-key">GITHUB_TOKEN</span><input class="sec-input" type="password" id="GITHUB_TOKEN" placeholder="ghp_&#x2026;"/><span class="sec-status" id="st-GITHUB_TOKEN"></span></div>
+        <div class="sec-row"><span class="sec-key">GITHUB_REPO</span><input class="sec-input" type="text" id="GITHUB_REPO" placeholder="owner/repo"/><span class="sec-status" id="st-GITHUB_REPO"></span></div>
+      </div>
+      <div class="sec-group">
+        <div class="sec-group-hdr"><span class="g-ico">&#x2638;</span><span class="g-name">Kubernetes</span></div>
+        <div class="sec-row"><span class="sec-key">KUBECONFIG</span><input class="sec-input" type="text" id="KUBECONFIG" placeholder="/home/user/.kube/config"/><span class="sec-status" id="st-KUBECONFIG"></span></div>
+      </div>
+      <div class="sec-group">
+        <div class="sec-group-hdr"><span class="g-ico">&#x1F4AC;</span><span class="g-name">Slack</span></div>
+        <div class="sec-row"><span class="sec-key">SLACK_BOT_TOKEN</span><input class="sec-input" type="password" id="SLACK_BOT_TOKEN" placeholder="xoxb-&#x2026;"/><span class="sec-status" id="st-SLACK_BOT_TOKEN"></span></div>
+        <div class="sec-row"><span class="sec-key">SLACK_CHANNEL</span><input class="sec-input" type="text" id="SLACK_CHANNEL" placeholder="#incidents"/><span class="sec-status" id="st-SLACK_CHANNEL"></span></div>
+      </div>
+      <div class="sec-group">
+        <div class="sec-group-hdr"><span class="g-ico">&#x1F3AB;</span><span class="g-name">Jira</span></div>
+        <div class="sec-row"><span class="sec-key">JIRA_URL</span><input class="sec-input" type="text" id="JIRA_URL" placeholder="https://your-org.atlassian.net"/><span class="sec-status" id="st-JIRA_URL"></span></div>
+        <div class="sec-row"><span class="sec-key">JIRA_USER</span><input class="sec-input" type="text" id="JIRA_USER" placeholder="user@org.com"/><span class="sec-status" id="st-JIRA_USER"></span></div>
+        <div class="sec-row"><span class="sec-key">JIRA_TOKEN</span><input class="sec-input" type="password" id="JIRA_TOKEN" placeholder="&#x2026;"/><span class="sec-status" id="st-JIRA_TOKEN"></span></div>
+      </div>
+      <div class="sec-group">
+        <div class="sec-group-hdr"><span class="g-ico">&#x1F6A8;</span><span class="g-name">OpsGenie</span></div>
+        <div class="sec-row"><span class="sec-key">OPSGENIE_API_KEY</span><input class="sec-input" type="password" id="OPSGENIE_API_KEY" placeholder="&#x2026;"/><span class="sec-status" id="st-OPSGENIE_API_KEY"></span></div>
+      </div>
+      <div class="sec-group">
+        <div class="sec-group-hdr"><span class="g-ico">&#x1F4CA;</span><span class="g-name">Grafana</span></div>
+        <div class="sec-row"><span class="sec-key">GRAFANA_URL</span><input class="sec-input" type="text" id="GRAFANA_URL" placeholder="http://localhost:3000"/><span class="sec-status" id="st-GRAFANA_URL"></span></div>
+        <div class="sec-row"><span class="sec-key">GRAFANA_TOKEN</span><input class="sec-input" type="password" id="GRAFANA_TOKEN" placeholder="service account token"/><span class="sec-status" id="st-GRAFANA_TOKEN"></span></div>
+      </div>
+      <div class="sec-group">
+        <div class="sec-group-hdr"><span class="g-ico">&#x1F98A;</span><span class="g-name">GitLab</span></div>
+        <div class="sec-row"><span class="sec-key">GITLAB_URL</span><input class="sec-input" type="text" id="GITLAB_URL" placeholder="https://gitlab.com"/><span class="sec-status" id="st-GITLAB_URL"></span></div>
+        <div class="sec-row"><span class="sec-key">GITLAB_TOKEN</span><input class="sec-input" type="password" id="GITLAB_TOKEN" placeholder="personal access token"/><span class="sec-status" id="st-GITLAB_TOKEN"></span></div>
+        <div class="sec-row"><span class="sec-key">GITLAB_PROJECT</span><input class="sec-input" type="text" id="GITLAB_PROJECT" placeholder="namespace/project or project-id"/><span class="sec-status" id="st-GITLAB_PROJECT"></span></div>
       </div>
     </div>
 
   </div>
 
-  <div id="tab-general" class="tab-panel"></div>
-  <div id="tab-k8s" class="tab-panel"></div>
-  <div id="tab-aws" class="tab-panel"></div>
-  <div id="tab-pipeline" class="tab-panel"></div>
-
-  <div class="links">
-    <a class="lbtn pri" href="/docs">📖&nbsp; Swagger UI</a>
-    <a class="lbtn sec" href="/redoc">📄&nbsp; ReDoc</a>
-    <a class="lbtn ter" href="/health">💚&nbsp; Health</a>
-  </div>
-
-  <div class="footer">AI DevOps Intelligence Platform &nbsp;·&nbsp; <span>v1.0.0</span> &nbsp;·&nbsp; Built by <span>Nagaraj</span></div>
-
+    <div id="view-chat" class="chat-panel">
+      <div id="chat-messages" class="chat-messages">
+        <div class="chat-empty" id="chat-empty">
+          <div class="chat-empty-icon">&#x1F916;</div>
+          <div class="chat-empty-title">DevOps AI Assistant</div>
+          <div class="chat-empty-sub">Ask me anything about your infrastructure. I have live access to your AWS account.</div>
+          <div class="chat-suggestions">
+            <button class="chat-suggestion" onclick="sendSuggestion(this)">Give me a full infrastructure overview across all integrations</button>
+            <button class="chat-suggestion" onclick="sendSuggestion(this)">Are there any alerts or alarms firing right now?</button>
+            <button class="chat-suggestion" onclick="sendSuggestion(this)">Any unhealthy pods or failed deployments in Kubernetes?</button>
+            <button class="chat-suggestion" onclick="sendSuggestion(this)">Did any recent GitLab pipeline or GitHub deploy cause this issue?</button>
+            <button class="chat-suggestion" onclick="sendSuggestion(this)">My service is down — find the root cause across AWS, K8s, and CI/CD</button>
+          </div>
+        </div>
+      </div>
+      <div class="chat-input-bar">
+        <textarea id="chat-input" placeholder="Describe your issue or ask a question&#x2026;" rows="1" onkeydown="chatKeydown(event)" oninput="autoResize(this)"></textarea>
+        <button class="chat-warroom-btn" id="chat-warroom-btn" onclick="createWarRoom()" title="Create Slack war room from this conversation">&#x1F6A8; War Room</button>
+        <button class="chat-send-btn" id="chat-send-btn" onclick="sendChat()">Send</button>
+      </div>
+    </div>
+  <div class="footer">AI DevOps Intelligence Platform &nbsp;&#xB7;&nbsp; <span>v1.0.0</span> &nbsp;&#xB7;&nbsp; Built by <span>Nagaraj</span></div>
 </div>
+
 <script>
-function switchTab(name,btn){
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  btn.classList.add('active');
-  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
-  var panel=document.getElementById('tab-'+name);
-  if(name==='all'){panel.classList.add('active');return;}
-  if(!panel.hasChildNodes()){
-    var src=document.querySelector('[data-section="'+name+'"]');
-    if(src)panel.appendChild(src.cloneNode(true));
-  }
-  panel.classList.add('active');
+var ALL_KEYS=['ANTHROPIC_API_KEY','GROQ_API_KEY','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_REGION','GITHUB_TOKEN','GITHUB_REPO','GITLAB_URL','GITLAB_TOKEN','GITLAB_PROJECT','KUBECONFIG','SLACK_BOT_TOKEN','SLACK_CHANNEL','JIRA_URL','JIRA_USER','JIRA_TOKEN','OPSGENIE_API_KEY','GRAFANA_URL','GRAFANA_TOKEN'];
+var INT_MAP={'Claude AI':'int-claude','AWS':'int-aws','Grafana':'int-grafana','GitHub':'int-github','GitLab':'int-gitlab','Kubernetes':'int-k8s','Slack':'int-slack','Jira':'int-jira','OpsGenie':'int-opsgenie'};
+
+function showView(view, section, btn) {
+  try {
+    document.querySelectorAll('.nav-link').forEach(function(l){ l.classList.remove('active'); });
+    if(btn) btn.classList.add('active');
+    // show/hide content wrapper vs chat panel
+    var cw = document.getElementById('content-wrap');
+    if(cw) cw.style.display = view==='chat' ? 'none' : '';
+    // endpoints panel
+    var ep = document.getElementById('view-endpoints');
+    if(ep) ep.style.display = view==='endpoints' ? '' : 'none';
+    // secrets panel
+    var sp = document.getElementById('view-secrets');
+    if(sp){ if(view==='secrets'){ sp.classList.add('active'); }else{ sp.classList.remove('active'); } }
+    // chat panel
+    var cp = document.getElementById('view-chat');
+    if(cp) cp.style.display = view==='chat' ? 'flex' : 'none';
+    // filter endpoint groups
+    if(view==='endpoints') filterSection(section || 'all');
+  } catch(e) { console.error('showView error:', e); }
 }
-function filterEps(q){
-  q=q.toLowerCase().trim();
-  document.querySelectorAll('#tab-all [data-ep]').forEach(function(ep){
-    var txt=ep.textContent.toLowerCase();
-    ep.classList.toggle('hidden',q!==''&&!txt.includes(q));
+function filterSection(name) {
+  document.querySelectorAll('[data-section]').forEach(function(g){
+    g.style.display = (name==='all' || g.dataset.section===name) ? '' : 'none';
   });
-  document.querySelectorAll('#tab-all .card,#tab-all .pipe-card').forEach(function(card){
-    var vis=[].slice.call(card.querySelectorAll('[data-ep]')).some(function(e){return!e.classList.contains('hidden')});
-    card.style.display=(!q||vis)?'':'none';
+}
+function filterEps(q) {
+  q = q.toLowerCase().trim();
+  document.querySelectorAll('[data-ep]').forEach(function(ep){
+    ep.classList.toggle('hidden', q!=='' && !ep.textContent.toLowerCase().includes(q));
+  });
+  document.querySelectorAll('[data-section]').forEach(function(grp){
+    var vis = Array.from(grp.querySelectorAll('[data-ep]')).some(function(e){ return !e.classList.contains('hidden'); });
+    grp.style.display = (!q || vis) ? '' : 'none';
+  });
+}
+function loadSecretStatus() {
+  fetch('/secrets/status').then(function(r){ return r.json(); }).then(function(data){
+    Object.keys(data).forEach(function(group){
+      var keys = data[group];
+      Object.keys(keys).forEach(function(k){
+        var st = document.getElementById('st-'+k);
+        if(st){ st.textContent = keys[k] ? '&#x2713;' : ''; st.style.color = keys[k] ? '#7ee787' : ''; st.title = keys[k] ? 'Configured' : 'Not set'; }
+      });
+      var allSet = Object.values(keys).every(Boolean);
+      var someSet = Object.values(keys).some(Boolean);
+      var chipId = INT_MAP[group];
+      if(chipId){
+        var chip = document.getElementById(chipId);
+        if(chip){ chip.className = 'int-chip' + (someSet ? ' on' : ''); }
+      }
+    });
+  }).catch(function(){});
+}
+function saveSecrets() {
+  var secrets = {};
+  ALL_KEYS.forEach(function(k){
+    var el = document.getElementById(k);
+    if(el && el.value.trim()) secrets[k] = el.value.trim();
+  });
+  if(Object.keys(secrets).length === 0){ showMsg('No values entered', 'err'); return; }
+  var user = document.getElementById('sec-user').value.trim() || 'nagaraj';
+  var btn = document.getElementById('save-btn');
+  btn.disabled = true; btn.textContent = 'Saving...';
+  fetch('/secrets', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-User': user},
+    body: JSON.stringify({secrets: secrets})
+  }).then(function(r){
+    return r.json().then(function(d){ return {ok: r.ok, data: d}; });
+  }).then(function(res){
+    if(res.ok){
+      showMsg('Saved ' + res.data.updated.length + ' secret(s)', 'ok');
+      ALL_KEYS.forEach(function(k){ var el=document.getElementById(k); if(el) el.value=''; });
+      loadSecretStatus();
+    } else {
+      showMsg(res.data.detail || 'Error', 'err');
+    }
+  }).catch(function(e){ showMsg('Network error', 'err'); })
+  .finally(function(){ btn.disabled=false; btn.textContent='Save to .env'; });
+}
+function showMsg(text, type) {
+  var m = document.getElementById('sec-msg');
+  m.textContent = text; m.className = 'sec-msg ' + type; m.style.display = '';
+  setTimeout(function(){ m.style.display='none'; }, 4000);
+}
+loadSecretStatus();
+
+var _chatHistory = [];
+
+function sendSuggestion(btn) {
+  document.getElementById('chat-input').value = btn.textContent;
+  sendChat();
+}
+
+function chatKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function appendMsg(role, text) {
+  var empty = document.getElementById('chat-empty');
+  if (empty) empty.remove();
+  var container = document.getElementById('chat-messages');
+  var row = document.createElement('div');
+  row.className = 'chat-row ' + role;
+  var meta = document.createElement('div');
+  meta.className = 'chat-meta' + (role === 'user' ? ' right' : '');
+  meta.textContent = role === 'user' ? 'You' : 'AI DevOps';
+  var bubble = document.createElement('div');
+  bubble.className = 'chat-bubble ' + role;
+  bubble.textContent = text;
+  row.appendChild(meta);
+  row.appendChild(bubble);
+  container.appendChild(row);
+  container.scrollTop = container.scrollHeight;
+  return bubble;
+}
+
+function sendChat() {
+  var input = document.getElementById('chat-input');
+  var msg = input.value.trim();
+  if (!msg) return;
+  var btn = document.getElementById('chat-send-btn');
+  input.value = ''; input.style.height = 'auto';
+  btn.disabled = true;
+
+  appendMsg('user', msg);
+  _chatHistory.push({role: 'user', content: msg});
+
+  var typingBubble = appendMsg('ai', '...');
+  typingBubble.classList.add('typing');
+
+  fetch('/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: msg, history: _chatHistory.slice(0,-1)})
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d) {
+    typingBubble.classList.remove('typing');
+    var reply = d.reply || d.detail || 'No response';
+    typingBubble.textContent = reply;
+    _chatHistory.push({role: 'assistant', content: reply});
+    if (d.sources && d.sources.length) {
+      var src = document.createElement('div');
+      src.style.cssText = 'font-size:10px;color:var(--muted);margin-top:4px;padding:0 4px';
+      src.textContent = '📡 Data from: ' + d.sources.join(', ');
+      typingBubble.parentElement.appendChild(src);
+    }
+    document.getElementById('chat-messages').scrollTop = 999999;
+    btn.disabled = false;
+    document.getElementById('chat-input').focus();
+  })
+  .catch(function(e) {
+    typingBubble.classList.remove('typing');
+    typingBubble.textContent = 'Error: ' + e;
+    typingBubble.style.color = '#ffa198';
+    btn.disabled = false;
+  });
+}
+
+function createWarRoom() {
+  var lastUserMsg = '';
+  for (var i = _chatHistory.length - 1; i >= 0; i--) {
+    if (_chatHistory[i].role === 'user') { lastUserMsg = _chatHistory[i].content; break; }
+  }
+  var desc = lastUserMsg || document.getElementById('chat-input').value.trim() || 'Infrastructure incident';
+  var incId = 'INC-' + new Date().toISOString().replace(/[^0-9]/g,'').slice(0,12);
+  var btn = document.getElementById('chat-warroom-btn');
+  btn.disabled = true; btn.textContent = '⏳ Creating...';
+  appendMsg('ai', '🚨 Creating war room and running analysis across all integrations...');
+  fetch('/warroom/create', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({incident_id: incId, description: desc, severity: 'high', post_to_slack: true})
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d) {
+    btn.disabled = false; btn.textContent = '🚨 War Room';
+    var msg = '✅ War room created — ' + incId + '\\n';
+    var a = d.analysis || {};
+    if (a.summary) msg += '\\n📋 ' + a.summary;
+    if (a.root_cause) msg += '\\n🔍 Root cause: ' + a.root_cause;
+    if (d.slack && d.slack.channel_url) msg += '\\n\\n🔗 Slack channel: ' + d.slack.channel_url;
+    else if (d.slack && d.slack.error) msg += '\\n⚠️ Slack: ' + d.slack.error;
+    if (d.sources && d.sources.length) msg += '\\n\\nData from: ' + d.sources.join(', ');
+    appendMsg('ai', msg);
+    _chatHistory.push({role: 'assistant', content: msg});
+    document.getElementById('chat-messages').scrollTop = 999999;
+  })
+  .catch(function(e) {
+    btn.disabled = false; btn.textContent = '🚨 War Room';
+    appendMsg('ai', 'Error creating war room: ' + e);
   });
 }
 </script>
 </body>
 </html>
-""")
+""", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
 @app.get("/health")
@@ -446,7 +778,8 @@ def aws_ec2_list(state: str = ""):
     return {"ec2_instances": result}
 
 @app.get("/aws/ec2/status")
-def aws_ec2_status(instance_id: str):
+def aws_ec2_status(instance_id: str = ""):
+    """Status checks for all EC2 instances, or a specific one via ?instance_id=i-xxx"""
     result = get_ec2_status_checks(instance_id)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -504,15 +837,16 @@ def aws_cw_metrics(req: AWSMetricRequest):
 @app.get("/aws/ecs/services")
 def aws_ecs_services(cluster: str = "default"):
     result = list_ecs_services(cluster)
+    # ClusterNotFoundException → return empty rather than 400
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
+        return {"ecs_services": {"success": True, "cluster": cluster, "services": [], "count": 0, "note": result.get("error")}}
     return {"ecs_services": result}
 
 @app.get("/aws/ecs/stopped-tasks")
 def aws_ecs_stopped(cluster: str = "default", limit: int = 20):
     result = get_stopped_ecs_tasks(cluster, limit)
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
+        return {"stopped_tasks": {"success": True, "cluster": cluster, "stopped_tasks": [], "count": 0, "note": result.get("error")}}
     return {"stopped_tasks": result}
 
 # Lambda
@@ -524,11 +858,23 @@ def aws_lambda_list():
     return {"lambda_functions": result}
 
 @app.get("/aws/lambda/errors")
-def aws_lambda_errors(function_name: str, hours: int = 1):
-    result = get_lambda_errors(function_name, hours)
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
-    return {"lambda_metrics": result}
+def aws_lambda_errors(function_name: str = "", hours: int = 1):
+    """Error metrics for all Lambda functions, or a specific one via ?function_name=xxx"""
+    if function_name:
+        result = get_lambda_errors(function_name, hours)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error"))
+        return {"lambda_metrics": [result]}
+    # auto-discover all functions
+    all_fns = list_lambda_functions()
+    if not all_fns.get("success"):
+        raise HTTPException(status_code=400, detail=all_fns.get("error"))
+    metrics = []
+    for fn in all_fns.get("functions", []):
+        r = get_lambda_errors(fn["name"], hours)
+        if r.get("success"):
+            metrics.append(r)
+    return {"lambda_metrics": metrics, "count": len(metrics)}
 
 # RDS
 @app.get("/aws/rds/instances")
@@ -539,11 +885,23 @@ def aws_rds_list():
     return {"rds_instances": result}
 
 @app.get("/aws/rds/events")
-def aws_rds_events(db_instance_id: str, hours: int = 24):
-    result = get_rds_events(db_instance_id, hours)
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
-    return {"rds_events": result}
+def aws_rds_events(db_instance_id: str = "", hours: int = 24):
+    """Events for all RDS instances, or a specific one via ?db_instance_id=xxx"""
+    if db_instance_id:
+        result = get_rds_events(db_instance_id, hours)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error"))
+        return {"rds_events": [result]}
+    # auto-discover all DB instances
+    all_dbs = list_rds_instances()
+    if not all_dbs.get("success"):
+        raise HTTPException(status_code=400, detail=all_dbs.get("error"))
+    all_events = []
+    for db in all_dbs.get("instances", []):
+        r = get_rds_events(db["id"], hours)
+        if r.get("success"):
+            all_events.append(r)
+    return {"rds_events": all_events, "count": len(all_events)}
 
 # ELB / ALB
 @app.get("/aws/elb/target-health")
@@ -560,6 +918,42 @@ def aws_cloudtrail(hours: int = 1, resource_name: str = ""):
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return {"cloudtrail_events": result}
+
+# S3 / SQS / DynamoDB / Route53 / SNS
+@app.get("/aws/s3/buckets")
+def aws_s3_buckets():
+    result = list_s3_buckets()
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return {"s3_buckets": result}
+
+@app.get("/aws/sqs/queues")
+def aws_sqs_queues():
+    result = list_sqs_queues()
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return {"sqs_queues": result}
+
+@app.get("/aws/dynamodb/tables")
+def aws_dynamodb_tables():
+    result = list_dynamodb_tables()
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return {"dynamodb_tables": result}
+
+@app.get("/aws/route53/healthchecks")
+def aws_route53_healthchecks():
+    result = list_route53_healthchecks()
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return {"route53_healthchecks": result}
+
+@app.get("/aws/sns/topics")
+def aws_sns_topics():
+    result = list_sns_topics()
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return {"sns_topics": result}
 
 # AI Diagnosis
 @app.post("/aws/diagnose")
@@ -680,12 +1074,14 @@ def security_check(req: AccessRequest):
     return {"access": result}
 
 @app.post("/security/roles")
-def security_assign_role(req: RoleAssignment):
+def security_assign_role(req: RoleAssignment, x_user: Optional[str] = Header(default=None)):
+    _rbac_guard(x_user, "manage_users")
     result = assign_role(req.user, req.role)
     return {"result": result}
 
 @app.delete("/security/roles/{user}")
-def security_revoke_role(user: str):
+def security_revoke_role(user: str, x_user: Optional[str] = Header(default=None)):
+    _rbac_guard(x_user, "manage_users")
     result = revoke_role(user)
     return {"result": result}
 
@@ -904,6 +1300,160 @@ def jira_webhook(payload: JiraWebhookPayload):
         "pr_created":     pr_result,
         "jira_commented": comment_result,
     }
+
+
+# ── SECRETS MANAGEMENT ────────────────────────────────────────
+
+_SECRET_SCHEMA: Dict[str, List[str]] = {
+    "Claude AI":   ["ANTHROPIC_API_KEY"],
+    "AWS":         ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
+    "GitHub":      ["GITHUB_TOKEN", "GITHUB_REPO"],
+    "GitLab":      ["GITLAB_URL", "GITLAB_TOKEN", "GITLAB_PROJECT"],
+    "Kubernetes":  ["KUBECONFIG"],
+    "Slack":       ["SLACK_BOT_TOKEN", "SLACK_CHANNEL"],
+    "Jira":        ["JIRA_URL", "JIRA_USER", "JIRA_TOKEN"],
+    "OpsGenie":    ["OPSGENIE_API_KEY"],
+    "Grafana":     ["GRAFANA_URL", "GRAFANA_TOKEN"],
+}
+
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+
+def _write_env(updates: Dict[str, str]) -> None:
+    """Merge updates into the .env file (create if absent)."""
+    lines: list[str] = []
+    existing_keys: set[str] = set()
+    if _ENV_FILE.exists():
+        for line in _ENV_FILE.read_text().splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                key = stripped.split("=", 1)[0].strip()
+                if key in updates:
+                    lines.append(f'{key}={updates[key]}')
+                    existing_keys.add(key)
+                    continue
+            lines.append(line)
+    for key, val in updates.items():
+        if key not in existing_keys:
+            lines.append(f"{key}={val}")
+    _ENV_FILE.write_text("\n".join(lines) + "\n")
+    # Reload into current process
+    for key, val in updates.items():
+        os.environ[key] = val
+
+
+class SecretsPayload(BaseModel):
+    secrets: Dict[str, str]
+
+
+@app.get("/secrets/status")
+def secrets_status():
+    """Return which env vars are configured (boolean only — never exposes values)."""
+    status: Dict[str, Dict[str, bool]] = {}
+    for group, keys in _SECRET_SCHEMA.items():
+        status[group] = {k: bool(os.environ.get(k)) for k in keys}
+    return status
+
+
+@app.post("/secrets")
+def secrets_update(payload: SecretsPayload, x_user: Optional[str] = Header(None)):
+    """Write secrets to .env file. Requires admin role."""
+    _rbac_guard(x_user, "manage_secrets")
+    if not payload.secrets:
+        raise HTTPException(status_code=400, detail="No secrets provided.")
+    _write_env(payload.secrets)
+    updated = list(payload.secrets.keys())
+    return {"updated": updated, "env_file": str(_ENV_FILE)}
+
+
+# ── CHAT ──────────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatPayload(BaseModel):
+    message: str
+    history: List[ChatMessage] = []
+
+class WarRoomRequest(BaseModel):
+    incident_id:  str
+    description:  str
+    severity:     str = "high"
+    post_to_slack: bool = True
+
+@app.post("/chat")
+def chat(payload: ChatPayload):
+    """Conversational DevOps AI — collects live context from ALL integrations."""
+    context: dict = {}
+    try:
+        context = collect_all_context(hours=2)
+    except Exception:
+        pass
+    history = [{"role": m.role, "content": m.content} for m in payload.history]
+    reply = chat_devops(payload.message, history, context)
+    return {"reply": reply, "sources": context.get("configured", [])}
+
+@app.post("/warroom/create")
+def warroom_create(req: WarRoomRequest):
+    """Create a war room: collect universal context, run AI analysis, create Slack channel, post findings."""
+    # 1. Collect context from all integrations
+    context: dict = {}
+    try:
+        context = collect_all_context(hours=2)
+    except Exception:
+        pass
+
+    # 2. Run AI analysis
+    from app.llm.claude import synthesize_incident
+    synthesis = synthesize_incident({
+        "incident_id":   req.incident_id,
+        "description":   req.description,
+        "severity":      req.severity,
+        "aws_context":   context.get("aws", {}),
+        "k8s_context":   context.get("k8s", {}),
+        "github_context": context.get("github", {}),
+    })
+
+    result = {
+        "incident_id": req.incident_id,
+        "analysis":    synthesis,
+        "sources":     context.get("configured", []),
+        "slack":       None,
+    }
+
+    # 3. Create Slack war room channel + post findings
+    if req.post_to_slack:
+        channel_result = create_incident_channel(req.incident_id, topic=f"{req.severity.upper()} — {req.description[:80]}")
+        if channel_result.get("success"):
+            channel_id = channel_result["channel_id"]
+            post_incident_summary(
+                channel    = channel_id,
+                incident_id = req.incident_id,
+                summary    = synthesis.get("summary", req.description),
+                findings   = synthesis.get("findings", []),
+                severity   = synthesis.get("severity", req.severity),
+                actions    = synthesis.get("actions_to_take", []),
+            )
+            result["slack"] = {
+                "channel_name": channel_result.get("channel_name"),
+                "channel_url":  channel_result.get("channel_url"),
+            }
+        else:
+            result["slack"] = {"error": channel_result.get("error")}
+
+    return result
+
+@app.get("/health/full")
+def health_full():
+    """Full health check — collects universal context and returns per-integration status."""
+    context: dict = {}
+    try:
+        context = collect_all_context(hours=1)
+    except Exception:
+        pass
+    health = summarize_health(context)
+    return {"status": "healthy" if health["healthy"] else "degraded", "health": health}
 
 
 @app.websocket("/realtime/events")

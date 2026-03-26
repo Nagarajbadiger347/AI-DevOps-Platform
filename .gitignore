@@ -1,0 +1,39 @@
+# Environment variables — NEVER commit real credentials
+.env
+.env.local
+.env.*.local
+
+# Python virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Pytest cache
+.pytest_cache/
+
+# RBAC runtime state
+app/security/roles.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+
+# Logs
+*.log
+
+# Vector/runtime databases
+chroma_db/

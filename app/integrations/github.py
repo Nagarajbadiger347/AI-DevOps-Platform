@@ -23,7 +23,7 @@ def get_recent_commits(hours: int = 2, branch: str = "") -> dict:
     """Return commits pushed in the last N hours — correlate a deploy with an incident."""
     try:
         repo   = _repo()
-        since  = datetime.datetime.utcnow() - datetime.timedelta(hours=hours)
+        since  = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
         kwargs = {"since": since}
         if branch:
             kwargs["sha"] = branch
@@ -50,7 +50,7 @@ def get_recent_prs(hours: int = 24, state: str = "closed") -> dict:
     """Return recently merged PRs — what code went out before the incident."""
     try:
         repo  = _repo()
-        since = datetime.datetime.utcnow() - datetime.timedelta(hours=hours)
+        since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
         prs   = [
             {
                 "number":    pr.number,

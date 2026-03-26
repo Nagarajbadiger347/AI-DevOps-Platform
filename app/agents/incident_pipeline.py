@@ -236,7 +236,7 @@ def run_incident_pipeline(
 
     Returns a complete incident report dict.
     """
-    started_at = datetime.datetime.utcnow().isoformat()
+    started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # ── Step 1: Collect all observability data ─────────────────
     obs = _collect_all(aws_cfg or {}, k8s_cfg or {}, hours)
@@ -280,7 +280,7 @@ def run_incident_pipeline(
     return {
         "incident_id":          incident_id,
         "started_at":           started_at,
-        "completed_at":         datetime.datetime.utcnow().isoformat(),
+        "completed_at":         datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "description":          description,
         "reported_severity":    severity,
         # AI analysis

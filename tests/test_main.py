@@ -256,6 +256,7 @@ def test_aws_ec2_status():
     with patch("app.integrations.aws_ops.boto3.client") as mock_boto:
         mock_boto.return_value.describe_instance_status.return_value = {
             "InstanceStatuses": [{
+                "InstanceId": "i-123",
                 "InstanceState": {"Name": "running"},
                 "SystemStatus": {"Status": "ok", "Events": []},
                 "InstanceStatus": {"Status": "ok"},
@@ -264,8 +265,8 @@ def test_aws_ec2_status():
         response = client.get("/aws/ec2/status?instance_id=i-123")
     assert response.status_code == 200
     data = response.json()["status_checks"]
-    assert data["system_status"] == "ok"
-    assert data["instance_status"] == "ok"
+    assert data["statuses"][0]["system_status"] == "ok"
+    assert data["statuses"][0]["instance_status"] == "ok"
 
 
 def test_aws_ec2_console():
@@ -393,7 +394,7 @@ def test_aws_lambda_errors():
         }
         response = client.get("/aws/lambda/errors?function_name=my-func&hours=1")
     assert response.status_code == 200
-    assert response.json()["lambda_metrics"]["function"] == "my-func"
+    assert response.json()["lambda_metrics"][0]["function"] == "my-func"
 
 
 def test_aws_rds_instances():
@@ -421,7 +422,7 @@ def test_aws_rds_events():
         }]}
         response = client.get("/aws/rds/events?db_instance_id=prod-db")
     assert response.status_code == 200
-    events = response.json()["rds_events"]["events"]
+    events = response.json()["rds_events"][0]["events"]
     assert "restarted" in events[0]["message"]
 
 

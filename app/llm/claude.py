@@ -1,10 +1,88 @@
 import json
 import os
 import re
-from anthropic import Anthropic
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+# ── Provider auto-detection ───────────────────────────────────
+# Priority: Anthropic → Groq → Ollama (local, no key needed)
+import urllib.request as _urllib
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "").strip()
+OLLAMA_HOST       = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+_provider     = None
+_ollama_model = None
+client        = None
+
+if ANTHROPIC_API_KEY:
+    from anthropic import Anthropic
+    client    = Anthropic(api_key=ANTHROPIC_API_KEY)
+    _provider = "anthropic"
+elif GROQ_API_KEY:
+    from groq import Groq
+    client    = Groq(api_key=GROQ_API_KEY)
+    _provider = "groq"
+else:
+    # Try Ollama — pick first available model
+    try:
+        r = _urllib.urlopen(f"{OLLAMA_HOST}/api/tags", timeout=3)
+        models = json.loads(r.read()).get("models", [])
+        if models:
+            _ollama_model = models[0]["name"]
+            _provider     = "ollama"
+    except Exception:
+        pass
+
+
+def _llm(system: str, messages: list, max_tokens: int = 1024) -> str:
+    """Unified LLM call — Anthropic / Groq / Ollama (local, no key)."""
+    if _provider == "anthropic":
+        resp = client.messages.create(
+            model="claude-3-haiku-20240307",
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+        )
+        return resp.content[0].text
+
+    elif _provider == "groq":
+        all_msgs = [{"role": "system", "content": system}] + messages
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=all_msgs,
+            max_tokens=max_tokens,
+        )
+        return resp.choices[0].message.content
+
+    elif _provider == "ollama":
+        # Build prompt from system + messages
+        parts = []
+        if system:
+            parts.append(f"System: {system}")
+        for m in messages:
+            role = "User" if m["role"] == "user" else "Assistant"
+            parts.append(f"{role}: {m['content']}")
+        prompt = "\n\n".join(parts)
+        payload = json.dumps({
+            "model": _ollama_model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"num_predict": max_tokens},
+        }).encode()
+        req = _urllib.Request(f"{OLLAMA_HOST}/api/generate", data=payload,
+                              headers={"Content-Type": "application/json"})
+        r = _urllib.urlopen(req, timeout=120)
+        return json.loads(r.read())["response"]
+
+    else:
+        raise RuntimeError(
+            "No LLM configured. Either:\n"
+            "  • Install Ollama (free, local): https://ollama.com\n"
+            "  • Add ANTHROPIC_API_KEY or GROQ_API_KEY to .env"
+        )
 
 
 def _extract_json(text: str) -> str:
@@ -35,7 +113,7 @@ def _extract_json(text: str) -> str:
 
 def analyze_context(context: dict) -> dict:
     """Analyze incident context using Claude AI."""
-    if not client:
+    if not _provider:
         return {"error": "ANTHROPIC_API_KEY not configured", "rca": "Sample root cause", "confidence": 0.5}
 
     incident_id = context.get("incident_id", "unknown")
@@ -54,13 +132,7 @@ def analyze_context(context: dict) -> dict:
     """
 
     try:
-        response = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        content = response.content[0].text
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1000)
         rca = content.split("1.")[1].split("2.")[0].strip() if "1." in content else content
         confidence = 0.8
         actions = content.split("3.")[1].strip() if "3." in content else "Investigate further"
@@ -76,7 +148,7 @@ def analyze_context(context: dict) -> dict:
 
 def diagnose_aws_resource(obs_context: dict) -> dict:
     """Feed AWS observability data into Claude for structured root cause analysis."""
-    if not client:
+    if not _provider:
         return {
             "error": "ANTHROPIC_API_KEY not configured",
             "summary": "AI diagnosis unavailable — set ANTHROPIC_API_KEY",
@@ -114,12 +186,7 @@ Respond in the following JSON format only (no markdown, no extra text):
 
     content = ""
     try:
-        response = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.content[0].text.strip()
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1500)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -142,7 +209,7 @@ def synthesize_incident(incident_data: dict) -> dict:
         aws_context, k8s_context, github_context
     Returns structured JSON with root_cause, findings, and actions_to_take.
     """
-    if not client:
+    if not _provider:
         return {
             "error": "ANTHROPIC_API_KEY not configured",
             "summary": "AI synthesis unavailable — set ANTHROPIC_API_KEY",
@@ -180,7 +247,7 @@ Based on the above data, produce a structured incident analysis and action plan.
 For actions_to_take, use these types:
 - "k8s_restart": restart a Kubernetes deployment (provide namespace + deployment)
 - "k8s_scale": scale a deployment (provide namespace + deployment + replicas)
-- "github_pr": create a GitHub PR with a code fix (provide title + body; if you can determine exact file changes, include file_patches as [{"path": "<file>", "content": "<full corrected file content>"}])
+- "github_pr": create a GitHub PR with a code fix (provide title + body; if you can determine exact file changes, include file_patches as [{{"path": "<file>", "content": "<full corrected file content>"}}])
 - "jira_ticket": create a Jira ticket (provide title + body)
 - "slack_warroom": create a Slack war room (provide title + description)
 - "opsgenie_alert": send OpsGenie alert (provide message + priority)
@@ -206,12 +273,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
     content = ""
     try:
-        response = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.content[0].text.strip()
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=2000)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -232,7 +294,7 @@ def review_pr(pr_data: dict) -> dict:
     pr_data: output of github.get_pr_for_review()
     Returns structured review with issues, recommendations, and a summary comment.
     """
-    if not client:
+    if not _provider:
         return {
             "error":            "ANTHROPIC_API_KEY not configured",
             "summary":          "AI review unavailable",
@@ -284,12 +346,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
     content = ""
     try:
-        response = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.content[0].text.strip()
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=2000)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -311,7 +368,7 @@ def predict_scaling(metrics_data: dict) -> dict:
     metrics_data: output of aws_ops.get_scaling_metrics()
     Returns a prediction with confidence, direction, and recommended action.
     """
-    if not client:
+    if not _provider:
         return {
             "error":                 "ANTHROPIC_API_KEY not configured",
             "should_scale":          False,
@@ -345,12 +402,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
     content = ""
     try:
-        response = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.content[0].text.strip()
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1000)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -373,7 +425,7 @@ def assess_deployment(context: dict) -> dict:
         k8s_state, recent_incidents, aws_alarms, recent_commits
     Returns structured JSON with risk_level, go_no_go, concerns, checklist.
     """
-    if not client:
+    if not _provider:
         return {
             "error":       "ANTHROPIC_API_KEY not configured",
             "go_no_go":    "no_go",
@@ -424,12 +476,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
     content = ""
     try:
-        response = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.content[0].text.strip()
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1500)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -452,7 +499,7 @@ def interpret_jira_for_pr(jira_data: dict) -> dict:
     jira_data keys: key, summary, description, issue_type, labels, reporter
     Returns: branch_name, pr_title, pr_body, file_patches (best-effort), target_files
     """
-    if not client:
+    if not _provider:
         return {
             "error":        "ANTHROPIC_API_KEY not configured",
             "pr_title":     jira_data.get("summary", "Change request"),
@@ -497,12 +544,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
     content = ""
     try:
-        response = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.content[0].text.strip()
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=2000)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -515,3 +557,49 @@ Respond ONLY in this JSON format (no markdown, no extra text):
         }
     except Exception as e:
         return {"error": str(e), "pr_title": jira_data.get("summary", ""), "file_patches": []}
+
+
+def chat_devops(message: str, history: list, context: dict) -> str:
+    """Conversational DevOps assistant with live context from all integrations."""
+    if not _provider:
+        return "No LLM configured. Install Ollama (free): https://ollama.com — or add ANTHROPIC_API_KEY / GROQ_API_KEY to .env"
+
+    configured = context.get("configured", [])
+    sources_str = ", ".join(configured) if configured else "none detected"
+
+    SYSTEM = f"""You are an expert DevOps AI assistant with live observability data from: {sources_str}.
+
+Data you have access to:
+- AWS: EC2 instances & status checks, CloudWatch alarms (firing/all), ECS services & stopped tasks, Lambda functions, RDS databases, S3 buckets, SQS queues, DynamoDB tables, Route53 health checks, CloudTrail recent events
+- Grafana: firing alerts and recent annotations (deployments, events)
+- Kubernetes: all pods with restart counts, deployments with ready/desired counts, cluster Warning events
+- GitHub: recent commits and pull requests
+- GitLab: recent pipelines, failed pipelines, deployments
+
+When users report a problem:
+1. Scan ALL the provided context — not just AWS — to find relevant signals
+2. Correlate across sources: a GitLab pipeline failure + restarting K8s pods + a CloudWatch alarm may all be the same incident
+3. Name specific resource IDs, pod names, pipeline IDs, alarm names from the actual data
+4. Clearly flag anything that looks wrong (stopped instances, firing alarms, OOMKilled pods, failed pipelines)
+5. Give a concise root cause assessment and 2-3 specific actions
+
+Format: short paragraphs and bullet points. Be direct and precise — this is live incident triage."""
+
+    messages = []
+    for h in history[-10:]:
+        messages.append({"role": h["role"], "content": h["content"]})
+
+    # Trim context to fit token budget — keep the most signal-rich parts first
+    ctx_str = json.dumps(context, default=str, indent=2)
+    if len(ctx_str) > 6000:
+        ctx_str = ctx_str[:6000] + "\n... (truncated)"
+
+    full_message = f"""{message}
+
+--- Live Infrastructure Context ({sources_str}) ---
+{ctx_str}
+--- End Context ---"""
+
+    messages.append({"role": "user", "content": full_message})
+
+    return _llm(SYSTEM, messages, max_tokens=1500)

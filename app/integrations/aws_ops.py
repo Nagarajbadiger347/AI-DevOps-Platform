@@ -11,17 +11,19 @@ Credentials are picked up automatically from:
 
 import datetime
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-
 
 def _client(service: str):
-    return boto3.client(service, region_name=AWS_REGION)
+    region = os.getenv("AWS_REGION", "us-west-2")
+    return boto3.client(service, region_name=region)
 
 def _now():
-    return datetime.datetime.utcnow()
+    return datetime.datetime.now(datetime.timezone.utc)
 
 def _hours_ago(h: int):
     return _now() - datetime.timedelta(hours=h)
@@ -49,31 +51,36 @@ def list_ec2_instances(state: str = "") -> dict:
                     "launch_time": i["LaunchTime"].isoformat(),
                     "az":          i["Placement"]["AvailabilityZone"],
                 })
-        return {"success": True, "region": AWS_REGION, "instances": instances, "count": len(instances)}
+        return {"success": True, "region": os.getenv("AWS_REGION", "us-west-2"), "instances": instances, "count": len(instances)}
     except (BotoCoreError, ClientError) as e:
         return {"success": False, "error": str(e)}
 
 
-def get_ec2_status_checks(instance_id: str) -> dict:
-    """Get system and instance status checks — identifies hardware/OS-level failures."""
+def get_ec2_status_checks(instance_id: str = "") -> dict:
+    """Get system and instance status checks for all instances (or a specific one)."""
     try:
         ec2 = _client("ec2")
-        resp = ec2.describe_instance_status(InstanceIds=[instance_id], IncludeAllInstances=True)
+        kwargs = {"IncludeAllInstances": True}
+        if instance_id:
+            kwargs["InstanceIds"] = [instance_id]
+        resp = ec2.describe_instance_status(**kwargs)
         statuses = resp.get("InstanceStatuses", [])
         if not statuses:
-            return {"success": False, "error": f"Instance {instance_id} not found"}
-        s = statuses[0]
-        return {
-            "success":        True,
-            "instance_id":    instance_id,
-            "instance_state": s["InstanceState"]["Name"],
-            "system_status":  s["SystemStatus"]["Status"],     # ok | impaired | insufficient-data
-            "instance_status": s["InstanceStatus"]["Status"],  # ok | impaired | insufficient-data
-            "system_events":  [
-                {"code": e["Code"], "description": e["Description"]}
-                for e in s["SystemStatus"].get("Events", [])
-            ],
-        }
+            return {"success": True, "statuses": [], "count": 0, "message": "No instances found"}
+        results = []
+        for s in statuses:
+            results.append({
+                "instance_id":     s["InstanceId"],
+                "instance_state":  s["InstanceState"]["Name"],
+                "system_status":   s["SystemStatus"]["Status"],
+                "instance_status": s["InstanceStatus"]["Status"],
+                "healthy":         s["SystemStatus"]["Status"] == "ok" and s["InstanceStatus"]["Status"] == "ok",
+                "events":          [
+                    {"code": e["Code"], "description": e["Description"]}
+                    for e in s["SystemStatus"].get("Events", [])
+                ],
+            })
+        return {"success": True, "statuses": results, "count": len(results)}
     except (BotoCoreError, ClientError) as e:
         return {"success": False, "error": str(e)}
 
@@ -85,7 +92,16 @@ def get_ec2_console_output(instance_id: str) -> dict:
         resp = ec2.get_console_output(InstanceId=instance_id)
         import base64
         raw = resp.get("Output", "")
-        decoded = base64.b64decode(raw).decode("utf-8", errors="replace") if raw else "(no output available)"
+        if not raw:
+            decoded = "(no output available)"
+        elif isinstance(raw, bytes):
+            decoded = raw.decode("utf-8", errors="replace")
+        else:
+            # boto3 returns the output already decoded as a string in newer SDK versions
+            try:
+                decoded = base64.b64decode(raw.encode("ascii")).decode("utf-8", errors="replace")
+            except (ValueError, UnicodeEncodeError):
+                decoded = raw  # already a plain string
         return {"success": True, "instance_id": instance_id, "output": decoded}
     except (BotoCoreError, ClientError) as e:
         return {"success": False, "error": str(e)}
@@ -446,7 +462,7 @@ def collect_diagnosis_context(resource_type: str, resource_id: str,
     ctx: dict = {
         "resource_type": resource_type,
         "resource_id":   resource_id,
-        "region":        AWS_REGION,
+        "region":        os.getenv("AWS_REGION", "us-west-2"),
         "hours":         hours,
     }
 
@@ -502,6 +518,129 @@ def collect_diagnosis_context(resource_type: str, resource_id: str,
     return ctx
 
 
+# ── S3 ────────────────────────────────────────────────────────
+
+def list_s3_buckets() -> dict:
+    """List S3 buckets with region and creation date."""
+    try:
+        s3   = _client("s3")
+        resp = s3.list_buckets()
+        buckets = [
+            {
+                "name":         b["Name"],
+                "created":      b["CreationDate"].isoformat(),
+            }
+            for b in resp.get("Buckets", [])
+        ]
+        return {"success": True, "buckets": buckets, "count": len(buckets)}
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── SQS ───────────────────────────────────────────────────────
+
+def list_sqs_queues() -> dict:
+    """List SQS queues with approximate message counts and DLQ depths."""
+    try:
+        sqs  = _client("sqs")
+        resp = sqs.list_queues()
+        urls = resp.get("QueueUrls", [])
+        queues = []
+        attrs  = ["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible",
+                  "ApproximateNumberOfMessagesDelayed", "QueueArn"]
+        for url in urls[:30]:
+            try:
+                qa = sqs.get_queue_attributes(QueueUrl=url, AttributeNames=attrs)["Attributes"]
+                queues.append({
+                    "name":    url.split("/")[-1],
+                    "url":     url,
+                    "visible": int(qa.get("ApproximateNumberOfMessages", 0)),
+                    "in_flight": int(qa.get("ApproximateNumberOfMessagesNotVisible", 0)),
+                    "delayed": int(qa.get("ApproximateNumberOfMessagesDelayed", 0)),
+                })
+            except (BotoCoreError, ClientError):
+                queues.append({"name": url.split("/")[-1], "url": url})
+        return {"success": True, "queues": queues, "count": len(queues)}
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── DynamoDB ──────────────────────────────────────────────────
+
+def list_dynamodb_tables() -> dict:
+    """List DynamoDB tables with status and item count."""
+    try:
+        ddb   = _client("dynamodb")
+        names = ddb.list_tables().get("TableNames", [])
+        tables = []
+        for name in names[:20]:
+            try:
+                info = ddb.describe_table(TableName=name)["Table"]
+                tables.append({
+                    "name":       name,
+                    "status":     info.get("TableStatus", ""),
+                    "item_count": info.get("ItemCount", 0),
+                    "size_bytes": info.get("TableSizeBytes", 0),
+                    "billing":    info.get("BillingModeSummary", {}).get("BillingMode", "PROVISIONED"),
+                })
+            except (BotoCoreError, ClientError):
+                tables.append({"name": name})
+        return {"success": True, "tables": tables, "count": len(tables)}
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Route53 Health Checks ─────────────────────────────────────
+
+def list_route53_healthchecks() -> dict:
+    """List Route53 health checks with current status."""
+    try:
+        r53    = boto3.client("route53")  # route53 is global, no region
+        checks = r53.list_health_checks().get("HealthChecks", [])
+        cw     = _client("cloudwatch")
+        results = []
+        for hc in checks[:20]:
+            hc_id = hc["Id"]
+            config = hc.get("HealthCheckConfig", {})
+            # Get health status
+            try:
+                status = r53.get_health_check_status(HealthCheckId=hc_id)
+                checks_status = status.get("HealthCheckObservations", [])
+                healthy = all(
+                    o.get("StatusReport", {}).get("Status", "").startswith("Success")
+                    for o in checks_status
+                )
+            except Exception:
+                healthy = None
+            results.append({
+                "id":       hc_id,
+                "type":     config.get("Type", ""),
+                "endpoint": config.get("FullyQualifiedDomainName", config.get("IPAddress", "")),
+                "port":     config.get("Port", ""),
+                "path":     config.get("ResourcePath", ""),
+                "healthy":  healthy,
+            })
+        return {"success": True, "health_checks": results, "count": len(results)}
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── SNS ───────────────────────────────────────────────────────
+
+def list_sns_topics() -> dict:
+    """List SNS topics."""
+    try:
+        sns    = _client("sns")
+        topics = sns.list_topics().get("Topics", [])
+        return {
+            "success": True,
+            "topics": [{"arn": t["TopicArn"], "name": t["TopicArn"].split(":")[-1]} for t in topics],
+            "count": len(topics),
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
 # ── Predictive Scaling Context ────────────────────────────────
 
 def get_scaling_metrics(resource_type: str, resource_id: str, hours: int = 6) -> dict:
@@ -513,7 +652,7 @@ def get_scaling_metrics(resource_type: str, resource_id: str, hours: int = 6) ->
     ctx: dict = {
         "resource_type": resource_type,
         "resource_id":   resource_id,
-        "region":        AWS_REGION,
+        "region":        os.getenv("AWS_REGION", "us-west-2"),
         "hours":         hours,
     }
 
