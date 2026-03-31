@@ -467,6 +467,20 @@ def root():
     /* ── RUN PIPELINE BUTTON ── */
     .run-btn{display:flex;align-items:center;gap:6px;padding:5px 14px;background:linear-gradient(135deg,rgba(37,99,235,.2),rgba(124,58,237,.15));border:1px solid rgba(79,142,247,.35);border-radius:20px;font-size:11.5px;font-weight:700;color:var(--blue);cursor:pointer;transition:all .15s;font-family:inherit}
     .run-btn:hover{background:linear-gradient(135deg,rgba(37,99,235,.35),rgba(124,58,237,.25));border-color:var(--blue);box-shadow:0 0 14px rgba(79,142,247,.2)}
+
+    /* ── ROLE BADGE ── */
+    .role-badge{display:inline-flex;align-items:center;gap:4px;font-size:9.5px;font-weight:700;padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.06em}
+    .role-admin{background:rgba(167,139,250,.15);color:var(--purple);border:1px solid rgba(167,139,250,.35)}
+    .role-developer{background:rgba(79,142,247,.15);color:var(--blue);border:1px solid rgba(79,142,247,.35)}
+    .role-viewer{background:rgba(52,211,153,.12);color:var(--green);border:1px solid rgba(52,211,153,.3)}
+
+    /* ── RBAC VISIBILITY ── */
+    /* viewer: hide write ops and admin panels */
+    body[data-role="viewer"] .rbac-dev,.body[data-role="viewer"] .rbac-admin{display:none!important}
+    /* developer: hide admin-only */
+    body[data-role="developer"] .rbac-admin{display:none!important}
+    /* generic hidden util */
+    .rbac-dev,.rbac-admin{transition:opacity .2s}
   </style>
 </head>
 <body>
@@ -491,14 +505,14 @@ def root():
     <button type="button" class="nav-link" onclick="showView('endpoints','aws',this)"><span class="ico">&#x2601;</span>AWS<span class="cnt">23</span></button>
     <button type="button" class="nav-link" onclick="showView('endpoints','pipeline',this)"><span class="ico">&#x1F916;</span>Pipeline<span class="cnt">1</span></button>
     <button type="button" class="nav-link" onclick="showView('endpoints','deploy',this)"><span class="ico">&#x1F680;</span>Deploy &amp; Jira<span class="cnt">3</span></button>
-    <button type="button" class="nav-link" onclick="showView('endpoints','webhooks',this)"><span class="ico">&#x1F517;</span>Webhooks<span class="cnt">2</span></button>
+    <button type="button" class="nav-link rbac-admin" onclick="showView('endpoints','webhooks',this)"><span class="ico">&#x1F517;</span>Webhooks<span class="cnt">2</span></button>
   </div>
 
   <div class="sb-divider"></div>
 
   <div class="sb-section">
     <span class="sb-label">Tools</span>
-    <button type="button" class="nav-link" onclick="showView('secrets','',this)"><span class="ico">&#x1F511;</span>Secrets &amp; Config</button>
+    <button type="button" class="nav-link rbac-admin" onclick="showView('secrets','',this)"><span class="ico">&#x1F511;</span>Secrets &amp; Config</button>
     <button type="button" class="nav-link" onclick="showView('chat','',this)"><span class="ico">&#x1F4AC;</span>AI Chat</button>
   </div>
 
@@ -511,12 +525,21 @@ def root():
 
   <div class="sb-footer">
     <div class="sb-user">
-      <div class="avatar">N</div>
+      <div class="avatar" id="sb-avatar">N</div>
       <div class="user-info">
-        <div class="uname">Nagaraj</div>
-        <div class="urole">Platform Owner</div>
+        <div class="uname" id="sb-uname">Nagaraj</div>
+        <div class="urole"><span id="sb-role-badge" class="role-badge role-admin">admin</span></div>
       </div>
-      <div class="live-dot"><div class="pulse" style="width:6px;height:6px"></div>Live</div>
+      <div class="live-dot" style="cursor:pointer;position:relative" title="Switch user" onclick="toggleUserSwitch()">
+        <span style="font-size:11px;color:var(--muted)">&#x21C5;</span>
+      </div>
+    </div>
+    <div id="user-switch-panel" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+      <div style="font-size:9.5px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">Switch user</div>
+      <div style="display:flex;gap:6px">
+        <input id="sb-user-input" style="flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:5px 8px;font-size:11.5px;color:var(--text);outline:none;font-family:inherit" placeholder="username" value="nagaraj"/>
+        <button onclick="applyUser()" style="padding:5px 10px;background:var(--blue2);border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit">Go</button>
+      </div>
     </div>
   </div>
 </nav>
@@ -579,7 +602,7 @@ def root():
         <span class="tb-chip int-chip" id="int-jira" title="Jira"><span class="dot"></span>Jira</span>
         <span class="tb-chip int-chip" id="int-opsgenie" title="OpsGenie"><span class="dot"></span>OpsGenie</span>
         <div style="width:1px;height:20px;background:var(--border);margin:0 4px"></div>
-        <button class="run-btn" onclick="document.getElementById('run-modal').classList.add('open')" title="Run AI Pipeline (R)">&#x25B6; Run Pipeline</button>
+        <button class="run-btn rbac-dev" onclick="document.getElementById('run-modal').classList.add('open')" title="Run AI Pipeline (R)">&#x25B6; Run Pipeline</button>
       </div>
     </div>
 
@@ -614,11 +637,11 @@ def root():
         <div class="mc-sub">Blocked actions</div>
         <div class="mc-bar"></div>
       </div>
-      <div class="mc fade-in" style="background:linear-gradient(135deg,rgba(37,99,235,.12),rgba(124,58,237,.08));border-color:rgba(79,142,247,.25);cursor:pointer;min-width:130px" onclick="document.getElementById('run-modal').classList.add('open')" title="Run AI Pipeline">
-        <div class="mc-label" style="color:var(--blue)">&#x1F680; Quick Action</div>
-        <div class="mc-val" style="font-size:13px;color:var(--blue);padding-top:4px">Run Pipeline</div>
-        <div class="mc-sub" style="color:var(--blue);opacity:.7">LangGraph &#x2192; AI</div>
-        <div class="mc-bar" style="background:linear-gradient(90deg,var(--blue2),var(--purple2))"></div>
+      <div class="mc mc-amber fade-in" title="Your current access role">
+        <div class="mc-label">&#x1F512; Access Role</div>
+        <div class="mc-val" id="m-role" style="font-size:15px;padding-top:4px">&#x2014;</div>
+        <div class="mc-sub" id="m-role-perms">Loading...</div>
+        <div class="mc-bar"></div>
       </div>
     </div>
 
@@ -644,16 +667,16 @@ def root():
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/chat</span><span class="ep-desc">Conversational AI (LLM + live context)</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/ws</span><span class="ep-desc">WebSocket streaming chat</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/secrets/status</span><span class="ep-desc">Integration key status</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/secrets</span><span class="ep-desc">Save/update credentials</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/security/roles</span><span class="ep-desc">List all RBAC roles</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/security/roles/assign</span><span class="ep-desc">Assign role to user</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row rbac-admin" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/secrets</span><span class="ep-desc">Save/update credentials</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row rbac-admin" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/security/roles</span><span class="ep-desc">List all RBAC roles</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row rbac-admin" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/security/roles/assign</span><span class="ep-desc">Assign role to user</span><span class="ep-lock">&#x1F512;</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/warroom/create</span><span class="ep-desc">AI war room + Slack channel</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/grafana/alerts</span><span class="ep-desc">Firing Grafana alerts</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/grafana/dashboards</span><span class="ep-desc">List dashboards</span></div>
         </div>
       </div>
 
-      <div data-section="pipeline">
+      <div data-section="pipeline" class="rbac-dev">
         <div class="ep-group">
           <div class="ep-group-hdr"><span class="ico">&#x1F916;</span><span class="g-name">AI Pipeline (LangGraph)</span><span class="g-cnt">4</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/incidents/run</span><span class="ep-desc">Run full autonomous pipeline</span></div>
@@ -663,7 +686,7 @@ def root():
         </div>
       </div>
 
-      <div data-section="webhooks">
+      <div data-section="webhooks" class="rbac-admin">
         <div class="ep-group">
           <div class="ep-group-hdr"><span class="ico">&#x1F517;</span><span class="g-name">Webhooks (Event-Driven)</span><span class="g-cnt">2</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/webhooks/github</span><span class="ep-desc">GitHub push / PR events</span></div>
@@ -678,8 +701,8 @@ def root():
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/pods</span><span class="ep-desc">List pods with status</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/deployments</span><span class="ep-desc">Deployment readiness</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/logs/{ns}/{pod}</span><span class="ep-desc">Pod logs</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/restart</span><span class="ep-desc">Rolling restart deployment</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/scale</span><span class="ep-desc">Scale deployment replicas</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row rbac-dev" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/restart</span><span class="ep-desc">Rolling restart deployment</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row rbac-dev" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/scale</span><span class="ep-desc">Scale deployment replicas</span><span class="ep-lock">&#x1F512;</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/diagnose</span><span class="ep-desc">AI K8s diagnosis</span></div>
         </div>
       </div>
@@ -1182,6 +1205,61 @@ function createWarRoom() {
 }
 
 loadMetrics();
+loadRole('nagaraj');
+
+/* ── RBAC ROLE LOADER ── */
+var _currentUser = 'nagaraj';
+var _currentRole = 'admin';
+
+function loadRole(user) {
+  _currentUser = user || 'nagaraj';
+  fetch('/auth/me?user=' + encodeURIComponent(_currentUser))
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      _currentRole = d.role || 'viewer';
+      applyRoleUI(d);
+    }).catch(function(){});
+}
+
+function applyRoleUI(d) {
+  var role = d.role || 'viewer';
+  var perms = d.permissions || [];
+  // Set body data-role for CSS visibility rules
+  document.body.dataset.role = role;
+  // Update sidebar footer
+  var badge = document.getElementById('sb-role-badge');
+  if (badge) {
+    badge.textContent = role;
+    badge.className = 'role-badge role-' + role;
+  }
+  var uname = document.getElementById('sb-uname');
+  if (uname) uname.textContent = d.user || _currentUser;
+  var avatar = document.getElementById('sb-avatar');
+  if (avatar) avatar.textContent = (d.user || _currentUser)[0].toUpperCase();
+  // Update role metric card
+  var mRole = document.getElementById('m-role');
+  if (mRole) mRole.textContent = role.charAt(0).toUpperCase() + role.slice(1);
+  var mRolePerms = document.getElementById('m-role-perms');
+  if (mRolePerms) mRolePerms.textContent = perms.length ? perms.join(', ') : 'read only';
+  // Sync user field in secrets panel
+  var secUser = document.getElementById('sec-user');
+  if (secUser) secUser.value = d.user || _currentUser;
+  toast('Signed in as ' + (d.user || _currentUser) + ' (' + role + ')', 'info', 2000);
+}
+
+function toggleUserSwitch() {
+  var p = document.getElementById('user-switch-panel');
+  if (p) p.style.display = p.style.display === 'none' ? '' : 'none';
+}
+
+function applyUser() {
+  var inp = document.getElementById('sb-user-input');
+  var u = inp ? inp.value.trim() : '';
+  if (!u) return;
+  var panel = document.getElementById('user-switch-panel');
+  if (panel) panel.style.display = 'none';
+  loadRole(u);
+}
 
 /* ── TOAST ── */
 function toast(msg, type, dur) {
@@ -1304,6 +1382,16 @@ document.addEventListener('keydown', function(e) {
 </body>
 </html>
 """, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+
+@app.get("/auth/me")
+def auth_me(user: str = "nagaraj"):
+    """Return role and permissions for a user. Defaults to 'nagaraj' (admin)."""
+    from app.security.rbac import ROLE_PERMISSIONS, _user_roles
+    u = user.strip().lower()
+    role = _user_roles.get(u, "viewer")
+    perms = list(ROLE_PERMISSIONS.get(role, set()))
+    return {"user": u, "role": role, "permissions": perms}
 
 
 @app.get("/health")
