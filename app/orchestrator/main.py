@@ -23,6 +23,7 @@ from app.integrations.github import (
 from app.integrations.k8s_ops import restart_deployment, scale_deployment, get_pod_logs
 from app.integrations.aws_ops import (
     list_ec2_instances, get_ec2_status_checks, get_ec2_console_output,
+    start_ec2_instance, stop_ec2_instance, reboot_ec2_instance,
     list_log_groups, get_recent_logs, search_logs,
     list_cloudwatch_alarms, get_metric,
     list_ecs_services, get_stopped_ecs_tasks,
@@ -2401,8 +2402,9 @@ _chat_action_count = 0  # session counter shown in UI metric
 
 # ── agentic action catalogue ──────────────────────────────────
 _ACTION_CATALOGUE = {
+    # ── Kubernetes ──────────────────────────────────────────────
     "restart_deployment": {
-        "desc": "Restart a Kubernetes deployment",
+        "desc": "Restart a Kubernetes deployment (rolling restart)",
         "params": ["namespace", "deployment"],
         "handler": lambda p: restart_deployment(p["namespace"], p["deployment"]),
     },
@@ -2416,11 +2418,40 @@ _ACTION_CATALOGUE = {
         "params": ["namespace", "pod"],
         "handler": lambda p: get_pod_logs(p["namespace"], p["pod"]),
     },
+    # ── EC2 ─────────────────────────────────────────────────────
+    "start_ec2": {
+        "desc": "Start a stopped EC2 instance by instance ID",
+        "params": ["instance_id"],
+        "handler": lambda p: start_ec2_instance(p["instance_id"]),
+    },
+    "stop_ec2": {
+        "desc": "Stop a running EC2 instance by instance ID",
+        "params": ["instance_id"],
+        "handler": lambda p: stop_ec2_instance(p["instance_id"]),
+    },
+    "reboot_ec2": {
+        "desc": "Reboot an EC2 instance by instance ID",
+        "params": ["instance_id"],
+        "handler": lambda p: reboot_ec2_instance(p["instance_id"]),
+    },
+    "list_ec2": {
+        "desc": "List all EC2 instances and their states",
+        "params": [],
+        "handler": lambda _: list_ec2_instances(),
+    },
+    # ── Observability ────────────────────────────────────────────
+    "get_alarms": {
+        "desc": "Get CloudWatch alarms",
+        "params": [],
+        "handler": lambda _: list_cloudwatch_alarms(),
+    },
+    # ── GitHub ───────────────────────────────────────────────────
     "create_github_issue": {
         "desc": "Open a GitHub issue",
         "params": ["title", "body"],
         "handler": lambda p: create_issue(p.get("title", "AI-generated issue"), p.get("body", "")),
     },
+    # ── Incidents ────────────────────────────────────────────────
     "run_pipeline": {
         "desc": "Run the full autonomous incident response pipeline",
         "params": ["incident_id", "description", "severity"],
@@ -2435,19 +2466,9 @@ _ACTION_CATALOGUE = {
         "desc": "Create a Jira incident ticket",
         "params": ["summary", "description"],
         "handler": lambda p: create_incident(
-            incident_id=f"chat-{__import__('time').strftime('%H%M%S')}",
+            summary=p.get("summary", "AI DevOps Incident"),
             description=p.get("description", p.get("summary", "")),
         ),
-    },
-    "list_ec2": {
-        "desc": "List EC2 instances",
-        "params": [],
-        "handler": lambda _: list_ec2_instances(),
-    },
-    "get_alarms": {
-        "desc": "Get CloudWatch alarms",
-        "params": [],
-        "handler": lambda _: list_cloudwatch_alarms(),
     },
     "notify_oncall": {
         "desc": "Page the on-call team via OpsGenie",
@@ -2458,31 +2479,32 @@ _ACTION_CATALOGUE = {
 
 _INTENT_SYSTEM = """You are an intent classifier for a DevOps automation platform.
 
-Given a user message, decide:
-1. Is this an ACTION request (the user wants the system to DO something)?
-2. Or is this a QUESTION/INFORMATION request?
+Decide: is the user asking to DO something, or asking a question?
 
-If it is an action, output JSON like:
-{"intent": "action", "action": "<action_name>", "params": {<param_key>: <value>, ...}, "confirm_message": "<one sentence describing what you will do>"}
+If DO → output:
+{"intent": "action", "action": "<name>", "params": {<key>: <value>}}
 
-If it is a question or information request, output:
+If QUESTION → output:
 {"intent": "question"}
 
-Available actions:
-- restart_deployment: params = namespace, deployment
-- scale_deployment: params = namespace, deployment, replicas (integer)
-- get_pod_logs: params = namespace, pod
-- create_github_issue: params = title, body
-- run_pipeline: params = incident_id (optional), description, severity (critical/high/medium/low)
-- create_jira_ticket: params = summary, description
-- list_ec2: params = (none)
-- get_alarms: params = (none)
-- notify_oncall: params = message, priority (P1/P2/P3)
+Available actions (ONLY these — never invent others):
+- restart_deployment: namespace, deployment
+- scale_deployment: namespace, deployment, replicas (int)
+- get_pod_logs: namespace, pod
+- start_ec2: instance_id
+- stop_ec2: instance_id
+- reboot_ec2: instance_id
+- list_ec2: (no params)
+- get_alarms: (no params)
+- create_github_issue: title, body
+- run_pipeline: description, severity (critical/high/medium/low), incident_id (optional)
+- create_jira_ticket: summary, description
+- notify_oncall: message, priority (P1/P2/P3)
 
 Rules:
-- Only classify as action if the user clearly wants an operation performed
-- Extract params from the message; use sensible defaults for missing optional params
-- Output ONLY valid JSON, no markdown, no extra text"""
+- Extract params literally from the message
+- If a required param (like instance_id) is missing and cannot be inferred, output {"intent": "question"} instead
+- Output ONLY valid JSON, no markdown, nothing else"""
 
 
 def _detect_intent(message: str, force_provider: str = "") -> dict:
@@ -2499,55 +2521,89 @@ def _detect_intent(message: str, force_provider: str = "") -> dict:
 
 @app.post("/chat")
 def chat(payload: ChatPayload):
-    """Conversational DevOps AI — collects live context and executes real operations on request."""
+    """Conversational DevOps AI — executes real operations and gives honest, concise answers."""
     global _chat_action_count
-    from app.llm.claude import _provider
+    import json as _j
+    from app.llm.claude import _provider, _llm
 
-    context: dict = {}
-    context_error: str = ""
-    try:
-        context = collect_all_context(hours=2)
-    except Exception as e:
-        context_error = str(e)
-
-    history = [{"role": m.role, "content": m.content} for m in payload.history]
     force_prov = payload.provider or ""
+    history = [{"role": m.role, "content": m.content} for m in payload.history]
 
-    # ── Step 1: classify intent ───────────────────────────────
+    # ── Step 1: classify intent ──────────────────────────────
     intent_data = _detect_intent(payload.message, force_prov)
     action_result = None
-    action_taken = None
+    action_taken  = None
+    reply         = ""
 
     if intent_data.get("intent") == "action":
         action_name = intent_data.get("action", "")
-        action_def = _ACTION_CATALOGUE.get(action_name)
-        if action_def:
+        action_def  = _ACTION_CATALOGUE.get(action_name)
+
+        if not action_def:
+            # Classifier named an action we don't support — be honest
+            reply = (
+                f"I understood you want to **{action_name.replace('_', ' ')}**, "
+                f"but that operation is not in my action set yet. "
+                f"I can do: restart/scale K8s deployments, start/stop/reboot EC2, "
+                f"list EC2/alarms, create GitHub issues or Jira tickets, run incident pipeline, page on-call."
+            )
+        else:
+            # ── Execute the real operation ──────────────────
             try:
                 result = action_def["handler"](intent_data.get("params", {}))
                 action_result = result
-                action_taken = action_name
+                action_taken  = action_name
                 _chat_action_count += 1
             except Exception as exc:
-                action_result = {"error": str(exc)}
+                action_result = {"success": False, "error": str(exc)}
 
-    # ── Step 2: build reply with context + optional action result ──
-    msg = payload.message
-    if action_result is not None:
-        import json as _json2
-        action_block = f"\n\n[ACTION EXECUTED: {action_taken}]\n{_json2.dumps(action_result, default=str, indent=2)}\n[END ACTION RESULT]"
-        msg = msg + action_block
+            # ── Build reply strictly from actual result ──────
+            succeeded = action_result.get("success", False) if isinstance(action_result, dict) else True
+            result_json = _j.dumps(action_result, default=str, indent=2)
 
-    reply = chat_devops(msg, history, context, force_provider=force_prov)
+            ACTION_REPLY_SYSTEM = (
+                "You are a DevOps assistant. The user asked you to perform an operation. "
+                "The ACTUAL result from executing that operation is shown below. "
+                "Write a reply of 1-3 sentences maximum based ONLY on that result. "
+                "If success=true: confirm what happened using the real values (IDs, states, counts). "
+                "If success=false or there is an error key: clearly state it failed and quote the error. "
+                "NEVER say the operation succeeded if success is false. "
+                "NEVER add suggestions, next steps, or extra commentary unless the result itself contains them. "
+                "Be direct and factual."
+            )
+            try:
+                reply = _llm(
+                    ACTION_REPLY_SYSTEM,
+                    [{"role": "user", "content":
+                        f"User asked: {payload.message}\n\nOperation: {action_name}\nResult:\n{result_json}"}],
+                    max_tokens=300,
+                    force_provider=force_prov,
+                )
+            except Exception:
+                # Fallback: build reply from result dict without LLM
+                if succeeded:
+                    reply = f"✅ `{action_name}` completed. " + _j.dumps(
+                        {k: v for k, v in action_result.items() if k != "success"}, default=str)
+                else:
+                    reply = f"❌ `{action_name}` failed: {action_result.get('error', 'unknown error')}"
+
+    # ── Step 2: question / general chat ─────────────────────
+    if not reply:
+        context: dict = {}
+        try:
+            context = collect_all_context(hours=2)
+        except Exception:
+            pass
+        reply = chat_devops(payload.message, history, context, force_provider=force_prov)
 
     used_provider = force_prov or _provider or "none"
     return {
-        "reply":          reply,
-        "sources":        context.get("configured", []),
-        "llm_provider":   used_provider,
-        "context_error":  context_error or None,
-        "action_taken":   action_taken,
-        "action_result":  action_result,
-        "action_count":   _chat_action_count,
+        "reply":         reply,
+        "sources":       [],
+        "llm_provider":  used_provider,
+        "action_taken":  action_taken,
+        "action_result": action_result,
+        "action_count":  _chat_action_count,
     }
 
 @app.get("/chat/action_count")

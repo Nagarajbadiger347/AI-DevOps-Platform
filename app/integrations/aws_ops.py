@@ -88,6 +88,48 @@ def get_ec2_status_checks(instance_id: str = "") -> dict:
         return {"success": False, "error": str(e)}
 
 
+def start_ec2_instance(instance_id: str) -> dict:
+    """Start a stopped EC2 instance."""
+    try:
+        ec2 = _client("ec2")
+        resp = ec2.start_instances(InstanceIds=[instance_id])
+        change = resp["StartingInstances"][0]
+        return {
+            "success":       True,
+            "instance_id":   instance_id,
+            "previous_state": change["PreviousState"]["Name"],
+            "current_state":  change["CurrentState"]["Name"],
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "instance_id": instance_id, "error": str(e)}
+
+
+def stop_ec2_instance(instance_id: str) -> dict:
+    """Stop a running EC2 instance."""
+    try:
+        ec2 = _client("ec2")
+        resp = ec2.stop_instances(InstanceIds=[instance_id])
+        change = resp["StoppingInstances"][0]
+        return {
+            "success":       True,
+            "instance_id":   instance_id,
+            "previous_state": change["PreviousState"]["Name"],
+            "current_state":  change["CurrentState"]["Name"],
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "instance_id": instance_id, "error": str(e)}
+
+
+def reboot_ec2_instance(instance_id: str) -> dict:
+    """Reboot a running EC2 instance."""
+    try:
+        ec2 = _client("ec2")
+        ec2.reboot_instances(InstanceIds=[instance_id])
+        return {"success": True, "instance_id": instance_id, "action": "rebooted"}
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "instance_id": instance_id, "error": str(e)}
+
+
 def get_ec2_console_output(instance_id: str) -> dict:
     """Retrieve the last console/serial output of an EC2 instance (kernel panics, boot errors)."""
     try:

@@ -603,24 +603,18 @@ def chat_devops(message: str, history: list, context: dict,
     all_integrations = {"aws", "grafana", "k8s", "github", "gitlab"}
     missing = sorted(all_integrations - set(configured))
 
-    SYSTEM = f"""You are an expert AI assistant embedded in a DevOps intelligence platform.
-You can answer any question — general knowledge, coding, architecture, debugging, cloud, Kubernetes, CI/CD, security, scripting, and more.
+    SYSTEM = f"""You are a DevOps AI assistant. Answer concisely and directly.
 
-CRITICAL RULE — NEVER FABRICATE INFRASTRUCTURE DATA:
-- Only reference resource names, pod names, instance IDs, alarm names, metrics, or logs that appear VERBATIM in the live context provided below.
-- If an integration is not configured or has no data, say so plainly. Do NOT invent example data, placeholder names, or hypothetical scenarios as if they were real.
-- If the user asks about infrastructure and you have no real data for it, respond with what IS configured and offer to help once they connect that integration.
+STRICT RULES:
+- NEVER fabricate infrastructure data. Only use resource names, IDs, pod names, alarm names that appear VERBATIM in the live context below.
+- If an integration has no data or is not configured, say so in one sentence. Do not invent examples.
+- Keep answers short — use bullet points for lists, code blocks for commands/configs.
+- For questions about running state (pods, instances, alarms): answer from live context only. If no context, say "No live data — configure the integration in Secrets."
+- For general DevOps questions (concepts, how-to, code): answer from knowledge, keep it focused.
+- Do NOT add disclaimers, next steps, or padding unless directly asked.
 
-Currently configured integrations with live data: {sources_str if has_context else "none"}
-Integrations NOT configured / no data available: {", ".join(missing) if missing else "none"}
-
-Guidelines:
-- Be direct and conversational — match the tone of the question
-- For infrastructure questions WITH real context: reference only actual resource names/IDs from the data
-- For infrastructure questions WITHOUT real context: clearly state the integration is not connected, explain what to set in the Secrets panel to enable it
-- For general questions (concepts, how-tos, code): answer fully from your knowledge
-- For code/script requests: provide working code with brief explanation
-- Use markdown (bullets, code blocks) when it helps readability"""
+Live integrations: {sources_str if has_context else "none configured"}
+No data from: {", ".join(missing) if missing else "all configured"}"""
 
     messages = []
     for h in history[-12:]:
@@ -639,7 +633,7 @@ Guidelines:
 
     messages.append({"role": "user", "content": message + ctx_block})
 
-    return _llm(SYSTEM, messages, max_tokens=2048, force_provider=force_provider)
+    return _llm(SYSTEM, messages, max_tokens=800, force_provider=force_provider)
 
 
 # ── BaseLLM-compatible provider class ────────────────────────────────────────
