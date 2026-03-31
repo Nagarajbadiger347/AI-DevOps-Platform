@@ -191,7 +191,7 @@ def root():
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>NexusOps — AI DevOps Intelligence</title>
+  <title>DevOps AI — Autonomous Operations Platform</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
   <style>
@@ -489,8 +489,8 @@ def root():
   <div class="sb-logo">
     <div class="logo-mark">&#x26A1;</div>
     <div class="logo-text">
-      <div class="name">NexusOps</div>
-      <div class="tag">AI DevOps Intelligence</div>
+      <div class="name">DevOps AI</div>
+      <div class="tag">Autonomous Platform</div>
     </div>
   </div>
   <div class="sb-status">
@@ -570,13 +570,14 @@ def root():
       <div class="chat-empty" id="chat-empty">
         <div class="chat-empty-icon">&#x1F916;</div>
         <div class="chat-empty-title">DevOps AI Assistant</div>
-        <div class="chat-empty-sub">Ask anything about your infrastructure. I have live access to AWS, Kubernetes, GitHub, Grafana and more &#x2014; I will never fabricate data.</div>
+        <div class="chat-empty-sub">Ask questions or give commands. I can restart deployments, scale pods, create issues, page on-call, run pipelines &#x2014; and always use live data, never guesses.</div>
         <div class="chat-suggestions">
           <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F4CA; Full infrastructure overview</button>
           <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F6A8; Any alerts firing right now?</button>
-          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x2638; Unhealthy pods or failed deployments?</button>
-          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F4C8; Did a recent deploy cause this issue?</button>
+          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x2638; Restart the payment-service deployment in production</button>
+          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F4C8; Scale the api-gateway to 5 replicas in default namespace</button>
           <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F50D; My service is down &#x2014; find root cause</button>
+          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F41B; Create a GitHub issue: high CPU usage on production pods</button>
         </div>
       </div>
     </div>
@@ -589,7 +590,7 @@ def root():
   <!-- ── MAIN CONTENT ── -->
   <div id="content-wrap">
     <div class="topbar">
-      <div class="topbar-title">AI DevOps Intelligence Platform</div>
+      <div class="topbar-title">AI Operations Platform</div>
       <span class="topbar-ver">v2.0</span>
       <div class="topbar-spacer"></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center" id="int-chips">
@@ -640,7 +641,13 @@ def root():
       <div class="mc mc-amber fade-in" title="Your current access role">
         <div class="mc-label">&#x1F512; Access Role</div>
         <div class="mc-val" id="m-role" style="font-size:15px;padding-top:4px">&#x2014;</div>
-        <div class="mc-sub" id="m-role-perms">Loading...</div>
+        <div class="mc-sub" id="m-role-perms">Checking...</div>
+        <div class="mc-bar"></div>
+      </div>
+      <div class="mc mc-green fade-in" title="AI actions executed this session">
+        <div class="mc-label">&#x1F916; AI Actions</div>
+        <div class="mc-val" id="m-actions" style="font-size:22px">0</div>
+        <div class="mc-sub">Executed this session</div>
         <div class="mc-bar"></div>
       </div>
     </div>
@@ -678,7 +685,7 @@ def root():
 
       <div data-section="pipeline" class="rbac-dev">
         <div class="ep-group">
-          <div class="ep-group-hdr"><span class="ico">&#x1F916;</span><span class="g-name">AI Pipeline (LangGraph)</span><span class="g-cnt">4</span></div>
+          <div class="ep-group-hdr"><span class="ico">&#x1F916;</span><span class="g-name">AI Response Engine</span><span class="g-cnt">4</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/incidents/run</span><span class="ep-desc">Run full autonomous pipeline</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/incidents/run/async</span><span class="ep-desc">Async pipeline with job ID</span></div>
           <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/incidents/{id}</span><span class="ep-desc">Get incident status</span></div>
@@ -751,7 +758,7 @@ def root():
 
       <div data-section="pipeline">
         <div class="ep-group" style="border-color:rgba(79,142,247,.25)">
-          <div class="pipeline-hdr"><span class="ico" style="font-size:16px">&#x1F916;</span><span class="g-name" style="color:#93c5fd">LangGraph Pipeline Flow</span><span class="pipeline-badge">7-Stage</span></div>
+          <div class="pipeline-hdr"><span class="ico" style="font-size:16px">&#x1F916;</span><span class="g-name" style="color:#93c5fd">Autonomous Response Flow</span><span class="pipeline-badge">7-Stage</span></div>
           <div class="flow-row">
             <div class="fstep"><span class="fstep-ic">&#x1F4E1;</span><span class="fstep-lb">Collect</span><span class="fstep-sb">AWS/K8s/Git</span></div>
             <span class="farr">&#x279C;</span>
@@ -847,7 +854,7 @@ def root():
       <span style="opacity:.3">&#x2022;</span>
       <a href="/health/full" target="_blank">Health</a>
       <span style="opacity:.3">&#x2022;</span>
-      <span>v2.0.0 &#x2022; LangGraph &#x2022; Multi-LLM</span>
+      <span>v2.0.0 &#x2022; Multi-Agent AI &#x2022; Autonomous</span>
     </div>
   </div><!-- /content-wrap -->
 
@@ -860,7 +867,7 @@ def root():
 <div class="modal-overlay" id="run-modal" onclick="if(event.target===this)this.classList.remove('open')">
   <div class="modal">
     <div class="modal-title">&#x1F916; Run AI Pipeline</div>
-    <div class="modal-sub">Trigger the full LangGraph autonomous incident response pipeline</div>
+    <div class="modal-sub">Trigger the full autonomous AI incident response engine</div>
     <div class="modal-field">
       <label class="modal-label">Incident ID</label>
       <input class="modal-input" id="m-inc-id" placeholder="INC-2024-001" type="text"/>
@@ -1158,6 +1165,17 @@ function sendChat() {
       prov.textContent = pLabel;
       footer.appendChild(prov);
     }
+    // Show action badge if an operation was executed
+    if (d.action_taken) {
+      var actionBadge = document.createElement('div');
+      actionBadge.style.cssText = 'margin-top:8px;padding:6px 10px;background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.3);border-radius:6px;font-size:11px;color:var(--green);display:flex;align-items:center;gap:6px';
+      actionBadge.innerHTML = '<span>&#x2705;</span><span>Action executed: <strong>' + d.action_taken.replace(/_/g,' ') + '</strong></span>';
+      typingBubble.parentElement.appendChild(actionBadge);
+      // update session counter
+      var mA = document.getElementById('m-actions');
+      if (mA && d.action_count !== undefined) animateNum(mA, d.action_count);
+      toast('Action completed: ' + d.action_taken.replace(/_/g,' '), 'ok', 3000);
+    }
     if (footer.children.length) typingBubble.parentElement.appendChild(footer);
     document.getElementById('chat-messages').scrollTop = 999999;
     btn.disabled = false;
@@ -1240,7 +1258,8 @@ function applyRoleUI(d) {
   var mRole = document.getElementById('m-role');
   if (mRole) mRole.textContent = role.charAt(0).toUpperCase() + role.slice(1);
   var mRolePerms = document.getElementById('m-role-perms');
-  if (mRolePerms) mRolePerms.textContent = perms.length ? perms.join(', ') : 'read only';
+  var roleDesc = {admin: 'Full platform access', developer: 'Read, write & deploy', viewer: 'View-only access'};
+  if (mRolePerms) mRolePerms.textContent = roleDesc[role] || 'Limited access';
   // Sync user field in secrets panel
   var secUser = document.getElementById('sec-user');
   if (secUser) secUser.value = d.user || _currentUser;
@@ -2132,9 +2151,110 @@ async def webhook_pagerduty(payload: PagerDutyWebhookPayload):
         return {"status": "triggered", "incident_id": f"pd-{inc_id}", "pipeline": result.get("status")}
     return {"status": "no_messages"}
 
+_chat_action_count = 0  # session counter shown in UI metric
+
+# ── agentic action catalogue ──────────────────────────────────
+_ACTION_CATALOGUE = {
+    "restart_deployment": {
+        "desc": "Restart a Kubernetes deployment",
+        "params": ["namespace", "deployment"],
+        "handler": lambda p: restart_deployment(p["namespace"], p["deployment"]),
+    },
+    "scale_deployment": {
+        "desc": "Scale a Kubernetes deployment to N replicas",
+        "params": ["namespace", "deployment", "replicas"],
+        "handler": lambda p: scale_deployment(p["namespace"], p["deployment"], int(p["replicas"])),
+    },
+    "get_pod_logs": {
+        "desc": "Fetch recent logs for a specific pod",
+        "params": ["namespace", "pod"],
+        "handler": lambda p: get_pod_logs(p["namespace"], p["pod"]),
+    },
+    "create_github_issue": {
+        "desc": "Open a GitHub issue",
+        "params": ["title", "body"],
+        "handler": lambda p: create_issue(p.get("title", "AI-generated issue"), p.get("body", "")),
+    },
+    "run_pipeline": {
+        "desc": "Run the full autonomous incident response pipeline",
+        "params": ["incident_id", "description", "severity"],
+        "handler": lambda p: run_incident_pipeline(
+            incident_id=p.get("incident_id", f"chat-{__import__('time').strftime('%H%M%S')}"),
+            description=p["description"],
+            severity=p.get("severity", "high"),
+            aws_config={}, k8s_config={}, auto_remediate=False,
+        ),
+    },
+    "create_jira_ticket": {
+        "desc": "Create a Jira incident ticket",
+        "params": ["summary", "description"],
+        "handler": lambda p: create_incident(
+            incident_id=f"chat-{__import__('time').strftime('%H%M%S')}",
+            description=p.get("description", p.get("summary", "")),
+        ),
+    },
+    "list_ec2": {
+        "desc": "List EC2 instances",
+        "params": [],
+        "handler": lambda _: list_ec2_instances(),
+    },
+    "get_alarms": {
+        "desc": "Get CloudWatch alarms",
+        "params": [],
+        "handler": lambda _: list_cloudwatch_alarms(),
+    },
+    "notify_oncall": {
+        "desc": "Page the on-call team via OpsGenie",
+        "params": ["message", "priority"],
+        "handler": lambda p: notify_on_call(p.get("message", ""), p.get("priority", "P2")),
+    },
+}
+
+_INTENT_SYSTEM = """You are an intent classifier for a DevOps automation platform.
+
+Given a user message, decide:
+1. Is this an ACTION request (the user wants the system to DO something)?
+2. Or is this a QUESTION/INFORMATION request?
+
+If it is an action, output JSON like:
+{"intent": "action", "action": "<action_name>", "params": {<param_key>: <value>, ...}, "confirm_message": "<one sentence describing what you will do>"}
+
+If it is a question or information request, output:
+{"intent": "question"}
+
+Available actions:
+- restart_deployment: params = namespace, deployment
+- scale_deployment: params = namespace, deployment, replicas (integer)
+- get_pod_logs: params = namespace, pod
+- create_github_issue: params = title, body
+- run_pipeline: params = incident_id (optional), description, severity (critical/high/medium/low)
+- create_jira_ticket: params = summary, description
+- list_ec2: params = (none)
+- get_alarms: params = (none)
+- notify_oncall: params = message, priority (P1/P2/P3)
+
+Rules:
+- Only classify as action if the user clearly wants an operation performed
+- Extract params from the message; use sensible defaults for missing optional params
+- Output ONLY valid JSON, no markdown, no extra text"""
+
+
+def _detect_intent(message: str, force_provider: str = "") -> dict:
+    """Use LLM to classify whether message is an action or a question."""
+    import json as _json
+    from app.llm.claude import _llm, _extract_json
+    try:
+        raw = _llm(_INTENT_SYSTEM, [{"role": "user", "content": message}],
+                   max_tokens=400, force_provider=force_provider)
+        return _json.loads(_extract_json(raw))
+    except Exception:
+        return {"intent": "question"}
+
+
 @app.post("/chat")
 def chat(payload: ChatPayload):
-    """Conversational DevOps AI — collects live context from ALL integrations."""
+    """Conversational DevOps AI — collects live context and executes real operations on request."""
+    global _chat_action_count
     from app.llm.claude import _provider
 
     context: dict = {}
@@ -2145,16 +2265,48 @@ def chat(payload: ChatPayload):
         context_error = str(e)
 
     history = [{"role": m.role, "content": m.content} for m in payload.history]
-    reply = chat_devops(payload.message, history, context,
-                        force_provider=payload.provider or "")
+    force_prov = payload.provider or ""
 
-    used_provider = payload.provider or _provider or "none"
+    # ── Step 1: classify intent ───────────────────────────────
+    intent_data = _detect_intent(payload.message, force_prov)
+    action_result = None
+    action_taken = None
+
+    if intent_data.get("intent") == "action":
+        action_name = intent_data.get("action", "")
+        action_def = _ACTION_CATALOGUE.get(action_name)
+        if action_def:
+            try:
+                result = action_def["handler"](intent_data.get("params", {}))
+                action_result = result
+                action_taken = action_name
+                _chat_action_count += 1
+            except Exception as exc:
+                action_result = {"error": str(exc)}
+
+    # ── Step 2: build reply with context + optional action result ──
+    msg = payload.message
+    if action_result is not None:
+        import json as _json2
+        action_block = f"\n\n[ACTION EXECUTED: {action_taken}]\n{_json2.dumps(action_result, default=str, indent=2)}\n[END ACTION RESULT]"
+        msg = msg + action_block
+
+    reply = chat_devops(msg, history, context, force_provider=force_prov)
+
+    used_provider = force_prov or _provider or "none"
     return {
         "reply":          reply,
         "sources":        context.get("configured", []),
         "llm_provider":   used_provider,
         "context_error":  context_error or None,
+        "action_taken":   action_taken,
+        "action_result":  action_result,
+        "action_count":   _chat_action_count,
     }
+
+@app.get("/chat/action_count")
+def chat_action_count():
+    return {"count": _chat_action_count}
 
 @app.post("/warroom/create")
 def warroom_create(req: WarRoomRequest):
