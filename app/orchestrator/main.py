@@ -89,6 +89,11 @@ app = FastAPI(
 async def favicon():
     return FileResponse("favicon.ico")
 
+@app.get("/.well-known/appspecific/com.chrome.devtools.json", include_in_schema=False)
+async def chrome_devtools():
+    """Silence Chrome DevTools 404 noise."""
+    return {}
+
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -400,6 +405,68 @@ def root():
     /* ── ANIMATIONS ── */
     @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
     .fade-in{animation:fadeIn .25s ease}
+    @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+    @keyframes slideDown{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+
+    /* ── TOAST ── */
+    #toast-wrap{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:9999;pointer-events:none}
+    .toast{display:flex;align-items:center;gap:9px;padding:10px 14px;background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;color:var(--text);box-shadow:0 8px 24px rgba(0,0,0,.4);animation:slideUp .25s ease;min-width:200px;pointer-events:auto}
+    .toast.ok{border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.08)}
+    .toast.err{border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.08)}
+    .toast.info{border-color:rgba(79,142,247,.4);background:rgba(79,142,247,.08)}
+
+    /* ── RUN PIPELINE MODAL ── */
+    .modal-overlay{position:fixed;inset:0;background:rgba(4,6,15,.7);backdrop-filter:blur(6px);z-index:100;display:none;align-items:center;justify-content:center}
+    .modal-overlay.open{display:flex}
+    .modal{background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius-lg);padding:24px;width:480px;max-width:95vw;animation:slideUp .25s ease;box-shadow:0 24px 60px rgba(0,0,0,.5)}
+    .modal-title{font-size:16px;font-weight:800;margin-bottom:4px;background:linear-gradient(90deg,var(--blue),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+    .modal-sub{font-size:12px;color:var(--muted);margin-bottom:20px}
+    .modal-field{display:flex;flex-direction:column;gap:5px;margin-bottom:14px}
+    .modal-label{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+    .modal-input{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 11px;font-size:12.5px;color:var(--text);outline:none;font-family:inherit;transition:border-color .15s}
+    .modal-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
+    .modal-input::placeholder{color:var(--muted)}
+    textarea.modal-input{resize:vertical;min-height:72px;line-height:1.5}
+    .modal-row{display:flex;gap:10px}
+    .modal-row .modal-field{flex:1}
+    .modal-actions{display:flex;gap:8px;margin-top:20px;justify-content:flex-end}
+    .btn-cancel{padding:7px 16px;background:transparent;border:1px solid var(--border2);border-radius:var(--radius-sm);font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;font-family:inherit;transition:all .15s}
+    .btn-cancel:hover{border-color:var(--muted);color:var(--text)}
+    .btn-run{padding:7px 20px;background:linear-gradient(135deg,#2563eb,#7c3aed);border:none;border-radius:var(--radius-sm);font-size:12px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit;transition:all .15s;box-shadow:0 0 16px rgba(79,142,247,.25)}
+    .btn-run:hover{box-shadow:0 0 24px rgba(79,142,247,.45)}
+    .btn-run:disabled{background:var(--surface2);box-shadow:none;color:var(--muted);cursor:not-allowed}
+    .sev-pills{display:flex;gap:6px;flex-wrap:wrap}
+    .sev-pill{padding:4px 12px;border-radius:20px;border:1px solid var(--border2);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;background:transparent;font-family:inherit;color:var(--text2)}
+    .sev-pill:hover{border-color:var(--blue);color:var(--blue)}
+    .sev-pill.active{background:rgba(79,142,247,.15);border-color:var(--blue);color:var(--blue)}
+    .sev-pill.critical.active{background:rgba(248,113,113,.15);border-color:var(--red);color:var(--red)}
+    .sev-pill.high.active{background:rgba(251,191,36,.15);border-color:var(--amber);color:var(--amber)}
+    .sev-pill.medium.active{background:rgba(79,142,247,.15);border-color:var(--blue);color:var(--blue)}
+    .sev-pill.low.active{background:rgba(52,211,153,.15);border-color:var(--green);color:var(--green)}
+    .modal-result{margin-top:14px;padding:12px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2);max-height:160px;overflow-y:auto;display:none;white-space:pre-wrap}
+
+    /* ── GITHUB REPOS DRAWER ── */
+    .gh-drawer{position:fixed;top:0;right:-420px;width:400px;height:100vh;background:var(--bg2);border-left:1px solid var(--border2);z-index:50;display:flex;flex-direction:column;transition:right .3s cubic-bezier(.4,0,.2,1);box-shadow:-8px 0 32px rgba(0,0,0,.4)}
+    .gh-drawer.open{right:0}
+    .gh-drawer-hdr{padding:16px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0}
+    .gh-drawer-title{font-size:14px;font-weight:700;flex:1}
+    .gh-drawer-close{background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;transition:color .15s}
+    .gh-drawer-close:hover{color:var(--text)}
+    .gh-drawer-body{flex:1;overflow-y:auto;padding:12px}
+    .repo-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px 13px;margin-bottom:8px;transition:border-color .15s;cursor:pointer}
+    .repo-card:hover{border-color:var(--blue)}
+    .repo-name{font-size:12.5px;font-weight:700;color:var(--blue);margin-bottom:3px}
+    .repo-desc{font-size:11px;color:var(--muted);margin-bottom:7px;line-height:1.4}
+    .repo-meta{display:flex;gap:10px;font-size:10.5px;color:var(--text2)}
+    .repo-meta span{display:flex;align-items:center;gap:3px}
+    .lang-dot{width:8px;height:8px;border-radius:50%;background:var(--blue);flex-shrink:0}
+
+    /* ── KEYBOARD SHORTCUT HINT ── */
+    .kbd{display:inline-flex;align-items:center;gap:3px;font-size:9.5px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-family:'JetBrains Mono',monospace}
+
+    /* ── RUN PIPELINE BUTTON ── */
+    .run-btn{display:flex;align-items:center;gap:6px;padding:5px 14px;background:linear-gradient(135deg,rgba(37,99,235,.2),rgba(124,58,237,.15));border:1px solid rgba(79,142,247,.35);border-radius:20px;font-size:11.5px;font-weight:700;color:var(--blue);cursor:pointer;transition:all .15s;font-family:inherit}
+    .run-btn:hover{background:linear-gradient(135deg,rgba(37,99,235,.35),rgba(124,58,237,.25));border-color:var(--blue);box-shadow:0 0 14px rgba(79,142,247,.2)}
   </style>
 </head>
 <body>
@@ -502,48 +569,56 @@ def root():
       <div class="topbar-title">AI DevOps Intelligence Platform</div>
       <span class="topbar-ver">v2.0</span>
       <div class="topbar-spacer"></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap" id="int-chips">
-        <span class="tb-chip int-chip" id="int-claude"><span class="dot"></span>Claude AI</span>
-        <span class="tb-chip int-chip" id="int-aws"><span class="dot"></span>AWS</span>
-        <span class="tb-chip int-chip" id="int-k8s"><span class="dot"></span>K8s</span>
-        <span class="tb-chip int-chip" id="int-github"><span class="dot"></span>GitHub</span>
-        <span class="tb-chip int-chip" id="int-grafana"><span class="dot"></span>Grafana</span>
-        <span class="tb-chip int-chip" id="int-slack"><span class="dot"></span>Slack</span>
-        <span class="tb-chip int-chip" id="int-jira"><span class="dot"></span>Jira</span>
-        <span class="tb-chip int-chip" id="int-opsgenie"><span class="dot"></span>OpsGenie</span>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center" id="int-chips">
+        <span class="tb-chip int-chip" id="int-claude" title="LLM Provider"><span class="dot"></span>Claude AI</span>
+        <span class="tb-chip int-chip" id="int-aws" title="AWS"><span class="dot"></span>AWS</span>
+        <span class="tb-chip int-chip" id="int-k8s" title="Kubernetes"><span class="dot"></span>K8s</span>
+        <span class="tb-chip int-chip" id="int-github" title="Click to view repos" onclick="openGhDrawer()" style="cursor:pointer"><span class="dot"></span>GitHub</span>
+        <span class="tb-chip int-chip" id="int-grafana" title="Grafana"><span class="dot"></span>Grafana</span>
+        <span class="tb-chip int-chip" id="int-slack" title="Slack"><span class="dot"></span>Slack</span>
+        <span class="tb-chip int-chip" id="int-jira" title="Jira"><span class="dot"></span>Jira</span>
+        <span class="tb-chip int-chip" id="int-opsgenie" title="OpsGenie"><span class="dot"></span>OpsGenie</span>
+        <div style="width:1px;height:20px;background:var(--border);margin:0 4px"></div>
+        <button class="run-btn" onclick="document.getElementById('run-modal').classList.add('open')" title="Run AI Pipeline (R)">&#x25B6; Run Pipeline</button>
       </div>
     </div>
 
     <div class="metric-strip" id="metric-strip">
-      <div class="mc mc-blue fade-in">
+      <div class="mc mc-blue fade-in" onclick="showView('endpoints','all',document.querySelector('.nav-link'))" style="cursor:pointer" title="View all endpoints">
         <div class="mc-label">&#x26A1; Total Endpoints</div>
         <div class="mc-val" id="m-eps">&#x2014;</div>
         <div class="mc-sub">REST API surface</div>
         <div class="mc-bar"></div>
       </div>
-      <div class="mc mc-green fade-in">
+      <div class="mc mc-green fade-in" title="Active LLM provider">
         <div class="mc-label">&#x1F9E0; LLM Provider</div>
         <div class="mc-val" id="m-llm" style="font-size:13px;padding-top:4px">&#x2014;</div>
-        <div class="mc-sub">Active model</div>
+        <div class="mc-sub" id="m-llm-sub">Active model</div>
         <div class="mc-bar"></div>
       </div>
-      <div class="mc mc-purple fade-in">
-        <div class="mc-label">&#x1F4BE; Memory (Incidents)</div>
+      <div class="mc mc-purple fade-in" title="Incidents stored in vector memory">
+        <div class="mc-label">&#x1F4BE; Incident Memory</div>
         <div class="mc-val" id="m-mem">&#x2014;</div>
         <div class="mc-sub">Stored in ChromaDB</div>
         <div class="mc-bar"></div>
       </div>
-      <div class="mc mc-cyan fade-in">
-        <div class="mc-label">&#x2638; Integrations Live</div>
+      <div class="mc mc-cyan fade-in" title="Configured integrations">
+        <div class="mc-label">&#x1F517; Integrations Live</div>
         <div class="mc-val" id="m-ints">&#x2014;</div>
-        <div class="mc-sub">Configured services</div>
+        <div class="mc-sub" id="m-ints-sub">of 8 services</div>
         <div class="mc-bar"></div>
       </div>
-      <div class="mc mc-amber fade-in">
-        <div class="mc-label">&#x1F6E1; Policy Rules</div>
+      <div class="mc mc-amber fade-in" title="Pipeline policy guardrails">
+        <div class="mc-label">&#x1F6E1; Policy Guardrails</div>
         <div class="mc-val">4</div>
         <div class="mc-sub">Blocked actions</div>
         <div class="mc-bar"></div>
+      </div>
+      <div class="mc fade-in" style="background:linear-gradient(135deg,rgba(37,99,235,.12),rgba(124,58,237,.08));border-color:rgba(79,142,247,.25);cursor:pointer;min-width:130px" onclick="document.getElementById('run-modal').classList.add('open')" title="Run AI Pipeline">
+        <div class="mc-label" style="color:var(--blue)">&#x1F680; Quick Action</div>
+        <div class="mc-val" style="font-size:13px;color:var(--blue);padding-top:4px">Run Pipeline</div>
+        <div class="mc-sub" style="color:var(--blue);opacity:.7">LangGraph &#x2192; AI</div>
+        <div class="mc-bar" style="background:linear-gradient(90deg,var(--blue2),var(--purple2))"></div>
       </div>
     </div>
 
@@ -553,7 +628,10 @@ def root():
           <h2>API Endpoints</h2>
           <p>Complete REST API surface — click any endpoint to copy path</p>
         </div>
-        <div class="search-bar"><span style="color:var(--muted);font-size:13px">&#x1F50D;</span><input type="text" id="ep-search" placeholder="Search endpoints&#x2026;" oninput="filterEps(this.value)"/></div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="search-bar"><span style="color:var(--muted);font-size:13px">&#x1F50D;</span><input type="text" id="ep-search" placeholder="Search endpoints&#x2026;" oninput="filterEps(this.value)"/></div>
+          <span class="kbd" title="Press / to focus search">/</span>
+        </div>
       </div>
 
       <div data-section="general">
@@ -752,6 +830,59 @@ def root():
 
 </div><!-- /main -->
 
+<!-- ── TOAST CONTAINER ── -->
+<div id="toast-wrap"></div>
+
+<!-- ── RUN PIPELINE MODAL ── -->
+<div class="modal-overlay" id="run-modal" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="modal">
+    <div class="modal-title">&#x1F916; Run AI Pipeline</div>
+    <div class="modal-sub">Trigger the full LangGraph autonomous incident response pipeline</div>
+    <div class="modal-field">
+      <label class="modal-label">Incident ID</label>
+      <input class="modal-input" id="m-inc-id" placeholder="INC-2024-001" type="text"/>
+    </div>
+    <div class="modal-field">
+      <label class="modal-label">Description</label>
+      <textarea class="modal-input" id="m-inc-desc" placeholder="e.g. Payment service pods crash-looping in production namespace&#x2026;"></textarea>
+    </div>
+    <div class="modal-row">
+      <div class="modal-field">
+        <label class="modal-label">Severity</label>
+        <div class="sev-pills">
+          <button class="sev-pill critical" onclick="setSev(this,'critical')">&#x1F534; Critical</button>
+          <button class="sev-pill high active" onclick="setSev(this,'high')">&#x1F7E0; High</button>
+          <button class="sev-pill medium" onclick="setSev(this,'medium')">&#x1F7E1; Medium</button>
+          <button class="sev-pill low" onclick="setSev(this,'low')">&#x1F7E2; Low</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-field" style="margin-top:8px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text2)">
+        <input type="checkbox" id="m-auto-rem" style="accent-color:var(--blue)"/>
+        Auto-remediate (execute K8s actions without approval)
+      </label>
+    </div>
+    <div id="m-result" class="modal-result"></div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="document.getElementById('run-modal').classList.remove('open')">Cancel</button>
+      <button class="btn-run" id="m-run-btn" onclick="runPipeline()">&#x25B6; Run Pipeline</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── GITHUB REPOS DRAWER ── -->
+<div class="gh-drawer" id="gh-drawer">
+  <div class="gh-drawer-hdr">
+    <span style="font-size:16px">&#x1F419;</span>
+    <div class="gh-drawer-title">GitHub Repositories</div>
+    <button class="gh-drawer-close" onclick="document.getElementById('gh-drawer').classList.remove('open')">&times;</button>
+  </div>
+  <div class="gh-drawer-body" id="gh-drawer-body">
+    <div style="text-align:center;padding:30px;color:var(--muted)">Loading&#x2026;</div>
+  </div>
+</div>
+
 <script>
 var ALL_KEYS=['ANTHROPIC_API_KEY','GROQ_API_KEY','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_REGION','GITHUB_TOKEN','GITHUB_REPO','GITLAB_URL','GITLAB_TOKEN','GITLAB_PROJECT','SLACK_BOT_TOKEN','SLACK_CHANNEL','JIRA_URL','JIRA_USER','JIRA_TOKEN','OPSGENIE_API_KEY','GRAFANA_URL','GRAFANA_TOKEN'];
 var INT_MAP={'Claude AI':'int-claude','AWS':'int-aws','Grafana':'int-grafana','GitHub':'int-github','GitLab':'int-gitlab','Kubernetes':'int-k8s','Slack':'int-slack','Jira':'int-jira','OpsGenie':'int-opsgenie'};
@@ -800,7 +931,8 @@ function copyPath(row) {
   navigator.clipboard.writeText(path.textContent).then(function() {
     var orig = path.style.color;
     path.style.color = 'var(--green)';
-    setTimeout(function(){ path.style.color = orig; }, 800);
+    setTimeout(function(){ path.style.color = orig; }, 900);
+    toast('Copied: ' + path.textContent, 'ok', 1800);
   });
 }
 
@@ -808,13 +940,17 @@ function loadMetrics() {
   fetch('/health/integrations').then(function(r){ return r.json(); }).then(function(d) {
     var el = document.getElementById('m-llm');
     if (el) {
-      var provLabels = {anthropic:'Claude', groq:'Groq/Llama', ollama:'Ollama', none:'None'};
+      var provLabels = {anthropic:'Claude', groq:'Groq / Llama', ollama:'Ollama (Local)', none:'None'};
       el.textContent = provLabels[d.llm_provider] || d.llm_provider || '—';
+      var sub = document.getElementById('m-llm-sub');
+      if (sub) sub.textContent = d.llm_provider === 'groq' ? 'llama-3.3-70b' : d.llm_provider === 'anthropic' ? 'claude-sonnet-4-6' : 'Active model';
     }
     var ints = document.getElementById('m-ints');
     if (ints) {
       var count = Object.values(d.integrations || {}).filter(function(v){ return v; }).length;
-      ints.textContent = count;
+      animateNum(ints, count);
+      var sub2 = document.getElementById('m-ints-sub');
+      if (sub2) sub2.textContent = 'of 8 services';
     }
     // Update integration chips
     var imap = d.integrations || {};
@@ -866,13 +1002,16 @@ function loadMetrics() {
     var cntEl = document.getElementById('cnt-all');
     if (cntEl) cntEl.textContent = epEls.length;
     var mEps = document.getElementById('m-eps');
-    if (mEps) mEps.textContent = epEls.length;
+    if (mEps) animateNum(mEps, epEls.length);
   }).catch(function(){});
 
   // Memory count from health
   fetch('/health').then(function(r){ return r.json(); }).then(function(d) {
     var mMem = document.getElementById('m-mem');
-    if (mMem) mMem.textContent = d.incident_count !== undefined ? d.incident_count : '—';
+    if (mMem) {
+      if (d.incident_count !== undefined) animateNum(mMem, d.incident_count);
+      else mMem.textContent = '0';
+    }
   }).catch(function(){});
 }
 
@@ -1043,6 +1182,124 @@ function createWarRoom() {
 }
 
 loadMetrics();
+
+/* ── TOAST ── */
+function toast(msg, type, dur) {
+  type = type || 'info'; dur = dur || 2800;
+  var w = document.getElementById('toast-wrap');
+  var t = document.createElement('div');
+  t.className = 'toast ' + type;
+  var icons = {ok:'\\u2713', err:'\\u26A0', info:'\\u2139'};
+  t.innerHTML = '<span style="font-size:14px">' + (icons[type]||'\\u2139') + '</span><span>' + msg + '</span>';
+  w.appendChild(t);
+  setTimeout(function(){ t.style.opacity='0'; t.style.transform='translateY(10px)'; t.style.transition='all .3s'; setTimeout(function(){ t.remove(); }, 300); }, dur);
+}
+
+/* ── ANIMATED COUNTER ── */
+function animateNum(el, target) {
+  var start = 0, dur = 600, startTime = null;
+  function step(ts) {
+    if (!startTime) startTime = ts;
+    var p = Math.min((ts - startTime) / dur, 1);
+    el.textContent = Math.floor(p * target);
+    if (p < 1) requestAnimationFrame(step);
+    else el.textContent = target;
+  }
+  requestAnimationFrame(step);
+}
+
+/* ── SEVERITY PICKER ── */
+var _selSev = 'high';
+function setSev(btn, val) {
+  _selSev = val;
+  document.querySelectorAll('.sev-pill').forEach(function(b){ b.classList.remove('active'); });
+  btn.classList.add('active');
+}
+
+/* ── RUN PIPELINE ── */
+function runPipeline() {
+  var incId = document.getElementById('m-inc-id').value.trim() ||
+              'INC-' + new Date().toISOString().replace(/[^0-9]/g,'').slice(0,12);
+  var desc  = document.getElementById('m-inc-desc').value.trim();
+  if (!desc) { toast('Please enter a description', 'err'); return; }
+  var auto  = document.getElementById('m-auto-rem').checked;
+  var btn   = document.getElementById('m-run-btn');
+  var res   = document.getElementById('m-result');
+  btn.disabled = true; btn.textContent = '\\u23F3 Running...';
+  res.style.display = 'block';
+  res.textContent = 'Sending to pipeline...';
+  fetch('/incidents/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({incident_id: incId, description: desc, severity: _selSev, auto_remediate: auto})
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d) {
+    btn.disabled = false; btn.textContent = '\\u25B6 Run Pipeline';
+    var status = d.status || d.detail || 'unknown';
+    res.textContent = JSON.stringify(d, null, 2);
+    toast('Pipeline ' + status + ' — ' + incId, status === 'completed' ? 'ok' : 'info', 4000);
+    loadMetrics();
+  })
+  .catch(function(e) {
+    btn.disabled = false; btn.textContent = '\\u25B6 Run Pipeline';
+    res.textContent = 'Error: ' + e;
+    toast('Pipeline error: ' + e, 'err');
+  });
+}
+
+/* ── GITHUB REPOS DRAWER ── */
+function openGhDrawer() {
+  var drawer = document.getElementById('gh-drawer');
+  drawer.classList.add('open');
+  var body = document.getElementById('gh-drawer-body');
+  body.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">Loading repos&#x2026;</div>';
+  fetch('/github/repos')
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      if (!d.success) {
+        body.innerHTML = '<div style="padding:20px;color:var(--muted);font-size:12px">&#x26A0; ' + (d.error || 'Not configured') + '</div>';
+        return;
+      }
+      var langColors = {JavaScript:'#f1e05a',TypeScript:'#2b7489',Python:'#3572A5',Go:'#00ADD8',Rust:'#dea584',Java:'#b07219',Ruby:'#701516',CSS:'#563d7c',HTML:'#e34c26',Shell:'#89e051'};
+      var html = '<div style="font-size:11px;color:var(--muted);padding:4px 2px 10px;font-weight:600">' + d.owner + ' &#x2022; ' + d.count + ' repos</div>';
+      (d.repos || []).forEach(function(r) {
+        var lc = langColors[r.language] || '#8b9ec7';
+        html += '<div class="repo-card" onclick="window.open(\\'' + r.url + '\\',\\'_blank\\')">';
+        html += '<div class="repo-name">' + r.name + (r.private ? ' &#x1F512;' : '') + '</div>';
+        if (r.description) html += '<div class="repo-desc">' + r.description + '</div>';
+        html += '<div class="repo-meta">';
+        if (r.language) html += '<span><span class="lang-dot" style="background:' + lc + '"></span>' + r.language + '</span>';
+        html += '<span>&#x2B50; ' + r.stars + '</span>';
+        html += '<span>&#x1F374; ' + r.forks + '</span>';
+        if (r.open_issues > 0) html += '<span style="color:var(--amber)">&#x26A0; ' + r.open_issues + '</span>';
+        html += '</div></div>';
+      });
+      body.innerHTML = html;
+    })
+    .catch(function(){ body.innerHTML = '<div style="padding:20px;color:var(--muted);font-size:12px">Failed to load repos</div>'; });
+}
+
+/* ── KEYBOARD SHORTCUTS ── */
+document.addEventListener('keydown', function(e) {
+  // Ignore if typing in an input
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'r' || e.key === 'R') {
+    document.getElementById('run-modal').classList.add('open');
+  }
+  if (e.key === '/' ) {
+    e.preventDefault();
+    var s = document.getElementById('ep-search');
+    if (s) { s.focus(); showView('endpoints','all',document.querySelector('.nav-link')); }
+  }
+  if (e.key === 'Escape') {
+    document.getElementById('run-modal').classList.remove('open');
+    document.getElementById('gh-drawer').classList.remove('open');
+  }
+  if (e.key === 'c' || e.key === 'C') {
+    showView('chat','',document.querySelector('.nav-link[onclick*=chat]'));
+  }
+});
 </script>
 </body>
 </html>
