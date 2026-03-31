@@ -5,6 +5,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
+from app.llm.base import BaseLLM, LLMResponse
+
 # ── Provider auto-detection ───────────────────────────────────
 # Priority: Anthropic → Groq → Ollama (local, no key needed)
 import urllib.request as _urllib
@@ -16,8 +18,19 @@ OLLAMA_HOST       = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 _provider     = None
 _ollama_model = None
 client        = None
+_provider_warning = None   # surfaced in chat responses when key is misconfigured
 
-if ANTHROPIC_API_KEY:
+# Validate Anthropic key format before attempting to use it.
+# Real keys start with "sk-ant-". A key with "#" gets truncated by dotenv.
+_ANTHROPIC_KEY_VALID = ANTHROPIC_API_KEY.startswith("sk-ant-")
+if ANTHROPIC_API_KEY and not _ANTHROPIC_KEY_VALID:
+    _provider_warning = (
+        "⚠️ ANTHROPIC_API_KEY looks malformed (valid keys start with 'sk-ant-'). "
+        "If your key contains a '#' character in .env, wrap it in quotes: "
+        "ANTHROPIC_API_KEY=\"sk-ant-...\". Falling back to next available provider."
+    )
+
+if ANTHROPIC_API_KEY and _ANTHROPIC_KEY_VALID:
     from anthropic import Anthropic
     client    = Anthropic(api_key=ANTHROPIC_API_KEY)
     _provider = "anthropic"
@@ -37,9 +50,23 @@ else:
         pass
 
 
-def _llm(system: str, messages: list, max_tokens: int = 1024) -> str:
-    """Unified LLM call — Anthropic / Groq / Ollama (local, no key)."""
-    if _provider == "anthropic":
+def _llm(system: str, messages: list, max_tokens: int = 1024,
+         force_provider: str = "") -> str:
+    """Unified LLM call — Anthropic / Groq / Ollama (local, no key).
+
+    force_provider: override the auto-detected provider ("anthropic", "groq", "ollama").
+    Falls back to the auto-detected provider if the requested one is not configured.
+    """
+    provider = force_provider if force_provider else _provider
+    # Validate forced provider is actually configured
+    if force_provider == "anthropic" and not (ANTHROPIC_API_KEY and _ANTHROPIC_KEY_VALID):
+        provider = _provider  # fallback
+    if force_provider == "groq" and not GROQ_API_KEY:
+        provider = _provider  # fallback
+    if force_provider == "ollama" and not _ollama_model:
+        provider = _provider  # fallback
+
+    if provider == "anthropic":
         resp = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=max_tokens,
@@ -48,7 +75,7 @@ def _llm(system: str, messages: list, max_tokens: int = 1024) -> str:
         )
         return resp.content[0].text
 
-    elif _provider == "groq":
+    elif provider == "groq":
         all_msgs = [{"role": "system", "content": system}] + messages
         resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -57,7 +84,7 @@ def _llm(system: str, messages: list, max_tokens: int = 1024) -> str:
         )
         return resp.choices[0].message.content
 
-    elif _provider == "ollama":
+    elif provider == "ollama":
         # Build prompt from system + messages
         parts = []
         if system:
@@ -559,7 +586,8 @@ Respond ONLY in this JSON format (no markdown, no extra text):
         return {"error": str(e), "pr_title": jira_data.get("summary", ""), "file_patches": []}
 
 
-def chat_devops(message: str, history: list, context: dict) -> str:
+def chat_devops(message: str, history: list, context: dict,
+                force_provider: str = "") -> str:
     """Conversational DevOps assistant — answers any question, uses live context when relevant."""
     if not _provider:
         return (
@@ -611,4 +639,37 @@ Guidelines:
 
     messages.append({"role": "user", "content": message + ctx_block})
 
-    return _llm(SYSTEM, messages, max_tokens=2048)
+    return _llm(SYSTEM, messages, max_tokens=2048, force_provider=force_provider)
+
+
+# ── BaseLLM-compatible provider class ────────────────────────────────────────
+
+
+class ClaudeProvider(BaseLLM):
+    """Wraps the module-level _llm() into the BaseLLM interface.
+
+    Falls back through the same Anthropic → Groq → Ollama chain that
+    the rest of this module uses — so no separate client setup needed.
+    """
+
+    def is_available(self) -> bool:
+        return _provider is not None
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str = "You are an expert DevOps AI assistant.",
+        max_tokens: int = 2048,
+    ) -> LLMResponse:
+        content = _llm(system, [{"role": "user", "content": prompt}], max_tokens)
+        model_name = (
+            "claude-sonnet-4-6" if _provider == "anthropic"
+            else "llama-3.3-70b-versatile" if _provider == "groq"
+            else _ollama_model or "ollama"
+        )
+        return LLMResponse(
+            content=content,
+            model=model_name,
+            provider=_provider or "unknown",
+        )

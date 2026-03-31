@@ -1,0 +1,35 @@
+{
+  "_comment": "Policy rules enforced by PolicyEngine before every action execution.",
+
+  "blocked_actions": [
+    "delete_cluster",
+    "drop_database",
+    "terminate_all_instances",
+    "delete_namespace"
+  ],
+
+  "action_permissions": {
+    "k8s_restart":    "deploy",
+    "k8s_scale":      "deploy",
+    "create_jira":    "write",
+    "slack_notify":   "write",
+    "create_pr":      "write",
+    "opsgenie_alert": "write",
+    "aws_reboot":     "deploy",
+    "aws_terminate":  "delete"
+  },
+
+  "role_permissions": {
+    "read":   ["viewer", "developer", "admin"],
+    "write":  ["developer", "admin"],
+    "deploy": ["developer", "admin"],
+    "delete": ["admin"]
+  },
+
+  "guardrails": {
+    "max_replicas":           20,
+    "min_replicas":           1,
+    "max_actions_per_run":    10,
+    "restricted_namespaces":  ["kube-system", "kube-public", "kube-node-lease"]
+  }
+}

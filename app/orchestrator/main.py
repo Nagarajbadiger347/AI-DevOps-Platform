@@ -4,9 +4,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import List, Any, Optional, Dict
 
@@ -32,6 +33,8 @@ from app.llm.claude import (
     assess_deployment, interpret_jira_for_pr, chat_devops,
 )
 from app.agents.incident_pipeline import run_incident_pipeline
+from app.orchestrator.runner import run_pipeline as run_pipeline_v2
+from app.core.config import settings as _settings
 from app.integrations.slack import create_war_room, create_incident_channel, post_incident_summary, post_message
 from app.integrations.universal_collector import collect_all_context, summarize_health
 from app.integrations.jira import create_incident, add_comment as jira_add_comment
@@ -63,11 +66,23 @@ def _rbac_guard(x_user: Optional[str], required_action: str):
                    f"Role: {result.get('role', 'none')}."
         )
 
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    if _settings.ENABLE_MONITOR_LOOP:
+        import asyncio
+        from app.monitoring.loop import monitoring_loop
+        asyncio.create_task(monitoring_loop())
+    yield
+
 app = FastAPI(
     title="AI DevOps Intelligence Platform",
     description="Autonomous DevOps management powered by multi-agent AI — built by Nagaraj",
-    version="1.0.0",
+    version="2.0.0",
+    lifespan=_lifespan,
 )
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse("favicon.ico")
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",") if o.strip()]
 app.add_middleware(
@@ -323,12 +338,23 @@ def root():
     .chat-messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}
     .chat-messages::-webkit-scrollbar{width:4px}
     .chat-messages::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
-    .chat-bubble{max-width:76%;padding:10px 14px;border-radius:12px;font-size:13px;line-height:1.65;word-break:break-word;white-space:pre-wrap}
+    .chat-bubble{max-width:76%;padding:10px 14px;border-radius:12px;font-size:13px;line-height:1.65;word-break:break-word}
     .chat-bubble.user{background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;align-self:flex-end;border-bottom-right-radius:3px;box-shadow:0 2px 8px rgba(37,99,235,.3)}
     .chat-bubble.ai{background:var(--surface);border:1px solid var(--border);color:var(--text);align-self:flex-start;border-bottom-left-radius:3px}
-    .chat-bubble.typing{color:var(--muted);font-style:italic}
+    .chat-bubble.ai ul{margin:6px 0 6px 18px;padding:0}
+    .chat-bubble.ai li{margin:2px 0}
+    .chat-bubble.ai h2,.chat-bubble.ai h3,.chat-bubble.ai h4{margin:8px 0 4px;color:var(--blue)}
+    .chat-bubble.ai hr{border:none;border-top:1px solid var(--border);margin:8px 0}
+    .chat-bubble.ai pre{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;overflow-x:auto;margin:6px 0;font-size:12px}
+    .chat-bubble.ai code{background:var(--surface2);border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--cyan)}
+    .chat-bubble.ai pre code{background:transparent;padding:0;color:var(--text2)}
+    .chat-bubble.ai strong{color:var(--text);font-weight:600}
     .chat-meta{font-size:10px;color:var(--muted);margin-bottom:3px}
     .chat-meta.right{text-align:right}
+    .typing-dots span{animation:tdot 1.2s infinite;display:inline-block;opacity:0;font-size:18px;line-height:1}
+    .typing-dots span:nth-child(2){animation-delay:.2s}
+    .typing-dots span:nth-child(3){animation-delay:.4s}
+    @keyframes tdot{0%,80%,100%{opacity:0}40%{opacity:1}}
     .chat-row{display:flex;flex-direction:column}
     .chat-row.user{align-items:flex-end}
     .chat-row.ai{align-items:flex-start}
@@ -430,6 +456,15 @@ def root():
         <div class="chat-topbar-sub">Live context from AWS, Kubernetes, GitHub &amp; more</div>
       </div>
       <div class="tb-spacer"></div>
+      <div style="display:flex;align-items:center;gap:6px;margin-right:8px">
+        <span style="font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.06em">Model</span>
+        <select id="llm-selector" title="Select LLM provider" style="background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius-sm);color:var(--text2);font-size:11.5px;padding:4px 8px;outline:none;cursor:pointer;font-family:inherit">
+          <option value="">Auto</option>
+          <option value="anthropic">Claude (Anthropic)</option>
+          <option value="groq">Groq / Llama</option>
+          <option value="ollama">Ollama (Local)</option>
+        </select>
+      </div>
       <button class="chat-warroom-btn" id="chat-warroom-btn" onclick="createWarRoom()" title="Create Slack war room">&#x1F6A8; War Room</button>
     </div>
     <div id="chat-messages" class="chat-messages">
@@ -659,6 +694,7 @@ var ALL_KEYS=['ANTHROPIC_API_KEY','GROQ_API_KEY','AWS_ACCESS_KEY_ID','AWS_SECRET
 var INT_MAP={'Claude AI':'int-claude','AWS':'int-aws','Grafana':'int-grafana','GitHub':'int-github','GitLab':'int-gitlab','Kubernetes':'int-k8s','Slack':'int-slack','Jira':'int-jira','OpsGenie':'int-opsgenie'};
 
 function showView(view, section, btn) {
+  console.log('[showView] called with view='+view+' section='+section);
   try {
     document.querySelectorAll('.nav-link').forEach(function(l){ l.classList.remove('active'); });
     if(btn) btn.classList.add('active');
@@ -759,7 +795,39 @@ function autoResize(el) {
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
 
-function appendMsg(role, text) {
+/* ── Lightweight markdown renderer for AI replies ── */
+function _renderMarkdown(text) {
+  if (!text) return '';
+  var html = text
+    // Escape HTML first to prevent XSS
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    // Fenced code blocks
+    .replace(/```[\\w]*[\\s\\S]*?```/g, function(m){ var c=m.replace(/^```\\w*/, '').replace(/```$/, ''); return '<pre><code>'+c.trim()+'</code></pre>'; })
+    // Inline code
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Bold **text** or __text__
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    // Italic *text* or _text_ (not inside words)
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    // Horizontal rule ---
+    .replace(/^---+$/gm, '<hr>')
+    // Unordered list lines starting with - or *
+    .replace(/^[ \t]*[-*] (.+)$/gm, '<li>$1</li>')
+    // Numbered list lines
+    .replace(/^[ \\t]*\\d+\\. (.+)$/gm, '<li>$1</li>')
+    // Wrap consecutive <li> blocks in <ul>
+    .replace(/(<li>[\\s\\S]*?<\\/li>)+/g, function(m){ return '<ul>'+m+'</ul>'; })
+    // Headings ### ## #
+    .replace(/^### (.+)$/gm,'<h4>$1</h4>')
+    .replace(/^## (.+)$/gm,'<h3>$1</h3>')
+    .replace(/^# (.+)$/gm,'<h2>$1</h2>')
+    // Newlines to <br>
+    .replace(/\\n/g, '<br>');
+  return html;
+}
+
+function appendMsg(role, text, isHtml) {
   var empty = document.getElementById('chat-empty');
   if (empty) empty.remove();
   var container = document.getElementById('chat-messages');
@@ -770,7 +838,11 @@ function appendMsg(role, text) {
   meta.textContent = role === 'user' ? 'You' : 'AI DevOps';
   var bubble = document.createElement('div');
   bubble.className = 'chat-bubble ' + role;
-  bubble.textContent = text;
+  if (isHtml) {
+    bubble.innerHTML = text;
+  } else {
+    bubble.textContent = text;
+  }
   row.appendChild(meta);
   row.appendChild(bubble);
   container.appendChild(row);
@@ -789,34 +861,46 @@ function sendChat() {
   appendMsg('user', msg);
   _chatHistory.push({role: 'user', content: msg});
 
-  var typingBubble = appendMsg('ai', '...');
+  var typingBubble = appendMsg('ai', '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>', true);
   typingBubble.classList.add('typing');
 
+  var selProvider = (document.getElementById('llm-selector') || {}).value || '';
   fetch('/chat', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message: msg, history: _chatHistory.slice(0,-1)})
+    body: JSON.stringify({message: msg, history: _chatHistory.slice(0,-1), provider: selProvider})
   })
   .then(function(r){ return r.json(); })
   .then(function(d) {
     typingBubble.classList.remove('typing');
     var reply = d.reply || d.detail || 'No response';
-    typingBubble.textContent = reply;
+    typingBubble.innerHTML = _renderMarkdown(reply);
     _chatHistory.push({role: 'assistant', content: reply});
+
+    // Show data sources + active LLM provider
+    var footer = document.createElement('div');
+    footer.style.cssText = 'font-size:10px;color:var(--muted);margin-top:5px;padding:0 2px;display:flex;gap:10px;flex-wrap:wrap';
     if (d.sources && d.sources.length) {
-      var src = document.createElement('div');
-      src.style.cssText = 'font-size:10px;color:var(--muted);margin-top:4px;padding:0 4px';
-      src.textContent = '📡 Data from: ' + d.sources.join(', ');
-      typingBubble.parentElement.appendChild(src);
+      var src = document.createElement('span');
+      src.textContent = '📡 ' + d.sources.join(', ');
+      footer.appendChild(src);
     }
+    if (d.llm_provider && d.llm_provider !== 'none') {
+      var prov = document.createElement('span');
+      var provLabel = {anthropic:'Claude',groq:'Groq/Llama',openai:'GPT-4o',ollama:'Ollama'}[d.llm_provider] || d.llm_provider;
+      prov.textContent = '🤖 ' + provLabel;
+      footer.appendChild(prov);
+    }
+    if (footer.children.length) typingBubble.parentElement.appendChild(footer);
+
     document.getElementById('chat-messages').scrollTop = 999999;
     btn.disabled = false;
     document.getElementById('chat-input').focus();
   })
   .catch(function(e) {
     typingBubble.classList.remove('typing');
-    typingBubble.textContent = 'Error: ' + e;
-    typingBubble.style.color = '#ffa198';
+    typingBubble.textContent = 'Error connecting to server: ' + e;
+    typingBubble.style.color = 'var(--red)';
     btn.disabled = false;
   });
 }
@@ -1200,6 +1284,47 @@ def incident_run(req: IncidentRunRequest, x_user: Optional[str] = Header(default
     return report
 
 
+# ── v2: LangGraph multi-agent pipeline ───────────────────────
+
+class IncidentRunV2Request(BaseModel):
+    incident_id:    str
+    description:    str
+    auto_remediate: bool = False
+    user:           str  = "system"
+    role:           str  = "viewer"
+    aws_cfg:        Optional[Dict[str, Any]] = None
+    k8s_cfg:        Optional[Dict[str, Any]] = None
+    hours:          int  = 2
+    slack_channel:  str  = "#incidents"
+
+@app.post("/v2/incident/run")
+def incident_run_v2(req: IncidentRunV2Request,
+                    x_user: Optional[str] = Header(default=None)):
+    """LangGraph multi-agent incident pipeline (v2).
+
+    Runs: Context Collection → PlannerAgent → DecisionAgent →
+          Executor (policy-gated) → Validator → MemoryAgent.
+
+    Requires X-User header with 'deploy' permission when auto_remediate=true.
+    """
+    if req.auto_remediate:
+        _rbac_guard(x_user, "deploy")
+    result = run_pipeline_v2(
+        incident_id    = req.incident_id,
+        description    = req.description,
+        auto_remediate = req.auto_remediate,
+        metadata       = {
+            "user":          req.user,
+            "role":          req.role,
+            "aws_cfg":       req.aws_cfg or {},
+            "k8s_cfg":       req.k8s_cfg or {},
+            "hours":         req.hours,
+            "slack_channel": req.slack_channel,
+        },
+    )
+    return result
+
+
 # ── GitHub PR Review ──────────────────────────────────────────
 
 class PRReviewRequest(BaseModel):
@@ -1447,7 +1572,7 @@ def secrets_status():
 
 
 @app.post("/secrets")
-def secrets_update(payload: SecretsPayload, x_user: Optional[str] = Header(None)):
+def secrets_update(payload: SecretsPayload, x_user: str = Header(...)):
     """Write secrets to .env file. Requires admin role."""
     _rbac_guard(x_user, "manage_secrets")
     if not payload.secrets:
@@ -1466,6 +1591,7 @@ class ChatMessage(BaseModel):
 class ChatPayload(BaseModel):
     message: str
     history: List[ChatMessage] = []
+    provider: str = ""   # "anthropic" | "groq" | "ollama" | "" (auto)
 
 class WarRoomRequest(BaseModel):
     incident_id:  str
@@ -1476,14 +1602,26 @@ class WarRoomRequest(BaseModel):
 @app.post("/chat")
 def chat(payload: ChatPayload):
     """Conversational DevOps AI — collects live context from ALL integrations."""
+    from app.llm.claude import _provider
+
     context: dict = {}
+    context_error: str = ""
     try:
         context = collect_all_context(hours=2)
-    except Exception:
-        pass
+    except Exception as e:
+        context_error = str(e)
+
     history = [{"role": m.role, "content": m.content} for m in payload.history]
-    reply = chat_devops(payload.message, history, context)
-    return {"reply": reply, "sources": context.get("configured", [])}
+    reply = chat_devops(payload.message, history, context,
+                        force_provider=payload.provider or "")
+
+    used_provider = payload.provider or _provider or "none"
+    return {
+        "reply":          reply,
+        "sources":        context.get("configured", []),
+        "llm_provider":   used_provider,
+        "context_error":  context_error or None,
+    }
 
 @app.post("/warroom/create")
 def warroom_create(req: WarRoomRequest):
@@ -1545,6 +1683,79 @@ def health_full():
         pass
     health = summarize_health(context)
     return {"status": "healthy" if health["healthy"] else "degraded", "health": health}
+
+
+@app.get("/health/integrations")
+def health_integrations():
+    """Diagnostic endpoint — shows exactly which integrations and LLM providers are configured.
+
+    Use this to debug 'not configured' errors before running the pipeline.
+    """
+    from app.llm.claude import _provider, _provider_warning, ANTHROPIC_API_KEY, GROQ_API_KEY, OLLAMA_HOST
+    import os
+
+    # ── LLM status ────────────────────────────────────────────────────────
+    llm = {
+        "active_provider": _provider or "none — no LLM configured",
+        "warning":         _provider_warning,
+        "anthropic": {
+            "key_set":   bool(ANTHROPIC_API_KEY),
+            "key_valid": ANTHROPIC_API_KEY.startswith("sk-ant-") if ANTHROPIC_API_KEY else False,
+            "note":      "Key must start with 'sk-ant-'. Wrap in quotes in .env if it contains special chars." if ANTHROPIC_API_KEY and not ANTHROPIC_API_KEY.startswith("sk-ant-") else None,
+        },
+        "groq": {
+            "key_set":   bool(GROQ_API_KEY),
+            "key_valid": GROQ_API_KEY.startswith("gsk_") if GROQ_API_KEY else False,
+        },
+        "ollama": {
+            "host": OLLAMA_HOST,
+        },
+        "openai": {
+            "key_set": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+        },
+    }
+
+    # ── GitHub status ─────────────────────────────────────────────────────
+    gh_token = os.getenv("GITHUB_TOKEN", "").strip()
+    gh_repo  = os.getenv("GITHUB_REPO", "").strip()
+    gh_slug  = None
+    gh_error = None
+    if gh_repo:
+        try:
+            from app.integrations.github import _parse_repo_slug
+            gh_slug = _parse_repo_slug(gh_repo)
+        except RuntimeError as e:
+            gh_error = str(e)
+
+    github = {
+        "token_set":  bool(gh_token),
+        "repo_raw":   gh_repo or "(not set)",
+        "repo_parsed": gh_slug,
+        "repo_valid":  gh_slug is not None,
+        "error":       gh_error,
+        "note":        "GITHUB_REPO must be 'owner/repo-name', e.g. 'Nagarajbadiger347/my-repo'" if not gh_slug else None,
+    }
+
+    # ── Other integrations ────────────────────────────────────────────────
+    def _env_set(key: str) -> bool:
+        v = os.getenv(key, "").strip()
+        return bool(v) and not v.startswith("your_")
+
+    integrations = {
+        "slack":    {"configured": _env_set("SLACK_BOT_TOKEN")},
+        "jira":     {"configured": _env_set("JIRA_URL") and _env_set("JIRA_TOKEN")},
+        "opsgenie": {"configured": _env_set("OPSGENIE_API_KEY")},
+        "aws":      {"configured": _env_set("AWS_ACCESS_KEY_ID") or bool(os.getenv("AWS_PROFILE"))},
+        "k8s":      {"configured": bool(os.getenv("KUBECONFIG") or os.getenv("K8S_IN_CLUSTER"))},
+        "grafana":  {"configured": _env_set("GRAFANA_URL") and _env_set("GRAFANA_TOKEN")},
+        "gitlab":   {"configured": _env_set("GITLAB_TOKEN")},
+    }
+
+    return {
+        "llm":          llm,
+        "github":       github,
+        "integrations": integrations,
+    }
 
 
 @app.websocket("/realtime/events")

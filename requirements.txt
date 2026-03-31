@@ -11,3 +11,6 @@ chromadb>=1.5.5
 kubernetes>=35.0.0
 groq>=1.0.0
 python-dotenv>=1.2.1
+langgraph>=0.2.0
+openai>=1.30.0
+pydantic-settings>=2.0.0

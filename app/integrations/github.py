@@ -7,14 +7,44 @@ import os
 from github import Github
 from github.GithubException import GithubException
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO  = os.getenv("GITHUB_REPO", "owner/repo")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_REPO  = os.getenv("GITHUB_REPO", "").strip()
+
+
+def _parse_repo_slug(raw: str) -> str:
+    """Accept both 'owner/repo' and full GitHub URLs.
+
+    Examples:
+      'Nagarajbadiger347/my-repo'              → 'Nagarajbadiger347/my-repo'
+      'https://github.com/owner/repo'          → 'owner/repo'
+      'https://github.com/owner/repo.git'      → 'owner/repo'
+      'https://github.com/owner/repo/'         → 'owner/repo'
+    """
+    raw = raw.strip().rstrip("/").removesuffix(".git")
+    if raw.startswith("http"):
+        parts = raw.split("/")
+        # URL must have at least owner + repo: github.com/owner/repo
+        if len(parts) >= 5:
+            return f"{parts[-2]}/{parts[-1]}"
+        raise RuntimeError(
+            f"GITHUB_REPO looks like a profile URL, not a repository URL. "
+            f"Set it to 'owner/repo-name' (e.g. '{parts[-1]}/my-repo')"
+        )
+    if "/" not in raw or raw.count("/") != 1:
+        raise RuntimeError(
+            f"GITHUB_REPO='{raw}' is not in 'owner/repo' format. "
+            f"Example: 'Nagarajbadiger347/my-repo'"
+        )
+    return raw
 
 
 def _repo():
     if not GITHUB_TOKEN:
-        raise RuntimeError("GITHUB_TOKEN not configured")
-    return Github(GITHUB_TOKEN).get_repo(GITHUB_REPO)
+        raise RuntimeError("GITHUB_TOKEN not configured — add it to .env")
+    if not GITHUB_REPO:
+        raise RuntimeError("GITHUB_REPO not configured — set it to 'owner/repo' in .env")
+    slug = _parse_repo_slug(GITHUB_REPO)
+    return Github(GITHUB_TOKEN).get_repo(slug)
 
 
 # ── Observability ─────────────────────────────────────────────

@@ -1,8 +1,8 @@
 # AI DevOps Intelligence Platform
 
-Autonomous DevOps management powered by multi-agent AI — built by **Nagaraj**.
+Autonomous DevOps management powered by a **multi-agent AI system** — built by **Nagaraj**.
 
-One platform to detect incidents, analyse root cause, execute remediation, assess deployments, and close the loop back to Jira and GitHub — automatically.
+One platform to detect incidents, analyse root cause, plan and safely execute remediation, assess deployments, and close the loop back to Jira and GitHub — automatically.
 
 ---
 
@@ -10,49 +10,137 @@ One platform to detect incidents, analyse root cause, execute remediation, asses
 
 | Capability | Description |
 |---|---|
-| 🤖 **Autonomous Incident Pipeline** | One API call collects AWS + K8s + GitHub data, runs Claude AI RCA, executes fixes (K8s restart, GitHub PR, Jira, Slack, OpsGenie) |
-| 🔍 **Pre-deployment Assessment** | Before any deploy, Claude assesses current cluster state, active alarms, and past incidents → go / no-go decision with checklist |
-| 🎫 **Jira → Auto PR** | When a Jira change-request ticket is created, Claude interprets it and automatically opens a GitHub PR with file patches |
-| ☁ **AWS Observability** | Read-only data collection across EC2, ECS, Lambda, RDS, ALB, CloudWatch Logs/Metrics/Alarms, CloudTrail |
-| ☸ **Kubernetes Operations** | Health checks + rolling restarts + scale deployments + fetch pod logs |
+| 🤖 **Multi-Agent Incident Pipeline** | LangGraph-orchestrated agents collect context, plan remediation, score risk, execute safely (with policy guardrails), validate outcome, and store to memory |
+| 🔍 **Pre-deployment Assessment** | Before any deploy, Claude assesses cluster state, active alarms, and past incidents → go / no-go decision with checklist |
+| 🎫 **Jira → Auto PR** | When a Jira change-request ticket is created, Claude interprets it and opens a GitHub PR with file patches |
+| ☁️ **AWS Observability** | Read-only collection across EC2, ECS, Lambda, RDS, ALB, CloudWatch Logs/Metrics/Alarms, CloudTrail |
+| ☸️ **Kubernetes Operations** | Health checks + rolling restarts + scale deployments + fetch pod logs |
 | 📈 **Predictive Scaling** | Analyse CloudWatch metric trends and predict if scaling is needed before a breach occurs |
-| 🔎 **AI PR Review** | Claude reviews GitHub PRs for security issues, infra concerns, and code quality — posts comment directly on the PR |
-| 🔐 **RBAC** | Dynamic role-based access control; sensitive endpoints enforce `X-User` header |
-| 🧠 **ChromaDB Memory** | All incidents stored in vector DB; past similar incidents feed into future assessments |
+| 🔎 **AI PR Review** | Claude reviews GitHub PRs for security issues, infra concerns, and code quality |
+| 🔐 **RBAC + Policy Engine** | Role-based access control + declarative policy guardrails enforced before every action |
+| 🧠 **ChromaDB Memory** | All incidents stored in vector DB; similar past incidents feed into future planning decisions |
+| 🔁 **Continuous Monitoring** | Background loop polls K8s/AWS for anomalies and auto-triggers the pipeline |
+| 🔀 **Multi-LLM Support** | Claude (primary) → OpenAI (fallback) → Groq/Llama → Ollama (local) — automatic fallback chain |
+
+---
+
+## Architecture
+
+```
+                         ┌─────────────────────────────────────────┐
+  API Request            │         LangGraph Orchestrator           │
+  Webhook         ──────▶│                                         │
+  Monitor Loop           │  collect_context                        │
+                         │       │  (AWS + K8s + GitHub agents     │
+                         │       │   + ChromaDB similar incidents) │
+                         │       ▼                                 │
+                         │  PlannerAgent  ──── LLMFactory          │
+                         │       │         (Claude/OpenAI/Groq)    │
+                         │       ▼                                 │
+                         │  DecisionAgent (risk score + approval)  │
+                         │       │                                 │
+                         │       ├── auto_remediate=true ──▶ Executor
+                         │       └── high risk / low confidence ──▶ awaiting_approval (END)
+                         │                          │              │
+                         │                     PolicyEngine        │
+                         │                     ActionRegistry      │
+                         │                          │              │
+                         │                       Validator         │
+                         │                     (re-check health)   │
+                         │                       /       \         │
+                         │               passed           failed   │
+                         │                 │              retry/escalate
+                         │                 ▼                       │
+                         │           MemoryAgent (ChromaDB)        │
+                         └─────────────────────────────────────────┘
+```
+
+### Core design principles
+
+| Layer | Responsibility |
+|---|---|
+| **Agents** | Decision / data collection units — no direct infra calls |
+| **LangGraph Graph** | Controls workflow, branching, retry logic, error propagation |
+| **LLM** | Reasoning only — PlannerAgent and analysis functions |
+| **Executor** | Performs all actions safely via ActionRegistry |
+| **PolicyEngine** | Enforces guardrails before every action (role + parameter limits) |
+| **Memory** | ChromaDB stores outcomes and informs future planning |
 
 ---
 
 ## Directory Structure
 
 ```
-ai-devops-platform/
-├── app/
-│   ├── orchestrator/main.py        # FastAPI app — all REST & WebSocket endpoints
-│   ├── agents/
-│   │   └── incident_pipeline.py    # Autonomous end-to-end incident response pipeline
-│   ├── llm/claude.py               # Claude AI functions (RCA, synthesis, review, assess, predict)
-│   ├── correlation/engine.py       # Event correlation logic
-│   ├── plugins/
-│   │   ├── aws_checker.py          # AWS infrastructure health check
-│   │   ├── linux_checker.py        # Linux node health check
-│   │   └── k8s_checker.py          # Kubernetes cluster health check
-│   ├── integrations/
-│   │   ├── aws_ops.py              # AWS observability + predictive scaling metrics
-│   │   ├── github.py               # Commits, PRs, diffs, PR review, incident PRs
-│   │   ├── jira.py                 # Jira incident creation, comments, issue fetch
-│   │   ├── slack.py                # Slack war-room automation
-│   │   ├── opsgenie.py             # OpsGenie on-call notification
-│   │   ├── k8s_ops.py              # K8s restart / scale / logs
-│   │   └── vscode.py               # VS Code action stub
-│   ├── memory/vector_db.py         # ChromaDB incident storage + similarity search
-│   └── security/rbac.py            # Role-based access control
-├── tests/test_main.py              # 68 pytest tests
-├── test_websocket.py               # Manual WebSocket test
-├── requirements.txt
-├── Dockerfile                      # Python 3.11-slim
-├── docker-compose.yml
-├── .env.example
-└── .env                            # Your credentials (not committed)
+app/
+├── orchestrator/
+│   ├── main.py           # FastAPI server — all REST & WebSocket endpoints (v1 + v2)
+│   ├── graph.py          # LangGraph StateGraph definition
+│   ├── state.py          # PipelineState TypedDict — shared across all nodes
+│   └── runner.py         # run_pipeline() — public entry point
+│
+├── agents/
+│   ├── base.py                    # BaseAgent ABC
+│   ├── planner/agent.py           # PlannerAgent → structured JSON plan via LLM
+│   ├── decision/agent.py          # DecisionAgent → risk score + approval gate
+│   ├── infra/aws_agent.py         # AWS context collector (read-only)
+│   ├── infra/k8s_agent.py         # K8s context collector (read-only)
+│   ├── scm/github_agent.py        # GitHub commits/PRs collector
+│   ├── memory/agent.py            # ChromaDB read (retrieve) + write (store)
+│   └── incident_pipeline.py       # v1 pipeline (kept for backwards compatibility)
+│
+├── llm/
+│   ├── base.py           # BaseLLM ABC + LLMResponse dataclass
+│   ├── claude.py         # ClaudeProvider + all existing AI functions
+│   ├── openai.py         # OpenAIProvider (GPT-4o fallback)
+│   └── factory.py        # LLMFactory — automatic provider selection + fallback
+│
+├── execution/
+│   ├── executor.py        # Policy-gated action execution
+│   ├── validator.py       # Post-execution health verification
+│   └── action_registry.py # Action type → integration function mapping
+│
+├── policies/
+│   ├── policy_engine.py   # Evaluates actions against rules before execution
+│   └── rules.json         # Declarative rules: blocked actions, RBAC, guardrails
+│
+├── monitoring/
+│   └── loop.py            # Background anomaly detection loop
+│
+├── integrations/          # External service connectors (unchanged)
+│   ├── aws_ops.py         # AWS observability + predictive scaling metrics
+│   ├── github.py          # Commits, PRs, diffs, PR review, incident PRs
+│   ├── jira.py            # Jira incident creation, comments, issue fetch
+│   ├── slack.py           # Slack war-room automation
+│   ├── opsgenie.py        # OpsGenie on-call notification
+│   ├── k8s_ops.py         # K8s restart / scale / logs
+│   ├── gitlab_ops.py      # GitLab pipelines/deployments
+│   ├── grafana.py         # Grafana alert queries
+│   └── universal_collector.py  # Multi-integration parallel aggregator
+│
+├── plugins/               # Local health checkers (unchanged)
+│   ├── aws_checker.py
+│   ├── k8s_checker.py
+│   └── linux_checker.py
+│
+├── memory/
+│   └── vector_db.py       # ChromaDB incident storage + similarity search
+│
+├── security/
+│   └── rbac.py            # Role-based access control with file persistence
+│
+├── core/
+│   ├── config.py          # Centralised pydantic-settings configuration
+│   └── logging.py         # Structured JSON logger + correlation IDs
+│
+└── correlation/
+    └── engine.py          # Event correlation logic
+
+tests/test_main.py         # 68 pytest tests
+test_websocket.py          # Manual WebSocket test
+requirements.txt
+Dockerfile                 # Python 3.11-slim
+docker-compose.yml
+.env.example
 ```
 
 ---
@@ -61,7 +149,7 @@ ai-devops-platform/
 
 ### Requirements
 
-- Python 3.11+  (3.9+ works for local dev)
+- Python 3.9+ (3.11 recommended)
 - Docker & Docker Compose (optional)
 
 ### Local
@@ -87,26 +175,53 @@ Open: http://127.0.0.1:8000
 
 ## Environment Variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | Claude API key — all AI features |
-| `GITHUB_TOKEN` | For GitHub features | Personal access token |
-| `GITHUB_REPO` | For GitHub features | `owner/repo` format |
-| `SLACK_BOT_TOKEN` | For Slack | Bot token |
-| `SLACK_CHANNEL` | For Slack | Channel name (default: `#general`) |
-| `JIRA_URL` | For Jira | e.g. `https://yourorg.atlassian.net` |
-| `JIRA_USER` | For Jira | User email |
-| `JIRA_TOKEN` | For Jira | API token |
-| `JIRA_PROJECT` | For Jira | Project key (default: `DEVOPS`) |
-| `OPSGENIE_API_KEY` | For OpsGenie | API key |
-| `AWS_REGION` | For AWS | Region (default: `us-east-1`) |
-| `AWS_ACCESS_KEY_ID` | For AWS | Access key (or use IAM role) |
-| `AWS_SECRET_ACCESS_KEY` | For AWS | Secret key (or use IAM role) |
-| `K8S_IN_CLUSTER` | For K8s in pod | Set `true` when running inside a pod |
-| `KUBECONFIG` | For K8s local | Path to kubeconfig (default: `~/.kube/config`) |
-| `RBAC_CONFIG_PATH` | Optional | Path to JSON file with user→role mappings |
+### LLM Providers
 
-Features degrade gracefully when credentials are missing — they return an error response rather than crashing.
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_PROVIDER` | `claude` | Preferred provider: `claude` \| `openai` \| `groq` |
+| `ANTHROPIC_API_KEY` | — | Claude API key — primary provider |
+| `OPENAI_API_KEY` | — | OpenAI API key — automatic fallback |
+| `GROQ_API_KEY` | — | Groq API key — secondary fallback (Llama 3.3-70B) |
+| `OLLAMA_HOST` | `http://localhost:11434` | Local Ollama — final fallback, no key needed |
+
+### Multi-Agent Pipeline
+
+| Variable | Default | Description |
+|---|---|---|
+| `MIN_CONFIDENCE_THRESHOLD` | `0.6` | Plans below this confidence always require approval |
+| `AUTO_EXECUTE_RISK_LEVELS` | `low,medium` | Risk levels that auto-execute without human approval |
+
+### Monitoring Loop
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENABLE_MONITOR_LOOP` | `false` | Enable background anomaly detection |
+| `MONITOR_INTERVAL_SECONDS` | `60` | Polling interval |
+| `AUTO_REMEDIATE_ON_MONITOR` | `false` | Auto-fix detected anomalies (alert-only when false) |
+
+### Integrations
+
+| Variable | Required for | Description |
+|---|---|---|
+| `GITHUB_TOKEN` | GitHub features | Personal access token |
+| `GITHUB_REPO` | GitHub features | `owner/repo` format |
+| `SLACK_BOT_TOKEN` | Slack | Bot token |
+| `SLACK_CHANNEL` | Slack | Default channel (default: `#incidents`) |
+| `JIRA_URL` | Jira | e.g. `https://yourorg.atlassian.net` |
+| `JIRA_USER` | Jira | User email |
+| `JIRA_TOKEN` | Jira | API token |
+| `JIRA_PROJECT` | Jira | Project key |
+| `OPSGENIE_API_KEY` | OpsGenie | API key |
+| `AWS_REGION` | AWS | Region (default: `us-east-1`) |
+| `AWS_ACCESS_KEY_ID` | AWS | Access key (or use IAM role) |
+| `AWS_SECRET_ACCESS_KEY` | AWS | Secret key (or use IAM role) |
+| `K8S_IN_CLUSTER` | K8s (in-pod) | Set `true` when running inside a pod |
+| `KUBECONFIG` | K8s (local) | Path to kubeconfig (default: `~/.kube/config`) |
+| `RBAC_CONFIG_PATH` | Optional | Path to JSON file with user→role mappings |
+| `CORS_ORIGINS` | Optional | Comma-separated allowed CORS origins |
+
+All integrations degrade gracefully — missing credentials return a structured error rather than crashing.
 
 ---
 
@@ -120,6 +235,43 @@ Features degrade gracefully when credentials are missing — they return an erro
 | `GET` | `/health` | Health status |
 | `GET` | `/docs` | Swagger UI |
 | `GET` | `/redoc` | ReDoc reference |
+
+### Incident Pipelines
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/incident/run` | **v1** — monolithic pipeline (original, backwards-compatible) |
+| `POST` | `/v2/incident/run` | **v2** — LangGraph multi-agent pipeline with policy engine |
+
+Both accept the same core fields. v2 adds `user`, `role`, `aws_cfg`, `k8s_cfg`, `slack_channel`.
+
+> ⚠️ Requires `X-User` header with `deploy` permission when `auto_remediate: true`.
+
+**v2 request body:**
+
+```json
+{
+  "incident_id":    "INC-001",
+  "description":   "API pods crash-looping in prod",
+  "auto_remediate": false,
+  "user":           "alice",
+  "role":           "developer",
+  "aws_cfg":        {"resource_type": "ecs", "resource_id": "prod-cluster", "log_group": "/ecs/api"},
+  "k8s_cfg":        {"namespace": "production"},
+  "hours":          2,
+  "slack_channel":  "#incidents"
+}
+```
+
+**v2 response includes:**
+- `plan` — structured JSON plan from PlannerAgent (`actions`, `confidence`, `risk`, `root_cause`)
+- `executed_actions` — each action's result
+- `blocked_actions` — actions blocked by policy (with reason)
+- `validation_passed` — post-execution health check result
+- `risk_score` — numeric risk score
+- `requires_human_approval` — whether approval gate was triggered
+- `status` — `completed` \| `escalated` \| `awaiting_approval` \| `failed`
+- `correlation_id` — for request tracing
 
 ### AI & Correlation
 
@@ -137,7 +289,7 @@ Features degrade gracefully when credentials are missing — they return an erro
 
 ### Kubernetes
 
-> ⚠️ `/k8s/restart` and `/k8s/scale` require `X-User` header with `deploy` permission.
+> ⚠️ `/k8s/restart` and `/k8s/scale` require `X-User` with `deploy` permission.
 
 | Method | Path | Params / Body | Description |
 |---|---|---|---|
@@ -153,24 +305,31 @@ Features degrade gracefully when credentials are missing — they return an erro
 
 All AWS endpoints are **read-only**.
 
-| Method | Path | Params | Description |
-|---|---|---|---|
-| `GET` | `/aws/ec2/instances` | `state` | List instances |
-| `GET` | `/aws/ec2/status` | `instance_id` | Status checks |
-| `GET` | `/aws/ec2/console` | `instance_id` | Serial console output |
-| `GET` | `/aws/logs/groups` | `prefix, limit` | List log groups |
-| `GET` | `/aws/logs/recent` | `log_group, minutes, limit` | Recent log events |
-| `GET` | `/aws/logs/search` | `log_group, pattern, hours` | Search logs by pattern |
-| `GET` | `/aws/cloudwatch/alarms` | `state` | CloudWatch alarms |
-| `POST` | `/aws/cloudwatch/metrics` | `{namespace, metric_name, dimensions, hours}` | Fetch metric series |
-| `GET` | `/aws/ecs/services` | `cluster` | ECS service counts |
-| `GET` | `/aws/ecs/stopped-tasks` | `cluster, limit` | Stopped task reasons |
-| `GET` | `/aws/lambda/errors` | `function_name, hours` | Lambda error metrics |
-| `GET` | `/aws/rds/events` | `db_instance_id, hours` | RDS events |
-| `GET` | `/aws/elb/target-health` | `target_group_arn` | ALB target health |
-| `GET` | `/aws/cloudtrail/events` | `hours, resource_name` | Recent API changes |
-| `POST` | `/aws/diagnose` | `{resource_type, resource_id, log_group, hours}` | AI root cause analysis from live AWS data |
-| `POST` | `/aws/predict-scaling` | `{resource_type, resource_id, hours}` | Predict if scaling needed from metric trends |
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/aws/ec2/instances` | List EC2 instances |
+| `GET` | `/aws/ec2/status` | EC2 status checks |
+| `GET` | `/aws/ec2/console` | Serial console output |
+| `GET` | `/aws/logs/groups` | List CloudWatch log groups |
+| `GET` | `/aws/logs/recent` | Recent log events |
+| `GET` | `/aws/logs/search` | Search logs by pattern |
+| `GET` | `/aws/cloudwatch/alarms` | CloudWatch alarms |
+| `POST` | `/aws/cloudwatch/metrics` | Fetch metric series |
+| `GET` | `/aws/ecs/services` | ECS service counts |
+| `GET` | `/aws/ecs/stopped-tasks` | Stopped ECS task reasons |
+| `GET` | `/aws/lambda/functions` | List Lambda functions |
+| `GET` | `/aws/lambda/errors` | Lambda error metrics |
+| `GET` | `/aws/rds/instances` | RDS instance list |
+| `GET` | `/aws/rds/events` | RDS events |
+| `GET` | `/aws/elb/target-health` | ALB target health |
+| `GET` | `/aws/cloudtrail/events` | Recent CloudTrail API events |
+| `GET` | `/aws/s3/buckets` | S3 bucket list |
+| `GET` | `/aws/sqs/queues` | SQS queue list |
+| `GET` | `/aws/dynamodb/tables` | DynamoDB table list |
+| `GET` | `/aws/route53/healthchecks` | Route53 health checks |
+| `GET` | `/aws/sns/topics` | SNS topic list |
+| `POST` | `/aws/diagnose` | AI root cause analysis from live AWS data |
+| `POST` | `/aws/predict-scaling` | Predict if scaling needed from metric trends |
 
 ### Incident Management
 
@@ -182,6 +341,13 @@ All AWS endpoints are **read-only**.
 | `POST` | `/incident/github/issue` | `{title, body}` | Create GitHub issue |
 | `POST` | `/incident/github/pr` | `{head, base, title, body}` | Create GitHub PR |
 
+### Deployment & Code Review
+
+| Method | Path | Body | Description |
+|---|---|---|---|
+| `POST` | `/deploy/assess` | `{deployment, namespace, new_image, description}` | Pre-deploy go/no-go assessment |
+| `POST` | `/github/review-pr` | `{pr_number, post_comment}` | AI code review of a GitHub PR |
+
 ### Security / RBAC
 
 | Method | Path | Body | Description |
@@ -189,12 +355,13 @@ All AWS endpoints are **read-only**.
 | `POST` | `/security/check` | `{user, action}` | Check if user can perform action |
 | `POST` | `/security/roles` | `{user, role}` | Assign role to user |
 | `DELETE` | `/security/roles/{user}` | — | Revoke user role |
+| `GET` | `/security/roles` | — | List all user roles |
 
 **Roles:** `admin` · `developer` · `viewer`
 
 | Role | Permissions |
 |---|---|
-| `admin` | deploy, rollback, read, write, delete, manage_users |
+| `admin` | deploy, rollback, read, write, delete, manage_users, manage_secrets |
 | `developer` | deploy, read, write |
 | `viewer` | read |
 
@@ -203,6 +370,13 @@ All AWS endpoints are **read-only**.
 | Method | Path | Body | Description |
 |---|---|---|---|
 | `POST` | `/memory/incidents` | `{id, type, source, payload}` | Store incident in ChromaDB |
+| `GET` | `/memory/incidents` | `query, n` | Search similar past incidents |
+
+### Jira Webhook
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/jira/webhook` | Receives Jira issue-created events → auto-creates GitHub PR |
 
 ### WebSocket
 
@@ -222,23 +396,52 @@ Send events as JSON, receive correlation + AI analysis in real time:
 
 ---
 
-## Autonomous Incident Pipeline
+## Multi-Agent Pipeline (v2)
 
-**`POST /incident/run`** — the flagship endpoint.
-
-> ⚠️ Requires `X-User` header with `deploy` permission when `auto_remediate: true`.
+**`POST /v2/incident/run`** — the flagship endpoint.
 
 ```
-Trigger → Collect → Synthesise → Remediate → Report
+Input → collect_context → PlannerAgent → DecisionAgent
+      → Executor (policy-gated) → Validator
+      → MemoryAgent → Final Response
 ```
 
-| Step | What happens |
-|---|---|
-| **1. Collect** | AWS, K8s, and GitHub data collected in parallel threads |
-| **2. Synthesise** | Claude AI determines root cause, severity, confidence, and action plan |
-| **3. Remediate** | K8s restart/scale (if `auto_remediate: true`), GitHub PR with fix, Jira ticket, Slack war room, OpsGenie alert |
-| **4. Store** | Incident saved to ChromaDB for future similarity search |
-| **5. Report** | Full structured report with every action's result |
+| Step | Agent / Node | What happens |
+|---|---|---|
+| **1. Context** | `AWSAgent` `K8sAgent` `GitHubAgent` | Parallel data collection + ChromaDB similar incident retrieval |
+| **2. Plan** | `PlannerAgent` + LLM | Structured JSON plan: actions, confidence, risk, root_cause |
+| **3. Decide** | `DecisionAgent` | Risk score + approval gate (no LLM call) |
+| **4. Execute** | `Executor` + `PolicyEngine` | Each action checked against rules.json before running |
+| **5. Validate** | `Validator` | Re-checks K8s health; triggers retry (up to 3×) or escalates |
+| **6. Memory** | `MemoryAgent` | Stores outcome + actions to ChromaDB |
+
+### Policy Engine
+
+Actions are blocked before execution by `app/policies/rules.json`:
+
+```json
+{
+  "blocked_actions": ["delete_cluster", "drop_database", "terminate_all_instances"],
+  "guardrails": {
+    "max_replicas": 20,
+    "restricted_namespaces": ["kube-system", "kube-public"]
+  }
+}
+```
+
+Add new rules to `rules.json` without changing any Python code.
+
+### Conditional branching
+
+- **`requires_human_approval=true`** (high risk / low confidence / `auto_remediate=false`) → pipeline ends at `awaiting_approval`, no actions executed
+- **Validation failed + retries < 3** → re-runs `execute` node
+- **Validation failed + retries exhausted** → `escalate` node notifies Slack + OpsGenie
+
+---
+
+## Original Incident Pipeline (v1)
+
+**`POST /incident/run`** — backwards-compatible, unchanged.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/incident/run \
@@ -263,8 +466,6 @@ curl -X POST http://127.0.0.1:8000/incident/run \
 
 > Requires `X-User` header with `deploy` permission.
 
-Collects current K8s state, active AWS alarms, recent GitHub commits, and past similar incidents from ChromaDB — Claude returns a risk assessment with checklist.
-
 ```bash
 curl -X POST http://127.0.0.1:8000/deploy/assess \
   -H "Content-Type: application/json" \
@@ -277,7 +478,7 @@ curl -X POST http://127.0.0.1:8000/deploy/assess \
   }'
 ```
 
-**Response includes:** `go_no_go` (`go` / `go_with_caution` / `no_go`), `risk_score`, `concerns[]`, `checklist[]`, `safe_window`
+**Response:** `go_no_go` (`go` / `go_with_caution` / `no_go`), `risk_score`, `concerns[]`, `checklist[]`, `safe_window`
 
 ---
 
@@ -287,15 +488,13 @@ curl -X POST http://127.0.0.1:8000/deploy/assess \
 
 **Jira setup:** Project Settings → Webhooks → URL: `https://your-platform/jira/webhook` → Event: Issue Created
 
-Triggers when:
-- Issue type is **Change Request** (or Task / Story), **or**
-- Issue has label **`auto-pr`**
+Triggers when: Issue type is **Change Request**, **Task**, or **Story** — or issue has label **`auto-pr`**
 
 **Flow:**
 1. Claude reads the Jira ticket description
-2. Generates a PR plan with title, body, and best-effort file patches
-3. Creates a GitHub branch `jira/<ticket-key>-<slug>` and opens a PR
-4. Posts the PR link as a comment back on the Jira ticket
+2. Generates PR plan with title, body, and best-effort file patches
+3. Creates branch `jira/<ticket-key>-<slug>` and opens a PR
+4. Posts the PR link as a comment on the Jira ticket
 
 ---
 
@@ -309,13 +508,37 @@ curl -X POST http://127.0.0.1:8000/github/review-pr \
   -d '{"pr_number": 42, "post_comment": true}'
 ```
 
-Fetches the PR diff from GitHub, runs Claude analysis for security issues, infra changes, and code quality. Set `post_comment: true` to automatically post the review on the PR.
+Claude analyses the PR diff for security vulnerabilities, infra changes, and code quality. Set `post_comment: true` to post the review directly on the PR.
+
+---
+
+## Multi-LLM Support
+
+The platform automatically selects the best available LLM:
+
+```
+Claude (ANTHROPIC_API_KEY) → OpenAI (OPENAI_API_KEY) → Groq (GROQ_API_KEY) → Ollama (local)
+```
+
+Override per-request by setting `LLM_PROVIDER` in `.env`. The factory is in `app/llm/factory.py` — add new providers by implementing `BaseLLM` in `app/llm/base.py`.
+
+---
+
+## Continuous Monitoring
+
+Enable background anomaly detection:
+
+```env
+ENABLE_MONITOR_LOOP=true
+MONITOR_INTERVAL_SECONDS=60
+AUTO_REMEDIATE_ON_MONITOR=false   # alert-only until you're confident
+```
+
+The monitor (`app/monitoring/loop.py`) polls K8s for crash-looping pods and unhealthy states. When anomalies are found it triggers the v2 pipeline with `auto_remediate=AUTO_REMEDIATE_ON_MONITOR`.
 
 ---
 
 ## RBAC Usage
-
-Assign a role before calling protected endpoints:
 
 ```bash
 # Assign developer role
@@ -330,13 +553,17 @@ curl -X POST http://127.0.0.1:8000/k8s/restart \
   -d '{"namespace": "default", "deployment": "api-server"}'
 ```
 
-**Protected endpoints** (require `X-User` with `deploy` permission):
-- `POST /k8s/restart`
-- `POST /k8s/scale`
-- `POST /deploy/assess`
-- `POST /incident/run` (only when `auto_remediate: true`)
+**Protected endpoints** require `X-User` header:
 
-Load users from file — set `RBAC_CONFIG_PATH=/path/to/roles.json`:
+| Endpoint | Required permission |
+|---|---|
+| `POST /k8s/restart` | `deploy` |
+| `POST /k8s/scale` | `deploy` |
+| `POST /deploy/assess` | `deploy` |
+| `POST /incident/run` (auto_remediate=true) | `deploy` |
+| `POST /v2/incident/run` (auto_remediate=true) | `deploy` |
+
+Persist users via file — set `RBAC_CONFIG_PATH=/path/to/roles.json`:
 
 ```json
 {"alice": "developer", "bob": "viewer", "charlie": "admin"}
@@ -351,3 +578,13 @@ pytest -q                         # all 68 tests
 pytest -q tests/test_main.py     # API tests only
 python test_websocket.py          # manual WebSocket test (needs running server)
 ```
+
+---
+
+## Docker
+
+```bash
+docker compose up --build
+```
+
+The `docker-compose.yml` mounts the project directory, loads `.env`, and restarts on failure.
