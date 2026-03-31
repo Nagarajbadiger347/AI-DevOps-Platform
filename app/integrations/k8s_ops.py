@@ -211,3 +211,74 @@ def get_unhealthy_pods(namespace: str = "") -> dict:
         if p["phase"] not in ("Running", "Succeeded") or not p["ready"] or p["restarts"] >= 3
     ]
     return {"success": True, "unhealthy_pods": unhealthy, "count": len(unhealthy)}
+
+
+def delete_pod(namespace: str, pod: str) -> dict:
+    """Delete (force-restart) a pod — K8s will reschedule it automatically."""
+    if not _load_config():
+        return {"success": False, "error": "K8s config not found"}
+    try:
+        v1 = client.CoreV1Api()
+        v1.delete_namespaced_pod(name=pod, namespace=namespace)
+        return {"success": True, "pod": pod, "namespace": namespace,
+                "message": f"Pod {pod} deleted — will be rescheduled automatically"}
+    except ApiException as e:
+        return {"success": False, "error": f"API error {e.status}: {e.reason}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def cordon_node(node: str) -> dict:
+    """Cordon a node — prevents new pods from being scheduled on it."""
+    if not _load_config():
+        return {"success": False, "error": "K8s config not found"}
+    try:
+        v1 = client.CoreV1Api()
+        v1.patch_node(name=node, body={"spec": {"unschedulable": True}})
+        return {"success": True, "node": node, "message": f"Node {node} cordoned — no new pods will be scheduled"}
+    except ApiException as e:
+        return {"success": False, "error": f"API error {e.status}: {e.reason}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def uncordon_node(node: str) -> dict:
+    """Uncordon a node — allows pods to be scheduled on it again."""
+    if not _load_config():
+        return {"success": False, "error": "K8s config not found"}
+    try:
+        v1 = client.CoreV1Api()
+        v1.patch_node(name=node, body={"spec": {"unschedulable": False}})
+        return {"success": True, "node": node, "message": f"Node {node} uncordoned — accepting pods again"}
+    except ApiException as e:
+        return {"success": False, "error": f"API error {e.status}: {e.reason}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def get_resource_usage(namespace: str = "default") -> dict:
+    """Get CPU/memory requests vs limits for all pods in a namespace."""
+    if not _load_config():
+        return {"success": False, "error": "K8s config not found"}
+    try:
+        v1 = client.CoreV1Api()
+        pod_list = v1.list_namespaced_pod(namespace) if namespace else v1.list_pod_for_all_namespaces()
+        usage = []
+        for p in pod_list.items:
+            for c in (p.spec.containers or []):
+                req  = c.resources.requests or {} if c.resources else {}
+                lim  = c.resources.limits  or {} if c.resources else {}
+                usage.append({
+                    "pod":        p.metadata.name,
+                    "namespace":  p.metadata.namespace,
+                    "container":  c.name,
+                    "cpu_req":    req.get("cpu", "—"),
+                    "cpu_lim":    lim.get("cpu", "—"),
+                    "mem_req":    req.get("memory", "—"),
+                    "mem_lim":    lim.get("memory", "—"),
+                })
+        return {"success": True, "resource_usage": usage, "count": len(usage)}
+    except ApiException as e:
+        return {"success": False, "error": f"API error {e.status}: {e.reason}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}

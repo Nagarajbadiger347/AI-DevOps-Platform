@@ -757,3 +757,200 @@ def get_scaling_metrics(resource_type: str, resource_id: str, hours: int = 6) ->
 
     ctx["active_alarms"] = list_cloudwatch_alarms(state="ALARM")
     return ctx
+
+
+# ── EC2 Extended ──────────────────────────────────────────────
+
+def get_ec2_instance_info(instance_id: str) -> dict:
+    """Get full details for a single EC2 instance."""
+    try:
+        ec2 = _client("ec2")
+        resp = ec2.describe_instances(InstanceIds=[instance_id])
+        for res in resp["Reservations"]:
+            for i in res["Instances"]:
+                name = next((t["Value"] for t in i.get("Tags", []) if t["Key"] == "Name"), "")
+                return {
+                    "success":     True,
+                    "instance_id": i["InstanceId"],
+                    "name":        name,
+                    "type":        i["InstanceType"],
+                    "state":       i["State"]["Name"],
+                    "public_ip":   i.get("PublicIpAddress", ""),
+                    "private_ip":  i.get("PrivateIpAddress", ""),
+                    "az":          i["Placement"]["AvailabilityZone"],
+                    "launch_time": i["LaunchTime"].isoformat(),
+                    "vpc_id":      i.get("VpcId", ""),
+                    "subnet_id":   i.get("SubnetId", ""),
+                    "security_groups": [sg["GroupName"] for sg in i.get("SecurityGroups", [])],
+                }
+        return {"success": False, "error": f"Instance {instance_id} not found"}
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── ECS Extended ──────────────────────────────────────────────
+
+def scale_ecs_service(cluster: str, service: str, desired_count: int) -> dict:
+    """Scale an ECS service to the desired task count."""
+    try:
+        ecs = _client("ecs")
+        ecs.update_service(cluster=cluster, service=service, desiredCount=desired_count)
+        return {
+            "success":       True,
+            "cluster":       cluster,
+            "service":       service,
+            "desired_count": desired_count,
+            "message":       f"ECS service {service} scaled to {desired_count} task(s)",
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def get_ecs_service_detail(cluster: str, service: str) -> dict:
+    """Get detailed status for a single ECS service."""
+    try:
+        ecs = _client("ecs")
+        resp = ecs.describe_services(cluster=cluster, services=[service])
+        svcs = resp.get("services", [])
+        if not svcs:
+            return {"success": False, "error": f"Service {service} not found in cluster {cluster}"}
+        s = svcs[0]
+        return {
+            "success":        True,
+            "service":        s["serviceName"],
+            "cluster":        cluster,
+            "status":         s["status"],
+            "desired":        s["desiredCount"],
+            "running":        s["runningCount"],
+            "pending":        s["pendingCount"],
+            "task_def":       s["taskDefinition"].split("/")[-1],
+            "launch_type":    s.get("launchType", ""),
+            "deployments":    len(s.get("deployments", [])),
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def force_new_ecs_deployment(cluster: str, service: str) -> dict:
+    """Force a new ECS deployment (restarts all tasks)."""
+    try:
+        ecs = _client("ecs")
+        ecs.update_service(cluster=cluster, service=service, forceNewDeployment=True)
+        return {
+            "success": True,
+            "cluster": cluster,
+            "service": service,
+            "message": f"New deployment forced for ECS service {service}",
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Lambda Extended ───────────────────────────────────────────
+
+def invoke_lambda(function_name: str, payload: dict = None) -> dict:
+    """Invoke a Lambda function synchronously and return its response."""
+    import json
+    try:
+        lam = _client("lambda")
+        resp = lam.invoke(
+            FunctionName=function_name,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload or {}).encode(),
+        )
+        status_code = resp.get("StatusCode", 0)
+        body_raw = resp["Payload"].read().decode("utf-8")
+        try:
+            body = json.loads(body_raw)
+        except Exception:
+            body = body_raw
+        return {
+            "success":     status_code == 200,
+            "function":    function_name,
+            "status_code": status_code,
+            "response":    body,
+            "error_type":  resp.get("FunctionError", None),
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── CloudWatch Alarms Extended ────────────────────────────────
+
+def set_alarm_state(alarm_name: str, state: str, reason: str = "Set by AI DevOps") -> dict:
+    """Manually set a CloudWatch alarm state (OK/ALARM/INSUFFICIENT_DATA)."""
+    valid = {"OK", "ALARM", "INSUFFICIENT_DATA"}
+    if state.upper() not in valid:
+        return {"success": False, "error": f"state must be one of {valid}"}
+    try:
+        cw = _client("cloudwatch")
+        cw.set_alarm_state(
+            AlarmName=alarm_name,
+            StateValue=state.upper(),
+            StateReason=reason,
+        )
+        return {"success": True, "alarm": alarm_name, "new_state": state.upper()}
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── SQS Extended ──────────────────────────────────────────────
+
+def get_sqs_queue_depth(queue_url: str) -> dict:
+    """Get message counts for an SQS queue."""
+    try:
+        sqs = _client("sqs")
+        resp = sqs.get_queue_attributes(
+            QueueUrl=queue_url,
+            AttributeNames=["ApproximateNumberOfMessages",
+                            "ApproximateNumberOfMessagesNotVisible",
+                            "ApproximateNumberOfMessagesDelayed"],
+        )
+        attrs = resp.get("Attributes", {})
+        return {
+            "success":        True,
+            "queue_url":      queue_url,
+            "visible":        int(attrs.get("ApproximateNumberOfMessages", 0)),
+            "in_flight":      int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0)),
+            "delayed":        int(attrs.get("ApproximateNumberOfMessagesDelayed", 0)),
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── RDS Extended ──────────────────────────────────────────────
+
+def reboot_rds_instance(db_instance_id: str) -> dict:
+    """Reboot an RDS DB instance."""
+    try:
+        rds = _client("rds")
+        rds.reboot_db_instance(DBInstanceIdentifier=db_instance_id)
+        return {"success": True, "db_instance_id": db_instance_id,
+                "message": f"RDS instance {db_instance_id} reboot initiated"}
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def get_rds_instance_detail(db_instance_id: str) -> dict:
+    """Get detailed status for a single RDS instance."""
+    try:
+        rds = _client("rds")
+        resp = rds.describe_db_instances(DBInstanceIdentifier=db_instance_id)
+        instances = resp.get("DBInstances", [])
+        if not instances:
+            return {"success": False, "error": f"RDS instance {db_instance_id} not found"}
+        i = instances[0]
+        return {
+            "success":          True,
+            "db_instance_id":   i["DBInstanceIdentifier"],
+            "engine":           i["Engine"],
+            "engine_version":   i["EngineVersion"],
+            "status":           i["DBInstanceStatus"],
+            "instance_class":   i["DBInstanceClass"],
+            "multi_az":         i.get("MultiAZ", False),
+            "storage_gb":       i.get("AllocatedStorage", 0),
+            "endpoint":         i.get("Endpoint", {}).get("Address", ""),
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+

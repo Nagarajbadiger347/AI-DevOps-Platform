@@ -20,10 +20,17 @@ from app.integrations.github import (
     list_repos as _list_repos,
     get_profile_summary as _get_github_profile,
 )
-from app.integrations.k8s_ops import restart_deployment, scale_deployment, get_pod_logs
+from app.integrations.k8s_ops import (
+    restart_deployment, scale_deployment, get_pod_logs,
+    list_pods, list_deployments, list_namespaces, get_cluster_events,
+    get_unhealthy_pods, delete_pod, cordon_node, uncordon_node, get_resource_usage,
+)
 from app.integrations.aws_ops import (
     list_ec2_instances, get_ec2_status_checks, get_ec2_console_output,
-    start_ec2_instance, stop_ec2_instance, reboot_ec2_instance,
+    start_ec2_instance, stop_ec2_instance, reboot_ec2_instance, get_ec2_instance_info,
+    scale_ecs_service, get_ecs_service_detail, force_new_ecs_deployment,
+    invoke_lambda, set_alarm_state, get_sqs_queue_depth,
+    reboot_rds_instance, get_rds_instance_detail,
     list_log_groups, get_recent_logs, search_logs,
     list_cloudwatch_alarms, get_metric,
     list_ecs_services, get_stopped_ecs_tasks,
@@ -1019,18 +1026,18 @@ var _apiWs = null;
 var _apiLastResp = '';
 
 var _EP_DEFAULTS = {
-  '/incidents/run':       '{\n  "incident_id": "INC-001",\n  "description": "Payment service pods crash-looping",\n  "severity": "high",\n  "auto_remediate": false\n}',
-  '/incidents/run/async': '{\n  "incident_id": "INC-001",\n  "description": "Payment service pods crash-looping",\n  "severity": "high"\n}',
-  '/warroom/create':      '{\n  "incident_id": "INC-001",\n  "description": "Database connection failures",\n  "severity": "critical",\n  "post_to_slack": false\n}',
-  '/chat':                '{\n  "message": "What is the current status of my infrastructure?",\n  "history": [],\n  "provider": ""\n}',
-  '/k8s/restart':         '{\n  "namespace": "default",\n  "deployment": "my-deployment"\n}',
-  '/k8s/scale':           '{\n  "namespace": "default",\n  "deployment": "my-deployment",\n  "replicas": 3\n}',
-  '/k8s/diagnose':        '{\n  "resource_type": "k8s",\n  "resource_id": "default"\n}',
-  '/aws/diagnose':        '{\n  "resource_type": "ec2",\n  "resource_id": "i-0123456789abcdef0"\n}',
+  '/incidents/run':       '{\\n  "incident_id": "INC-001",\\n  "description": "Payment service pods crash-looping",\\n  "severity": "high",\\n  "auto_remediate": false\\n}',
+  '/incidents/run/async': '{\\n  "incident_id": "INC-001",\\n  "description": "Payment service pods crash-looping",\\n  "severity": "high"\\n}',
+  '/warroom/create':      '{\\n  "incident_id": "INC-001",\\n  "description": "Database connection failures",\\n  "severity": "critical",\\n  "post_to_slack": false\\n}',
+  '/chat':                '{\\n  "message": "What is the current status of my infrastructure?",\\n  "history": [],\\n  "provider": ""\\n}',
+  '/k8s/restart':         '{\\n  "namespace": "default",\\n  "deployment": "my-deployment"\\n}',
+  '/k8s/scale':           '{\\n  "namespace": "default",\\n  "deployment": "my-deployment",\\n  "replicas": 3\\n}',
+  '/k8s/diagnose':        '{\\n  "resource_type": "k8s",\\n  "resource_id": "default"\\n}',
+  '/aws/diagnose':        '{\\n  "resource_type": "ec2",\\n  "resource_id": "i-0123456789abcdef0"\\n}',
   '/github/issue':        '?title=Bug+found&body=Description+here',
   '/jira/incident':       '?summary=Service+Down&description=Payment+service+unavailable',
-  '/security/roles/assign': '{\n  "user": "alice",\n  "role": "developer"\n}',
-  '/webhooks/github':     '{\n  "action": "push",\n  "ref": "refs/heads/main",\n  "commits": [{"message": "fix: payment timeout"}],\n  "repository": {},\n  "pull_request": {}\n}',
+  '/security/roles/assign': '{\\n  "user": "alice",\\n  "role": "developer"\\n}',
+  '/webhooks/github':     '{\\n  "action": "push",\\n  "ref": "refs/heads/main",\\n  "commits": [{"message": "fix: payment timeout"}],\\n  "repository": {},\\n  "pull_request": {}\\n}',
   '/ws':                  '{"id":"evt-1","type":"pod_crash","source":"k8s","payload":{"pod":"payment-api-xyz","namespace":"production"}}',
 };
 
@@ -1375,22 +1382,33 @@ function autoResize(el) {
   el.style.height = Math.min(el.scrollHeight, 130) + 'px';
 }
 
-function sendChat() {
+var _pendingAction = null;
+var _pendingParams = null;
+
+function sendChat(overrideMsg, confirmed, pendingAction, pendingParams) {
   var input = document.getElementById('chat-input');
-  var msg = input.value.trim();
+  var msg = overrideMsg !== undefined ? overrideMsg : input.value.trim();
   if (!msg) return;
   var btn = document.getElementById('chat-send-btn');
-  input.value = ''; input.style.height = 'auto';
+  if (!overrideMsg) { input.value = ''; input.style.height = 'auto'; }
   btn.disabled = true;
   appendMsg('user', msg);
   _chatHistory.push({role: 'user', content: msg});
   var typingBubble = appendMsg('ai', '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>', true);
   typingBubble.classList.add('typing');
   var selProvider = (document.getElementById('llm-selector') || {}).value || '';
+  var body = {
+    message: msg,
+    history: _chatHistory.slice(0, -1),
+    provider: selProvider,
+    confirmed: confirmed || false,
+    pending_action: pendingAction || null,
+    pending_params: pendingParams || null
+  };
   fetch('/chat', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message: msg, history: _chatHistory.slice(0,-1), provider: selProvider})
+    body: JSON.stringify(body)
   })
   .then(function(r){ return r.json(); })
   .then(function(d) {
@@ -1398,6 +1416,36 @@ function sendChat() {
     var reply = d.reply || d.detail || 'No response';
     typingBubble.innerHTML = _renderMarkdown(reply);
     _chatHistory.push({role: 'assistant', content: reply});
+
+    // ── Confirmation card ──────────────────────────────────
+    if (d.needs_confirm && d.pending_action) {
+      _pendingAction = d.pending_action;
+      _pendingParams = d.pending_params;
+      var confirmCard = document.createElement('div');
+      confirmCard.style.cssText = 'margin-top:10px;display:flex;gap:8px;flex-wrap:wrap';
+      var yesBtn = document.createElement('button');
+      yesBtn.innerHTML = '\\u2705 Yes, proceed';
+      yesBtn.style.cssText = 'padding:7px 16px;background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.4);color:var(--green);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit';
+      yesBtn.onclick = function() {
+        confirmCard.remove();
+        sendChat('Yes, confirmed', true, _pendingAction, _pendingParams);
+        _pendingAction = null; _pendingParams = null;
+      };
+      var noBtn = document.createElement('button');
+      noBtn.innerHTML = '\\u274c No, cancel';
+      noBtn.style.cssText = 'padding:7px 16px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--red);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit';
+      noBtn.onclick = function() {
+        confirmCard.remove();
+        appendMsg('ai', 'Operation cancelled.');
+        _chatHistory.push({role: 'assistant', content: 'Operation cancelled.'});
+        _pendingAction = null; _pendingParams = null;
+        document.getElementById('chat-messages').scrollTop = 999999;
+      };
+      confirmCard.appendChild(yesBtn);
+      confirmCard.appendChild(noBtn);
+      typingBubble.parentElement.appendChild(confirmCard);
+    }
+
     var footer = document.createElement('div');
     footer.style.cssText = 'font-size:10px;color:var(--muted);margin-top:6px;padding:0 4px;display:flex;gap:10px;flex-wrap:wrap';
     if (d.sources && d.sources.length) {
@@ -1411,13 +1459,11 @@ function sendChat() {
       prov.textContent = pLabel;
       footer.appendChild(prov);
     }
-    // Show action badge if an operation was executed
     if (d.action_taken) {
       var actionBadge = document.createElement('div');
       actionBadge.style.cssText = 'margin-top:8px;padding:6px 10px;background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.3);border-radius:6px;font-size:11px;color:var(--green);display:flex;align-items:center;gap:6px';
-      actionBadge.innerHTML = '<span>&#x2705;</span><span>Action executed: <strong>' + d.action_taken.replace(/_/g,' ') + '</strong></span>';
+      actionBadge.innerHTML = '<span>&#x2705;</span><span>Executed: <strong>' + d.action_taken.replace(/_/g,' ') + '</strong></span>';
       typingBubble.parentElement.appendChild(actionBadge);
-      // update session counter
       var mA = document.getElementById('m-actions');
       if (mA && d.action_count !== undefined) animateNum(mA, d.action_count);
       toast('Action completed: ' + d.action_taken.replace(/_/g,' '), 'ok', 3000);
@@ -2314,6 +2360,9 @@ class ChatPayload(BaseModel):
     message: str
     history: List[ChatMessage] = []
     provider: str = ""   # "anthropic" | "groq" | "ollama" | "" (auto)
+    confirmed: bool = False          # True when user confirms a pending action
+    pending_action: Optional[str] = None   # action name carried from previous turn
+    pending_params: Optional[Dict] = None  # params carried from previous turn
 
 class WarRoomRequest(BaseModel):
     incident_id:  str
@@ -2402,9 +2451,12 @@ _chat_action_count = 0  # session counter shown in UI metric
 
 # ── agentic action catalogue ──────────────────────────────────
 _ACTION_CATALOGUE = {
-    # ── Kubernetes ──────────────────────────────────────────────
+
+    # ════════════════════════════════════════════════════════════
+    # KUBERNETES
+    # ════════════════════════════════════════════════════════════
     "restart_deployment": {
-        "desc": "Restart a Kubernetes deployment (rolling restart)",
+        "desc": "Rolling restart a Kubernetes deployment",
         "params": ["namespace", "deployment"],
         "handler": lambda p: restart_deployment(p["namespace"], p["deployment"]),
     },
@@ -2413,48 +2465,260 @@ _ACTION_CATALOGUE = {
         "params": ["namespace", "deployment", "replicas"],
         "handler": lambda p: scale_deployment(p["namespace"], p["deployment"], int(p["replicas"])),
     },
-    "get_pod_logs": {
-        "desc": "Fetch recent logs for a specific pod",
+    "delete_pod": {
+        "desc": "Delete a pod so Kubernetes reschedules it (force restart)",
         "params": ["namespace", "pod"],
-        "handler": lambda p: get_pod_logs(p["namespace"], p["pod"]),
+        "handler": lambda p: delete_pod(p["namespace"], p["pod"]),
     },
-    # ── EC2 ─────────────────────────────────────────────────────
+    "get_pod_logs": {
+        "desc": "Fetch recent logs from a specific pod",
+        "params": ["namespace", "pod"],
+        "handler": lambda p: get_pod_logs(p["namespace"], p["pod"], tail_lines=int(p.get("lines", 100))),
+    },
+    "list_pods": {
+        "desc": "List all pods and their status in a namespace",
+        "params": ["namespace"],
+        "handler": lambda p: list_pods(p.get("namespace", "")),
+    },
+    "list_deployments": {
+        "desc": "List all deployments and their replica health",
+        "params": ["namespace"],
+        "handler": lambda p: list_deployments(p.get("namespace", "")),
+    },
+    "list_namespaces": {
+        "desc": "List all Kubernetes namespaces",
+        "params": [],
+        "handler": lambda _: list_namespaces(),
+    },
+    "get_cluster_events": {
+        "desc": "Get warning events from the cluster (OOMKilled, BackOff, Failed etc.)",
+        "params": ["namespace"],
+        "handler": lambda p: get_cluster_events(p.get("namespace", "")),
+    },
+    "get_unhealthy_pods": {
+        "desc": "Get all pods that are not healthy or crash-looping",
+        "params": ["namespace"],
+        "handler": lambda p: get_unhealthy_pods(p.get("namespace", "")),
+    },
+    "get_resource_usage": {
+        "desc": "Get CPU and memory requests/limits for pods in a namespace",
+        "params": ["namespace"],
+        "handler": lambda p: get_resource_usage(p.get("namespace", "default")),
+    },
+    "cordon_node": {
+        "desc": "Cordon a node to stop new pods scheduling on it (pre-maintenance)",
+        "params": ["node"],
+        "handler": lambda p: cordon_node(p["node"]),
+    },
+    "uncordon_node": {
+        "desc": "Uncordon a node to allow pods to schedule on it again",
+        "params": ["node"],
+        "handler": lambda p: uncordon_node(p["node"]),
+    },
+
+    # ════════════════════════════════════════════════════════════
+    # EC2
+    # ════════════════════════════════════════════════════════════
+    "list_ec2": {
+        "desc": "List all EC2 instances with their current state",
+        "params": [],
+        "handler": lambda _: list_ec2_instances(),
+    },
+    "get_ec2_info": {
+        "desc": "Get full details for a specific EC2 instance",
+        "params": ["instance_id"],
+        "handler": lambda p: get_ec2_instance_info(p["instance_id"]),
+    },
+    "get_ec2_status": {
+        "desc": "Get system and instance status checks for EC2",
+        "params": ["instance_id"],
+        "handler": lambda p: get_ec2_status_checks(p.get("instance_id", "")),
+    },
     "start_ec2": {
-        "desc": "Start a stopped EC2 instance by instance ID",
+        "desc": "Start a stopped EC2 instance",
         "params": ["instance_id"],
         "handler": lambda p: start_ec2_instance(p["instance_id"]),
     },
     "stop_ec2": {
-        "desc": "Stop a running EC2 instance by instance ID",
+        "desc": "Stop a running EC2 instance",
         "params": ["instance_id"],
         "handler": lambda p: stop_ec2_instance(p["instance_id"]),
     },
     "reboot_ec2": {
-        "desc": "Reboot an EC2 instance by instance ID",
+        "desc": "Reboot an EC2 instance",
         "params": ["instance_id"],
         "handler": lambda p: reboot_ec2_instance(p["instance_id"]),
     },
-    "list_ec2": {
-        "desc": "List all EC2 instances and their states",
-        "params": [],
-        "handler": lambda _: list_ec2_instances(),
+
+    # ════════════════════════════════════════════════════════════
+    # ECS
+    # ════════════════════════════════════════════════════════════
+    "list_ecs_services": {
+        "desc": "List ECS services and their task counts",
+        "params": ["cluster"],
+        "handler": lambda p: list_ecs_services(p.get("cluster", "default")),
     },
-    # ── Observability ────────────────────────────────────────────
+    "get_ecs_service": {
+        "desc": "Get detailed status for a specific ECS service",
+        "params": ["cluster", "service"],
+        "handler": lambda p: get_ecs_service_detail(p.get("cluster", "default"), p["service"]),
+    },
+    "scale_ecs_service": {
+        "desc": "Scale an ECS service to a desired task count",
+        "params": ["cluster", "service", "count"],
+        "handler": lambda p: scale_ecs_service(p.get("cluster", "default"), p["service"], int(p["count"])),
+    },
+    "redeploy_ecs_service": {
+        "desc": "Force a new ECS deployment (restarts all running tasks)",
+        "params": ["cluster", "service"],
+        "handler": lambda p: force_new_ecs_deployment(p.get("cluster", "default"), p["service"]),
+    },
+    "get_stopped_ecs_tasks": {
+        "desc": "List recently stopped ECS tasks and their stop reasons",
+        "params": ["cluster"],
+        "handler": lambda p: get_stopped_ecs_tasks(p.get("cluster", "default")),
+    },
+
+    # ════════════════════════════════════════════════════════════
+    # LAMBDA
+    # ════════════════════════════════════════════════════════════
+    "list_lambda": {
+        "desc": "List all Lambda functions",
+        "params": [],
+        "handler": lambda _: list_lambda_functions(),
+    },
+    "get_lambda_errors": {
+        "desc": "Get error and throttle metrics for a Lambda function",
+        "params": ["function_name"],
+        "handler": lambda p: get_lambda_errors(p["function_name"]),
+    },
+    "invoke_lambda": {
+        "desc": "Invoke a Lambda function and return its response",
+        "params": ["function_name", "payload"],
+        "handler": lambda p: invoke_lambda(p["function_name"], p.get("payload", {})),
+    },
+
+    # ════════════════════════════════════════════════════════════
+    # RDS
+    # ════════════════════════════════════════════════════════════
+    "list_rds": {
+        "desc": "List all RDS database instances",
+        "params": [],
+        "handler": lambda _: list_rds_instances(),
+    },
+    "get_rds_detail": {
+        "desc": "Get detailed status for a specific RDS instance",
+        "params": ["db_instance_id"],
+        "handler": lambda p: get_rds_instance_detail(p["db_instance_id"]),
+    },
+    "get_rds_events": {
+        "desc": "Get recent RDS events (failovers, reboots, errors)",
+        "params": ["db_instance_id"],
+        "handler": lambda p: get_rds_events(p["db_instance_id"]),
+    },
+    "reboot_rds": {
+        "desc": "Reboot an RDS database instance",
+        "params": ["db_instance_id"],
+        "handler": lambda p: reboot_rds_instance(p["db_instance_id"]),
+    },
+
+    # ════════════════════════════════════════════════════════════
+    # CLOUDWATCH / LOGS / ALARMS
+    # ════════════════════════════════════════════════════════════
     "get_alarms": {
-        "desc": "Get CloudWatch alarms",
-        "params": [],
-        "handler": lambda _: list_cloudwatch_alarms(),
+        "desc": "List CloudWatch alarms, optionally filtered by state",
+        "params": ["state"],
+        "handler": lambda p: list_cloudwatch_alarms(p.get("state", "")),
     },
-    # ── GitHub ───────────────────────────────────────────────────
+    "get_firing_alarms": {
+        "desc": "Get only alarms currently in ALARM state",
+        "params": [],
+        "handler": lambda _: list_cloudwatch_alarms("ALARM"),
+    },
+    "set_alarm_state": {
+        "desc": "Manually set a CloudWatch alarm state (OK/ALARM/INSUFFICIENT_DATA)",
+        "params": ["alarm_name", "state"],
+        "handler": lambda p: set_alarm_state(p["alarm_name"], p["state"]),
+    },
+    "search_logs": {
+        "desc": "Search CloudWatch logs for a pattern",
+        "params": ["log_group", "pattern", "hours"],
+        "handler": lambda p: search_logs(p["log_group"], p["pattern"], int(p.get("hours", 1))),
+    },
+    "get_recent_logs": {
+        "desc": "Get recent log events from a CloudWatch log group",
+        "params": ["log_group", "minutes"],
+        "handler": lambda p: get_recent_logs(p["log_group"], int(p.get("minutes", 30))),
+    },
+    "get_cloudtrail": {
+        "desc": "Get recent CloudTrail API events",
+        "params": ["hours"],
+        "handler": lambda p: get_cloudtrail_events(int(p.get("hours", 1))),
+    },
+
+    # ════════════════════════════════════════════════════════════
+    # SQS / S3 / DYNAMODB
+    # ════════════════════════════════════════════════════════════
+    "list_sqs": {
+        "desc": "List SQS queues and their message counts",
+        "params": [],
+        "handler": lambda _: list_sqs_queues(),
+    },
+    "get_sqs_depth": {
+        "desc": "Get message depth for a specific SQS queue",
+        "params": ["queue_url"],
+        "handler": lambda p: get_sqs_queue_depth(p["queue_url"]),
+    },
+    "list_s3": {
+        "desc": "List S3 buckets",
+        "params": [],
+        "handler": lambda _: list_s3_buckets(),
+    },
+    "list_dynamodb": {
+        "desc": "List DynamoDB tables",
+        "params": [],
+        "handler": lambda _: list_dynamodb_tables(),
+    },
+
+    # ════════════════════════════════════════════════════════════
+    # GITHUB
+    # ════════════════════════════════════════════════════════════
+    "list_repos": {
+        "desc": "List GitHub repositories",
+        "params": [],
+        "handler": lambda _: _list_repos(),
+    },
+    "get_recent_commits": {
+        "desc": "Get recent commits from GitHub",
+        "params": ["hours"],
+        "handler": lambda p: _get_recent_commits(hours=int(p.get("hours", 24))),
+    },
+    "get_recent_prs": {
+        "desc": "Get recently merged pull requests",
+        "params": ["hours"],
+        "handler": lambda p: _get_recent_prs(hours=int(p.get("hours", 48))),
+    },
     "create_github_issue": {
-        "desc": "Open a GitHub issue",
+        "desc": "Create a GitHub issue",
         "params": ["title", "body"],
         "handler": lambda p: create_issue(p.get("title", "AI-generated issue"), p.get("body", "")),
     },
-    # ── Incidents ────────────────────────────────────────────────
+
+    # ════════════════════════════════════════════════════════════
+    # SLACK
+    # ════════════════════════════════════════════════════════════
+    "post_slack": {
+        "desc": "Post a message to a Slack channel",
+        "params": ["channel", "message"],
+        "handler": lambda p: post_message(p.get("channel", "#general"), p["message"]),
+    },
+
+    # ════════════════════════════════════════════════════════════
+    # INCIDENTS / PIPELINE
+    # ════════════════════════════════════════════════════════════
     "run_pipeline": {
         "desc": "Run the full autonomous incident response pipeline",
-        "params": ["incident_id", "description", "severity"],
+        "params": ["description", "severity"],
         "handler": lambda p: run_incident_pipeline(
             incident_id=p.get("incident_id", f"chat-{__import__('time').strftime('%H%M%S')}"),
             description=p["description"],
@@ -2475,6 +2739,16 @@ _ACTION_CATALOGUE = {
         "params": ["message", "priority"],
         "handler": lambda p: notify_on_call(p.get("message", ""), p.get("priority", "P2")),
     },
+    "debug_and_fix": {
+        "desc": "Collect full context from all integrations and run AI root cause analysis + automated fix",
+        "params": ["description", "severity"],
+        "handler": lambda p: run_incident_pipeline(
+            incident_id=f"debug-{__import__('time').strftime('%H%M%S')}",
+            description=p.get("description", "infrastructure issue"),
+            severity=p.get("severity", "high"),
+            aws_config={}, k8s_config={}, auto_remediate=True,
+        ),
+    },
 }
 
 _INTENT_SYSTEM = """You are an intent classifier for a DevOps automation platform.
@@ -2488,18 +2762,72 @@ If QUESTION → output:
 {"intent": "question"}
 
 Available actions (ONLY these — never invent others):
+
+KUBERNETES:
 - restart_deployment: namespace, deployment
 - scale_deployment: namespace, deployment, replicas (int)
-- get_pod_logs: namespace, pod
+- delete_pod: namespace, pod
+- get_pod_logs: namespace, pod, container (optional), tail_lines (optional int)
+- list_pods: namespace (optional)
+- list_deployments: namespace (optional)
+- list_namespaces: (no params)
+- get_cluster_events: namespace (optional), limit (optional int)
+- get_unhealthy_pods: namespace (optional)
+- get_resource_usage: namespace (optional)
+- cordon_node: node
+- uncordon_node: node
+
+EC2:
+- list_ec2: (no params)
+- get_ec2_info: instance_id
+- get_ec2_status: instance_id
 - start_ec2: instance_id
 - stop_ec2: instance_id
 - reboot_ec2: instance_id
-- list_ec2: (no params)
+
+ECS:
+- list_ecs_services: cluster (optional)
+- get_ecs_service: cluster, service
+- scale_ecs_service: cluster, service, desired_count (int)
+- redeploy_ecs_service: cluster, service
+- get_stopped_ecs_tasks: cluster (optional)
+
+LAMBDA:
+- list_lambda: (no params)
+- get_lambda_errors: function_name, hours (optional int)
+- invoke_lambda: function_name, payload (optional JSON string)
+
+RDS:
+- list_rds: (no params)
+- get_rds_detail: db_instance_id
+- get_rds_events: db_instance_id, hours (optional int)
+- reboot_rds: db_instance_id
+
+CLOUDWATCH / LOGS:
 - get_alarms: (no params)
+- get_firing_alarms: (no params)
+- set_alarm_state: alarm_name, state (OK/ALARM/INSUFFICIENT_DATA), reason
+- search_logs: log_group, query, hours (optional int)
+- get_recent_logs: log_group, tail_lines (optional int)
+- get_cloudtrail: hours (optional int)
+
+SQS / S3 / DYNAMODB:
+- list_sqs: (no params)
+- get_sqs_depth: queue_url
+- list_s3: (no params)
+- list_dynamodb: (no params)
+
+GITHUB:
+- list_repos: (no params)
+- get_recent_commits: hours (optional int), branch (optional)
+- get_recent_prs: hours (optional int)
 - create_github_issue: title, body
+
+INCIDENTS / PIPELINE:
 - run_pipeline: description, severity (critical/high/medium/low), incident_id (optional)
 - create_jira_ticket: summary, description
 - notify_oncall: message, priority (P1/P2/P3)
+- debug_and_fix: service, error_description
 
 Rules:
 - Extract params literally from the message
@@ -2519,9 +2847,85 @@ def _detect_intent(message: str, force_provider: str = "") -> dict:
         return {"intent": "question"}
 
 
+# Actions that mutate state and require confirmation before executing.
+# Read-only actions (list_*, get_*, check_*) run immediately without asking.
+_CONFIRM_REQUIRED = {
+    "restart_deployment", "scale_deployment", "delete_pod",
+    "cordon_node", "uncordon_node",
+    "start_ec2", "stop_ec2", "reboot_ec2",
+    "scale_ecs_service", "redeploy_ecs_service",
+    "invoke_lambda",
+    "reboot_rds",
+    "set_alarm_state",
+    "create_github_issue", "create_jira_ticket",
+    "run_pipeline", "notify_oncall", "debug_and_fix",
+}
+
+
+def _confirmation_message(action_name: str, params: dict) -> str:
+    """Build a human-readable confirmation prompt for a mutating action."""
+    p = params or {}
+    descriptions = {
+        "restart_deployment":   f"rolling restart deployment **{p.get('deployment','?')}** in namespace **{p.get('namespace','?')}**",
+        "scale_deployment":     f"scale deployment **{p.get('deployment','?')}** in **{p.get('namespace','?')}** to **{p.get('replicas','?')}** replicas",
+        "delete_pod":           f"delete pod **{p.get('pod','?')}** in namespace **{p.get('namespace','?')}** (will be rescheduled)",
+        "cordon_node":          f"cordon node **{p.get('node','?')}** — no new pods will be scheduled on it",
+        "uncordon_node":        f"uncordon node **{p.get('node','?')}** — allow scheduling again",
+        "start_ec2":            f"start EC2 instance **{p.get('instance_id','?')}**",
+        "stop_ec2":             f"stop EC2 instance **{p.get('instance_id','?')}**",
+        "reboot_ec2":           f"reboot EC2 instance **{p.get('instance_id','?')}**",
+        "scale_ecs_service":    f"scale ECS service **{p.get('service','?')}** in cluster **{p.get('cluster','?')}** to **{p.get('desired_count','?')}** tasks",
+        "redeploy_ecs_service": f"force a new deployment of ECS service **{p.get('service','?')}** in cluster **{p.get('cluster','?')}**",
+        "invoke_lambda":        f"invoke Lambda function **{p.get('function_name','?')}**",
+        "reboot_rds":           f"reboot RDS instance **{p.get('db_instance_id','?')}** (brief downtime expected)",
+        "set_alarm_state":      f"set CloudWatch alarm **{p.get('alarm_name','?')}** to state **{p.get('state','?')}**",
+        "create_github_issue":  f"create GitHub issue: **{p.get('title','?')}**",
+        "create_jira_ticket":   f"create Jira ticket: **{p.get('summary','?')}**",
+        "run_pipeline":         f"run the full incident pipeline — *{p.get('description','?')}* (severity: {p.get('severity','?')})",
+        "notify_oncall":        f"page on-call with priority **{p.get('priority','?')}**: _{p.get('message','?')}_",
+        "debug_and_fix":        f"run automated debug & fix for **{p.get('service','?')}**: _{p.get('error_description','?')}_",
+    }
+    desc = descriptions.get(action_name, f"**{action_name.replace('_',' ')}** with params: {p}")
+    return f"\u26a0\ufe0f I\u2019m about to {desc}.\n\n**Confirm?** Reply **yes** to proceed or **no** to cancel."
+
+
+def _build_action_reply(action_name: str, user_msg: str, action_result: dict,
+                        force_prov: str, _llm, _j) -> str:
+    """Turn a real action result into a concise, honest reply."""
+    succeeded = action_result.get("success", False) if isinstance(action_result, dict) else True
+    result_json = _j.dumps(action_result, default=str, indent=2)
+    ACTION_REPLY_SYSTEM = (
+        "You are a DevOps assistant. The user asked you to perform an operation. "
+        "The ACTUAL result from executing that operation is shown below as JSON — use ONLY the values in it. "
+        "RESPONSE LENGTH: "
+        "If success=true and the result is simple (restart, scale, delete): 1-2 sentences confirming what happened using real values (IDs, counts, names). "
+        "If success=true and the result contains a list (pods, instances, logs, events, alarms): present it in a clean readable format — use a markdown table or bullet list with natural language labels. "
+        "If success=false or there is an error key: state it failed, quote the exact error message, and briefly explain what it likely means. "
+        "FORMATTING: "
+        "NEVER show raw JSON, dict keys, or field names like 'success', 'count', 'alarms_firing' in your reply. "
+        "Translate everything to natural English. Use **bold** for resource names and states. "
+        "Use ✅ for success, ❌ for failure, ⚠️ for warnings. "
+        "NEVER claim success if success=false. NEVER fabricate values. NEVER add padding."
+    )
+    try:
+        return _llm(
+            ACTION_REPLY_SYSTEM,
+            [{"role": "user", "content":
+                f"User asked: {user_msg}\n\nOperation: {action_name}\nResult:\n{result_json}"}],
+            max_tokens=600,
+            force_provider=force_prov,
+        )
+    except Exception:
+        if succeeded:
+            return "✅ `{}` completed. {}".format(action_name, _j.dumps(
+                {k: v for k, v in action_result.items() if k != "success"}, default=str))
+        else:
+            return "❌ `{}` failed: {}".format(action_name, action_result.get("error", "unknown error"))
+
+
 @app.post("/chat")
 def chat(payload: ChatPayload):
-    """Conversational DevOps AI — executes real operations and gives honest, concise answers."""
+    """Conversational DevOps AI with confirmation flow for mutating operations."""
     global _chat_action_count
     import json as _j
     from app.llm.claude import _provider, _llm
@@ -2529,65 +2933,75 @@ def chat(payload: ChatPayload):
     force_prov = payload.provider or ""
     history = [{"role": m.role, "content": m.content} for m in payload.history]
 
-    # ── Step 1: classify intent ──────────────────────────────
-    intent_data = _detect_intent(payload.message, force_prov)
     action_result = None
     action_taken  = None
     reply         = ""
 
-    if intent_data.get("intent") == "action":
-        action_name = intent_data.get("action", "")
+    # ── Path A: user confirmed a pending action ───────────────
+    if payload.confirmed and payload.pending_action:
+        action_name = payload.pending_action
+        params      = payload.pending_params or {}
         action_def  = _ACTION_CATALOGUE.get(action_name)
-
-        if not action_def:
-            # Classifier named an action we don't support — be honest
-            reply = (
-                f"I understood you want to **{action_name.replace('_', ' ')}**, "
-                f"but that operation is not in my action set yet. "
-                f"I can do: restart/scale K8s deployments, start/stop/reboot EC2, "
-                f"list EC2/alarms, create GitHub issues or Jira tickets, run incident pipeline, page on-call."
-            )
-        else:
-            # ── Execute the real operation ──────────────────
+        if action_def:
             try:
-                result = action_def["handler"](intent_data.get("params", {}))
-                action_result = result
+                action_result = action_def["handler"](params)
                 action_taken  = action_name
                 _chat_action_count += 1
             except Exception as exc:
                 action_result = {"success": False, "error": str(exc)}
+            reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
+        else:
+            reply = "Sorry, I could not find that operation. Please try again."
 
-            # ── Build reply strictly from actual result ──────
-            succeeded = action_result.get("success", False) if isinstance(action_result, dict) else True
-            result_json = _j.dumps(action_result, default=str, indent=2)
+    # ── Path B: fresh message — classify intent ───────────────
+    if not reply:
+        # Handle inline yes/no for cancellation (user typed "no"/"cancel")
+        _cancel = {"no", "cancel", "nope", "stop", "abort", "never mind", "nevermind"}
+        if payload.message.lower().strip().rstrip(".,!") in _cancel:
+            reply = "Got it — operation cancelled."
 
-            ACTION_REPLY_SYSTEM = (
-                "You are a DevOps assistant. The user asked you to perform an operation. "
-                "The ACTUAL result from executing that operation is shown below. "
-                "Write a reply of 1-3 sentences maximum based ONLY on that result. "
-                "If success=true: confirm what happened using the real values (IDs, states, counts). "
-                "If success=false or there is an error key: clearly state it failed and quote the error. "
-                "NEVER say the operation succeeded if success is false. "
-                "NEVER add suggestions, next steps, or extra commentary unless the result itself contains them. "
-                "Be direct and factual."
-            )
-            try:
-                reply = _llm(
-                    ACTION_REPLY_SYSTEM,
-                    [{"role": "user", "content":
-                        f"User asked: {payload.message}\n\nOperation: {action_name}\nResult:\n{result_json}"}],
-                    max_tokens=300,
-                    force_provider=force_prov,
+    if not reply:
+        intent_data = _detect_intent(payload.message, force_prov)
+
+        if intent_data.get("intent") == "action":
+            action_name = intent_data.get("action", "")
+            params      = intent_data.get("params", {})
+            action_def  = _ACTION_CATALOGUE.get(action_name)
+
+            if not action_def:
+                reply = (
+                    f"I understood you want to **{action_name.replace('_', ' ')}**, "
+                    f"but that operation is not available yet. "
+                    f"I can restart/scale K8s deployments, start/stop/reboot EC2, manage ECS/Lambda/RDS, "
+                    f"query CloudWatch logs and alarms, create GitHub issues or Jira tickets, "
+                    f"and run the full incident pipeline."
                 )
-            except Exception:
-                # Fallback: build reply from result dict without LLM
-                if succeeded:
-                    reply = f"✅ `{action_name}` completed. " + _j.dumps(
-                        {k: v for k, v in action_result.items() if k != "success"}, default=str)
-                else:
-                    reply = f"❌ `{action_name}` failed: {action_result.get('error', 'unknown error')}"
+            elif action_name in _CONFIRM_REQUIRED:
+                # Mutating action — ask before running
+                reply = _confirmation_message(action_name, params)
+                used_provider = force_prov or _provider or "none"
+                return {
+                    "reply":          reply,
+                    "sources":        [],
+                    "llm_provider":   used_provider,
+                    "action_taken":   None,
+                    "action_result":  None,
+                    "action_count":   _chat_action_count,
+                    "pending_action": action_name,
+                    "pending_params": params,
+                    "needs_confirm":  True,
+                }
+            else:
+                # Read-only — run immediately, no confirmation
+                try:
+                    action_result = action_def["handler"](params)
+                    action_taken  = action_name
+                    _chat_action_count += 1
+                except Exception as exc:
+                    action_result = {"success": False, "error": str(exc)}
+                reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
 
-    # ── Step 2: question / general chat ─────────────────────
+    # ── Path C: general question / conversation ───────────────
     if not reply:
         context: dict = {}
         try:
@@ -2598,12 +3012,15 @@ def chat(payload: ChatPayload):
 
     used_provider = force_prov or _provider or "none"
     return {
-        "reply":         reply,
-        "sources":       [],
-        "llm_provider":  used_provider,
-        "action_taken":  action_taken,
-        "action_result": action_result,
-        "action_count":  _chat_action_count,
+        "reply":          reply,
+        "sources":        [],
+        "llm_provider":   used_provider,
+        "action_taken":   action_taken,
+        "action_result":  action_result,
+        "action_count":   _chat_action_count,
+        "pending_action": None,
+        "pending_params": None,
+        "needs_confirm":  False,
     }
 
 @app.get("/chat/action_count")

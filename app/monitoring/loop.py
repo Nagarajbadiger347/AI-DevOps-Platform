@@ -54,11 +54,104 @@ def _detect_k8s_anomalies() -> list[str]:
     return issues
 
 
+def _detect_aws_anomalies() -> list[str]:
+    """Scan AWS for CloudWatch alarms, Lambda errors, ECS failures, RDS events, SQS depth."""
+    issues: list[str] = []
+
+    # CloudWatch: alarms in ALARM state
+    try:
+        from app.integrations.aws_ops import list_cloudwatch_alarms
+        cw = list_cloudwatch_alarms(state="ALARM")
+        if cw.get("success"):
+            for alarm in cw.get("alarms", []):
+                if alarm.get("state") == "ALARM":
+                    issues.append(
+                        f"CloudWatch alarm FIRING: {alarm.get('name', 'unknown')} — "
+                        f"{alarm.get('description', '')}"
+                    )
+    except Exception:
+        pass
+
+    # Lambda: functions with recent errors (last 1 h)
+    try:
+        from app.integrations.aws_ops import list_lambda_functions, get_lambda_errors
+        lambdas = list_lambda_functions()
+        if lambdas.get("success"):
+            for fn in lambdas.get("functions", [])[:20]:  # cap at 20 to avoid throttle
+                name = fn.get("name", "")
+                try:
+                    err = get_lambda_errors(name, hours=1)
+                    error_pts = err.get("metrics", {}).get("errors", [])
+                    total_errors = sum(p.get("value", 0) for p in error_pts)
+                    if err.get("success") and total_errors > 0:
+                        issues.append(
+                            f"Lambda errors detected: {name} had "
+                            f"{int(total_errors)} error(s) in the last hour"
+                        )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # ECS: stopped tasks with non-zero exit codes
+    try:
+        from app.integrations.aws_ops import get_stopped_ecs_tasks
+        stopped = get_stopped_ecs_tasks()
+        if stopped.get("success"):
+            for t in stopped.get("stopped_tasks", []):
+                reason = t.get("stop_reason", "")
+                if reason and any(k in reason for k in ("Essential container", "OOM", "error", "failed")):
+                    cluster = stopped.get("cluster", "unknown")
+                    issues.append(
+                        f"ECS task crash in cluster {cluster}: "
+                        f"task {t.get('task_id', '')[:20]} — {reason}"
+                    )
+    except Exception:
+        pass
+
+    # RDS: recent failover / restart events
+    try:
+        from app.integrations.aws_ops import list_rds_instances, get_rds_events
+        rds = list_rds_instances()
+        if rds.get("success"):
+            for db in rds.get("instances", [])[:10]:
+                db_id = db.get("id", "")
+                try:
+                    evts = get_rds_events(db_id, hours=1)
+                    for ev in evts.get("events", []):
+                        msg = ev.get("message", "").lower()
+                        if any(k in msg for k in ("failover", "restarting", "crash", "oom")):
+                            issues.append(
+                                f"RDS event on {db_id}: {ev.get('message', '')}"
+                            )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # SQS: queues with depth > 1000
+    try:
+        from app.integrations.aws_ops import list_sqs_queues
+        sqs = list_sqs_queues()
+        if sqs.get("success"):
+            for q in sqs.get("queues", [])[:15]:
+                visible = q.get("visible", 0) or 0
+                if visible > 1000:
+                    issues.append(
+                        f"SQS queue backlog: {q.get('name', q.get('url', 'unknown'))} "
+                        f"has {visible} messages queued"
+                    )
+    except Exception:
+        pass
+
+    return issues
+
+
 def _detect_anomalies() -> list[str]:
-    """Aggregate anomaly detectors. Add more sources here (AWS, Grafana, etc.)."""
+    """Aggregate anomaly detectors — K8s, Grafana, CloudWatch, Lambda, ECS, RDS, SQS."""
     anomalies = _detect_k8s_anomalies()
 
-    # Check Grafana alerts
+    # Grafana alerts
     try:
         from app.integrations.grafana import get_alerts
         gf = get_alerts()
@@ -70,6 +163,9 @@ def _detect_anomalies() -> list[str]:
                     )
     except Exception:
         pass
+
+    # AWS anomalies
+    anomalies.extend(_detect_aws_anomalies())
 
     return anomalies
 
