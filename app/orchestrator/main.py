@@ -985,7 +985,7 @@ var INT_MAP={'Claude AI':'int-claude','AWS':'int-aws','Grafana':'int-grafana','G
 var SEC_MAP={'Claude AI':'int-claude-s','AWS':'int-aws-s','Grafana':'int-grafana-s','GitHub':'int-github-s','Slack':'int-slack-s','Jira':'int-jira-s'};
 
 function showView(view, section, btn) {
-  console.log('[showView] view='+view);
+  try { localStorage.setItem('devops_view', view); } catch(e){}
   try {
     document.querySelectorAll('.nav-link').forEach(function(l){ l.classList.remove('active'); });
     if (btn) btn.classList.add('active');
@@ -1410,8 +1410,21 @@ function sendChat(overrideMsg, confirmed, pendingAction, pendingParams) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body)
   })
-  .then(function(r){ return r.json(); })
-  .then(function(d) {
+  .then(function(r) {
+    var status = r.status;
+    return r.text().then(function(t) { return {status: status, text: t}; });
+  })
+  .then(function(res) {
+    var d;
+    try { d = JSON.parse(res.text); }
+    catch(e) {
+      typingBubble.classList.remove('typing');
+      typingBubble.innerHTML = '<span style="color:var(--red)">Server error (' + res.status + '). Please try again or check server logs.</span>';
+      _chatHistory.push({role: 'assistant', content: 'Server error. Please try again.'});
+      document.getElementById('chat-send-btn').disabled = false;
+      document.getElementById('chat-input').focus();
+      return;
+    }
     typingBubble.classList.remove('typing');
     var reply = d.reply || d.detail || 'No response';
     typingBubble.innerHTML = _renderMarkdown(reply);
@@ -1459,14 +1472,20 @@ function sendChat(overrideMsg, confirmed, pendingAction, pendingParams) {
       prov.textContent = pLabel;
       footer.appendChild(prov);
     }
-    if (d.action_taken) {
+    // Only show badge + toast for mutating actions, not read-only ones
+    var _mutatingActions = ['restart_deployment','scale_deployment','delete_pod','cordon_node','uncordon_node',
+      'start_ec2','stop_ec2','reboot_ec2','scale_ecs_service','redeploy_ecs_service','invoke_lambda',
+      'reboot_rds','set_alarm_state','create_github_issue','create_jira_ticket','run_pipeline','notify_oncall','debug_and_fix'];
+    if (d.action_taken && _mutatingActions.indexOf(d.action_taken) !== -1) {
       var actionBadge = document.createElement('div');
       actionBadge.style.cssText = 'margin-top:8px;padding:6px 10px;background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.3);border-radius:6px;font-size:11px;color:var(--green);display:flex;align-items:center;gap:6px';
-      actionBadge.innerHTML = '<span>&#x2705;</span><span>Executed: <strong>' + d.action_taken.replace(/_/g,' ') + '</strong></span>';
+      actionBadge.innerHTML = '<span>&#x2705;</span><span><strong>' + d.action_taken.replace(/_/g,' ') + '</strong> executed successfully</span>';
       typingBubble.parentElement.appendChild(actionBadge);
+      toast(d.action_taken.replace(/_/g,' ') + ' completed', 'ok', 3000);
+    }
+    if (d.action_taken) {
       var mA = document.getElementById('m-actions');
       if (mA && d.action_count !== undefined) animateNum(mA, d.action_count);
-      toast('Action completed: ' + d.action_taken.replace(/_/g,' '), 'ok', 3000);
     }
     if (footer.children.length) typingBubble.parentElement.appendChild(footer);
     document.getElementById('chat-messages').scrollTop = 999999;
@@ -1516,6 +1535,22 @@ function createWarRoom() {
 
 loadMetrics();
 loadRole('nagaraj');
+
+// Restore last active view so page reloads/restarts keep you where you were
+(function() {
+  try {
+    var saved = localStorage.getItem('devops_view');
+    if (saved && saved !== 'dashboard') {
+      // Find the matching nav link and activate it
+      var navLink = document.querySelector('.nav-link[onclick*="' + saved + '"]');
+      showView(saved, null, navLink || null);
+      if (navLink) {
+        document.querySelectorAll('.nav-link').forEach(function(l){ l.classList.remove('active'); });
+        navLink.classList.add('active');
+      }
+    }
+  } catch(e) {}
+})();
 
 /* ── RBAC ROLE LOADER ── */
 var _currentUser = 'nagaraj';
@@ -2359,10 +2394,11 @@ class ChatMessage(BaseModel):
 class ChatPayload(BaseModel):
     message: str
     history: List[ChatMessage] = []
-    provider: str = ""   # "anthropic" | "groq" | "ollama" | "" (auto)
-    confirmed: bool = False          # True when user confirms a pending action
-    pending_action: Optional[str] = None   # action name carried from previous turn
-    pending_params: Optional[Dict] = None  # params carried from previous turn
+    provider: str = ""                     # "anthropic" | "groq" | "ollama" | "" (auto)
+    confirmed: bool = False                # True when user confirms a pending action
+    pending_action: Optional[str] = None  # action name carried from previous turn
+    pending_params: Optional[Dict] = None # params carried from previous turn
+    dry_run: bool = False                  # if True: describe what would happen, don't execute
 
 class WarRoomRequest(BaseModel):
     incident_id:  str
@@ -2520,34 +2556,34 @@ _ACTION_CATALOGUE = {
     # EC2
     # ════════════════════════════════════════════════════════════
     "list_ec2": {
-        "desc": "List all EC2 instances with their current state",
-        "params": [],
-        "handler": lambda _: list_ec2_instances(),
+        "desc": "List all EC2 instances with their current state, optionally in a specific region",
+        "params": ["region"],
+        "handler": lambda p: list_ec2_instances(region=p.get("region", "")),
     },
     "get_ec2_info": {
         "desc": "Get full details for a specific EC2 instance",
-        "params": ["instance_id"],
+        "params": ["instance_id", "region"],
         "handler": lambda p: get_ec2_instance_info(p["instance_id"]),
     },
     "get_ec2_status": {
         "desc": "Get system and instance status checks for EC2",
-        "params": ["instance_id"],
+        "params": ["instance_id", "region"],
         "handler": lambda p: get_ec2_status_checks(p.get("instance_id", "")),
     },
     "start_ec2": {
         "desc": "Start a stopped EC2 instance",
-        "params": ["instance_id"],
-        "handler": lambda p: start_ec2_instance(p["instance_id"]),
+        "params": ["instance_id", "region"],
+        "handler": lambda p: start_ec2_instance(p["instance_id"], region=p.get("region", "")),
     },
     "stop_ec2": {
         "desc": "Stop a running EC2 instance",
-        "params": ["instance_id"],
-        "handler": lambda p: stop_ec2_instance(p["instance_id"]),
+        "params": ["instance_id", "region"],
+        "handler": lambda p: stop_ec2_instance(p["instance_id"], region=p.get("region", "")),
     },
     "reboot_ec2": {
         "desc": "Reboot an EC2 instance",
-        "params": ["instance_id"],
-        "handler": lambda p: reboot_ec2_instance(p["instance_id"]),
+        "params": ["instance_id", "region"],
+        "handler": lambda p: reboot_ec2_instance(p["instance_id"], region=p.get("region", "")),
     },
 
     # ════════════════════════════════════════════════════════════
@@ -2583,9 +2619,9 @@ _ACTION_CATALOGUE = {
     # LAMBDA
     # ════════════════════════════════════════════════════════════
     "list_lambda": {
-        "desc": "List all Lambda functions",
-        "params": [],
-        "handler": lambda _: list_lambda_functions(),
+        "desc": "List all Lambda functions, optionally in a specific region",
+        "params": ["region"],
+        "handler": lambda p: list_lambda_functions(region=p.get("region", "")),
     },
     "get_lambda_errors": {
         "desc": "Get error and throttle metrics for a Lambda function",
@@ -2602,9 +2638,9 @@ _ACTION_CATALOGUE = {
     # RDS
     # ════════════════════════════════════════════════════════════
     "list_rds": {
-        "desc": "List all RDS database instances",
-        "params": [],
-        "handler": lambda _: list_rds_instances(),
+        "desc": "List all RDS database instances, optionally in a specific region",
+        "params": ["region"],
+        "handler": lambda p: list_rds_instances(region=p.get("region", "")),
     },
     "get_rds_detail": {
         "desc": "Get detailed status for a specific RDS instance",
@@ -2626,14 +2662,14 @@ _ACTION_CATALOGUE = {
     # CLOUDWATCH / LOGS / ALARMS
     # ════════════════════════════════════════════════════════════
     "get_alarms": {
-        "desc": "List CloudWatch alarms, optionally filtered by state",
-        "params": ["state"],
-        "handler": lambda p: list_cloudwatch_alarms(p.get("state", "")),
+        "desc": "List CloudWatch alarms, optionally filtered by state and region",
+        "params": ["state", "region"],
+        "handler": lambda p: list_cloudwatch_alarms(p.get("state", ""), region=p.get("region", "")),
     },
     "get_firing_alarms": {
         "desc": "Get only alarms currently in ALARM state",
-        "params": [],
-        "handler": lambda _: list_cloudwatch_alarms("ALARM"),
+        "params": ["region"],
+        "handler": lambda p: list_cloudwatch_alarms("ALARM", region=p.get("region", "")),
     },
     "set_alarm_state": {
         "desc": "Manually set a CloudWatch alarm state (OK/ALARM/INSUFFICIENT_DATA)",
@@ -2831,6 +2867,7 @@ INCIDENTS / PIPELINE:
 
 Rules:
 - Extract params literally from the message
+- REGION: if the user mentions a region (e.g. "us-east-1", "us-east-2", "eu-west-1", "ap-southeast-1", "us-west-2"), always include "region": "<value>" in params. If no region is mentioned, omit the region param (do not default it).
 - If a required param (like instance_id) is missing and cannot be inferred, output {"intent": "question"} instead
 - Output ONLY valid JSON, no markdown, nothing else"""
 
@@ -2924,14 +2961,37 @@ def _build_action_reply(action_name: str, user_msg: str, action_result: dict,
 
 
 @app.post("/chat")
-def chat(payload: ChatPayload):
-    """Conversational DevOps AI with confirmation flow for mutating operations."""
+def chat(payload: ChatPayload, x_user: str = Header(default="anonymous")):
+    """Conversational DevOps AI with confirmation flow, rate limiting, audit log, and dry-run."""
+    try:
+        return _chat_inner(payload, x_user)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback, logging
+        logging.getLogger("chat").error("Unhandled chat error: %s\n%s", exc, traceback.format_exc())
+        return {
+            "reply": f"Something went wrong on the server: `{type(exc).__name__}: {exc}`. Check server logs for details.",
+            "sources": [], "llm_provider": "none", "action_taken": None,
+            "action_result": None, "action_count": _chat_action_count,
+            "pending_action": None, "pending_params": None, "needs_confirm": False,
+        }
+
+
+def _chat_inner(payload: ChatPayload, x_user: str):
     global _chat_action_count
     import json as _j
     from app.llm.claude import _provider, _llm
+    from app.core.ratelimit import check_chat, check_action
+    from app.core.audit import audit_log
 
     force_prov = payload.provider or ""
     history = [{"role": m.role, "content": m.content} for m in payload.history]
+
+    # ── Rate limit: general chat ──────────────────────────────
+    allowed, remaining = check_chat(x_user)
+    if not allowed:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded — max 20 messages per minute. Please slow down.")
 
     action_result = None
     action_taken  = None
@@ -2943,19 +3003,27 @@ def chat(payload: ChatPayload):
         params      = payload.pending_params or {}
         action_def  = _ACTION_CATALOGUE.get(action_name)
         if action_def:
-            try:
-                action_result = action_def["handler"](params)
-                action_taken  = action_name
-                _chat_action_count += 1
-            except Exception as exc:
-                action_result = {"success": False, "error": str(exc)}
-            reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
+            # Rate-limit mutating actions separately
+            act_ok, _ = check_action(x_user)
+            if not act_ok:
+                raise HTTPException(status_code=429, detail="Action rate limit exceeded — max 10 operations per minute.")
+            if payload.dry_run:
+                reply = f"**Dry-run:** Would execute `{action_name}` with params `{_j.dumps(params)}`.\nNo changes made."
+            else:
+                try:
+                    action_result = action_def["handler"](params)
+                    action_taken  = action_name
+                    _chat_action_count += 1
+                except Exception as exc:
+                    action_result = {"success": False, "error": str(exc)}
+                audit_log(user=x_user, action=action_name, params=params,
+                          result=action_result or {}, source="chat")
+                reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
         else:
             reply = "Sorry, I could not find that operation. Please try again."
 
     # ── Path B: fresh message — classify intent ───────────────
     if not reply:
-        # Handle inline yes/no for cancellation (user typed "no"/"cancel")
         _cancel = {"no", "cancel", "nope", "stop", "abort", "never mind", "nevermind"}
         if payload.message.lower().strip().rstrip(".,!") in _cancel:
             reply = "Got it — operation cancelled."
@@ -2977,28 +3045,33 @@ def chat(payload: ChatPayload):
                     f"and run the full incident pipeline."
                 )
             elif action_name in _CONFIRM_REQUIRED:
-                # Mutating action — ask before running
-                reply = _confirmation_message(action_name, params)
-                used_provider = force_prov or _provider or "none"
-                return {
-                    "reply":          reply,
-                    "sources":        [],
-                    "llm_provider":   used_provider,
-                    "action_taken":   None,
-                    "action_result":  None,
-                    "action_count":   _chat_action_count,
-                    "pending_action": action_name,
-                    "pending_params": params,
-                    "needs_confirm":  True,
-                }
+                # Mutating action — ask for confirmation first (dry-run: skip confirmation)
+                if payload.dry_run:
+                    reply = f"**Dry-run:** Would execute `{action_name}` with params `{_j.dumps(params)}`.\nNo changes made."
+                else:
+                    reply = _confirmation_message(action_name, params)
+                    used_provider = force_prov or _provider or "none"
+                    return {
+                        "reply":          reply,
+                        "sources":        [],
+                        "llm_provider":   used_provider,
+                        "action_taken":   None,
+                        "action_result":  None,
+                        "action_count":   _chat_action_count,
+                        "pending_action": action_name,
+                        "pending_params": params,
+                        "needs_confirm":  True,
+                    }
             else:
-                # Read-only — run immediately, no confirmation
+                # Read-only — run immediately, no confirmation needed
                 try:
                     action_result = action_def["handler"](params)
                     action_taken  = action_name
                     _chat_action_count += 1
                 except Exception as exc:
                     action_result = {"success": False, "error": str(exc)}
+                audit_log(user=x_user, action=action_name, params=params,
+                          result=action_result or {}, source="chat")
                 reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
 
     # ── Path C: general question / conversation ───────────────
@@ -3022,6 +3095,20 @@ def chat(payload: ChatPayload):
         "pending_params": None,
         "needs_confirm":  False,
     }
+
+@app.get("/audit/log")
+def get_audit_log_endpoint(limit: int = 50, user: str = "", action: str = ""):
+    """Return recent audit log entries (newest first). Filter by user or action."""
+    from app.core.audit import get_audit_log
+    return {"entries": get_audit_log(limit=limit, user=user, action=action)}
+
+
+@app.get("/rate-limit/status")
+def rate_limit_status(x_user: str = Header(default="anonymous")):
+    """Return current rate-limit usage for the calling user."""
+    from app.core.ratelimit import get_usage
+    return get_usage(x_user)
+
 
 @app.get("/chat/action_count")
 def chat_action_count():

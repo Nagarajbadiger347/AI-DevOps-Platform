@@ -21,8 +21,11 @@ from botocore.config import Config as _BotoCfg
 _BOTO_CFG = _BotoCfg(connect_timeout=10, read_timeout=30, retries={"max_attempts": 2})
 
 
-def _client(service: str):
-    region = os.getenv("AWS_REGION", "us-west-2")
+_DEFAULT_REGION = os.getenv("AWS_REGION", "us-east-1")
+
+def _client(service: str, region: str = ""):
+    """Return a boto3 client for *service* in *region* (or the configured default)."""
+    region = region.strip() or _DEFAULT_REGION
     return boto3.client(service, region_name=region, config=_BOTO_CFG)
 
 def _now():
@@ -34,10 +37,11 @@ def _hours_ago(h: int):
 
 # ── EC2 ──────────────────────────────────────────────────────
 
-def list_ec2_instances(state: str = "") -> dict:
-    """List EC2 instances with health state, optionally filtered by run state."""
+def list_ec2_instances(state: str = "", region: str = "") -> dict:
+    """List EC2 instances with health state, optionally filtered by run state and region."""
+    used_region = region.strip() or _DEFAULT_REGION
     try:
-        ec2 = _client("ec2")
+        ec2 = _client("ec2", region=used_region)
         filters = [{"Name": "instance-state-name", "Values": [state]}] if state else []
         resp = ec2.describe_instances(Filters=filters)
         instances = []
@@ -54,9 +58,9 @@ def list_ec2_instances(state: str = "") -> dict:
                     "launch_time": i["LaunchTime"].isoformat(),
                     "az":          i["Placement"]["AvailabilityZone"],
                 })
-        return {"success": True, "region": os.getenv("AWS_REGION", "us-west-2"), "instances": instances, "count": len(instances)}
+        return {"success": True, "region": used_region, "instances": instances, "count": len(instances)}
     except (BotoCoreError, ClientError) as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(e), "region": used_region}
 
 
 def get_ec2_status_checks(instance_id: str = "") -> dict:
@@ -88,10 +92,10 @@ def get_ec2_status_checks(instance_id: str = "") -> dict:
         return {"success": False, "error": str(e)}
 
 
-def start_ec2_instance(instance_id: str) -> dict:
+def start_ec2_instance(instance_id: str, region: str = "") -> dict:
     """Start a stopped EC2 instance."""
     try:
-        ec2 = _client("ec2")
+        ec2 = _client("ec2", region=region)
         resp = ec2.start_instances(InstanceIds=[instance_id])
         change = resp["StartingInstances"][0]
         return {
@@ -104,10 +108,10 @@ def start_ec2_instance(instance_id: str) -> dict:
         return {"success": False, "instance_id": instance_id, "error": str(e)}
 
 
-def stop_ec2_instance(instance_id: str) -> dict:
+def stop_ec2_instance(instance_id: str, region: str = "") -> dict:
     """Stop a running EC2 instance."""
     try:
-        ec2 = _client("ec2")
+        ec2 = _client("ec2", region=region)
         resp = ec2.stop_instances(InstanceIds=[instance_id])
         change = resp["StoppingInstances"][0]
         return {
@@ -120,10 +124,10 @@ def stop_ec2_instance(instance_id: str) -> dict:
         return {"success": False, "instance_id": instance_id, "error": str(e)}
 
 
-def reboot_ec2_instance(instance_id: str) -> dict:
+def reboot_ec2_instance(instance_id: str, region: str = "") -> dict:
     """Reboot a running EC2 instance."""
     try:
-        ec2 = _client("ec2")
+        ec2 = _client("ec2", region=region)
         ec2.reboot_instances(InstanceIds=[instance_id])
         return {"success": True, "instance_id": instance_id, "action": "rebooted"}
     except (BotoCoreError, ClientError) as e:
@@ -240,10 +244,10 @@ def search_logs(log_group: str, pattern: str, hours: int = 1, limit: int = 100) 
 
 # ── CloudWatch Metrics ────────────────────────────────────────
 
-def list_cloudwatch_alarms(state: str = "") -> dict:
-    """List CloudWatch alarms, optionally filtered by state (OK, ALARM, INSUFFICIENT_DATA)."""
+def list_cloudwatch_alarms(state: str = "", region: str = "") -> dict:
+    """List CloudWatch alarms, optionally filtered by state and region."""
     try:
-        cw = _client("cloudwatch")
+        cw = _client("cloudwatch", region=region)
         kwargs = {}
         if state:
             kwargs["StateValue"] = state.upper()
@@ -357,10 +361,10 @@ def get_stopped_ecs_tasks(cluster: str = "default", limit: int = 20) -> dict:
 
 # ── Lambda ───────────────────────────────────────────────────
 
-def list_lambda_functions() -> dict:
+def list_lambda_functions(region: str = "") -> dict:
     """List Lambda functions with runtime and last modified."""
     try:
-        lam  = _client("lambda")
+        lam  = _client("lambda", region=region)
         resp = lam.list_functions()
         fns  = [
             {
@@ -397,10 +401,10 @@ def get_lambda_errors(function_name: str, hours: int = 1) -> dict:
 
 # ── RDS ──────────────────────────────────────────────────────
 
-def list_rds_instances() -> dict:
+def list_rds_instances(region: str = "") -> dict:
     """List RDS database instances with status and engine info."""
     try:
-        rds  = _client("rds")
+        rds  = _client("rds", region=region)
         resp = rds.describe_db_instances()
         dbs  = [
             {
