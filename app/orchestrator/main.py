@@ -959,29 +959,37 @@ function epClick(row) {
   var path = row.querySelector('.ep-path');
   if (!path) return;
   var method = row.dataset.method || 'GET';
-  var pathStr = path.textContent;
+  var pathStr = path.textContent.trim();
+
+  if (method === 'WS') {
+    // Open Swagger docs for WS testing
+    window.open('/docs#/default/websocket_ws_ws_get', '_blank');
+    toast('Opening Swagger — use the /ws WebSocket there', 'info', 2800);
+    return;
+  }
 
   if (method === 'GET') {
-    // Open directly in new tab if no path params, else copy
     if (pathStr.includes('{')) {
-      navigator.clipboard.writeText(pathStr);
-      toast('Copied: ' + pathStr + ' (fill in path params)', 'info', 2400);
+      // Extract all {param} names and prompt user to fill them
+      var filled = pathStr.replace(/\{([^}]+)\}/g, function(_, name) {
+        var val = window.prompt('Enter value for ' + name + ':', '');
+        return val !== null ? encodeURIComponent(val) : '{' + name + '}';
+      });
+      if (!filled.includes('{')) {
+        window.open(filled, '_blank');
+        toast('Opened: ' + filled, 'ok', 1800);
+      }
     } else {
       window.open(pathStr, '_blank');
       toast('Opened: ' + pathStr, 'ok', 1800);
     }
-  } else if (method === 'WS') {
-    navigator.clipboard.writeText('ws://' + location.host + pathStr);
-    toast('WS URL copied: ws://' + location.host + pathStr, 'info', 2400);
-  } else {
-    // POST/PUT/DELETE — copy path and suggest using AI chat or Swagger
-    navigator.clipboard.writeText(pathStr).then(function() {
-      var orig = path.style.color;
-      path.style.color = 'var(--blue)';
-      setTimeout(function(){ path.style.color = orig; }, 900);
-      toast('Copied: ' + pathStr + ' \u2014 test via Swagger (/docs) or AI Chat', 'info', 2800);
-    });
+    return;
   }
+
+  // POST / DELETE — open Swagger pre-scrolled to the right operation
+  window.open('/docs', '_blank');
+  navigator.clipboard.writeText(pathStr);
+  toast(method + ' ' + pathStr + ' \u2014 Swagger opened, path copied', 'info', 2800);
 }
 
 function loadMetrics() {
