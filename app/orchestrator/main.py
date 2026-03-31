@@ -464,6 +464,45 @@ def root():
     /* ── KEYBOARD SHORTCUT HINT ── */
     .kbd{display:inline-flex;align-items:center;gap:3px;font-size:9.5px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-family:'JetBrains Mono',monospace}
 
+    /* ── API TESTER MODAL ── */
+    .api-modal-overlay{position:fixed;inset:0;background:rgba(4,6,15,.75);backdrop-filter:blur(6px);z-index:200;display:none;align-items:center;justify-content:center}
+    .api-modal-overlay.open{display:flex}
+    .api-modal{background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius-lg);width:560px;max-width:96vw;max-height:88vh;display:flex;flex-direction:column;animation:slideUp .22s ease;box-shadow:0 24px 60px rgba(0,0,0,.55)}
+    .api-modal-hdr{display:flex;align-items:center;gap:10px;padding:16px 18px 14px;border-bottom:1px solid var(--border);flex-shrink:0}
+    .api-modal-method{font-size:10px;font-weight:800;padding:3px 9px;border-radius:5px;letter-spacing:.06em;flex-shrink:0}
+    .api-modal-path{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text);font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .api-modal-close{background:transparent;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0 4px;border-radius:4px;line-height:1;transition:color .15s;flex-shrink:0}
+    .api-modal-close:hover{color:var(--text)}
+    .api-modal-body{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:12px;min-height:0}
+    .api-field-label{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px}
+    .api-body-editor{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;resize:vertical;min-height:110px;line-height:1.6;transition:border-color .15s;box-sizing:border-box}
+    .api-body-editor:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
+    .api-resp{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text2);max-height:280px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;line-height:1.6}
+    .api-resp.ok{border-color:rgba(52,211,153,.3);color:var(--text)}
+    .api-resp.err{border-color:rgba(248,113,113,.3);color:var(--red)}
+    .api-status-bar{display:flex;align-items:center;gap:8px;font-size:11px}
+    .api-status-code{font-weight:700;font-family:'JetBrains Mono',monospace;padding:2px 8px;border-radius:4px}
+    .api-status-code.ok{background:rgba(52,211,153,.12);color:var(--green)}
+    .api-status-code.err{background:rgba(248,113,113,.12);color:var(--red)}
+    .api-modal-ftr{display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid var(--border);flex-shrink:0}
+    .api-send-btn{padding:7px 20px;background:linear-gradient(135deg,#2563eb,#1d4ed8);border:none;border-radius:var(--radius-sm);font-size:12px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit;transition:all .15s;box-shadow:0 0 12px rgba(37,99,235,.25)}
+    .api-send-btn:hover{box-shadow:0 0 20px rgba(79,142,247,.4)}
+    .api-send-btn:disabled{background:var(--surface2);box-shadow:none;color:var(--muted);cursor:not-allowed}
+    .api-copy-btn{padding:7px 14px;background:transparent;border:1px solid var(--border2);border-radius:var(--radius-sm);font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;font-family:inherit;transition:all .15s}
+    .api-copy-btn:hover{border-color:var(--blue);color:var(--blue)}
+
+    /* ── WS TERMINAL ── */
+    .ws-terminal{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;font-family:'JetBrains Mono',monospace;font-size:11.5px;height:200px;overflow-y:auto;line-height:1.7}
+    .ws-line{margin:0;padding:0}
+    .ws-line.sent{color:var(--blue)}
+    .ws-line.recv{color:var(--green)}
+    .ws-line.sys{color:var(--muted)}
+    .ws-line.err{color:var(--red)}
+    .ws-input-row{display:flex;gap:8px;margin-top:8px}
+    .ws-input{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;transition:border-color .15s}
+    .ws-input:focus{border-color:var(--blue)}
+    .ws-send-btn{padding:6px 14px;background:var(--blue2);border:none;border-radius:var(--radius-sm);font-size:11.5px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit}
+
     /* ── RUN PIPELINE BUTTON ── */
     .run-btn{display:flex;align-items:center;gap:6px;padding:5px 14px;background:linear-gradient(135deg,rgba(37,99,235,.2),rgba(124,58,237,.15));border:1px solid rgba(79,142,247,.35);border-radius:20px;font-size:11.5px;font-weight:700;color:var(--blue);cursor:pointer;transition:all .15s;font-family:inherit}
     .run-btn:hover{background:linear-gradient(135deg,rgba(37,99,235,.35),rgba(124,58,237,.25));border-color:var(--blue);box-shadow:0 0 14px rgba(79,142,247,.2)}
@@ -860,6 +899,25 @@ def root():
 
 </div><!-- /main -->
 
+<!-- ── API TESTER MODAL ── -->
+<div class="api-modal-overlay" id="api-modal" onclick="if(event.target===this)closeApiModal()">
+  <div class="api-modal">
+    <div class="api-modal-hdr">
+      <span class="api-modal-method GET" id="api-m-badge">GET</span>
+      <span class="api-modal-path" id="api-m-path">/health</span>
+      <button class="api-modal-close" onclick="closeApiModal()">&times;</button>
+    </div>
+    <div class="api-modal-body" id="api-m-body">
+      <!-- GET: no body shown; POST: body editor shown; WS: terminal shown -->
+    </div>
+    <div class="api-modal-ftr">
+      <button class="api-send-btn" id="api-send-btn" onclick="sendApiRequest()">&#x25B6; Send</button>
+      <button class="api-copy-btn" id="api-copy-btn" onclick="copyApiResp()">&#x1F4CB; Copy</button>
+      <span id="api-status-wrap" style="margin-left:auto"></span>
+    </div>
+  </div>
+</div>
+
 <!-- ── TOAST CONTAINER ── -->
 <div id="toast-wrap"></div>
 
@@ -955,41 +1013,202 @@ function filterEps(q) {
   });
 }
 
+/* ── API TESTER ── */
+var _apiWs = null;
+var _apiLastResp = '';
+
+var _EP_DEFAULTS = {
+  '/incidents/run':       '{\n  "incident_id": "INC-001",\n  "description": "Payment service pods crash-looping",\n  "severity": "high",\n  "auto_remediate": false\n}',
+  '/incidents/run/async': '{\n  "incident_id": "INC-001",\n  "description": "Payment service pods crash-looping",\n  "severity": "high"\n}',
+  '/warroom/create':      '{\n  "incident_id": "INC-001",\n  "description": "Database connection failures",\n  "severity": "critical",\n  "post_to_slack": false\n}',
+  '/chat':                '{\n  "message": "What is the current status of my infrastructure?",\n  "history": [],\n  "provider": ""\n}',
+  '/k8s/restart':         '{\n  "namespace": "default",\n  "deployment": "my-deployment"\n}',
+  '/k8s/scale':           '{\n  "namespace": "default",\n  "deployment": "my-deployment",\n  "replicas": 3\n}',
+  '/k8s/diagnose':        '{\n  "resource_type": "k8s",\n  "resource_id": "default"\n}',
+  '/aws/diagnose':        '{\n  "resource_type": "ec2",\n  "resource_id": "i-0123456789abcdef0"\n}',
+  '/github/issue':        '?title=Bug+found&body=Description+here',
+  '/jira/incident':       '?summary=Service+Down&description=Payment+service+unavailable',
+  '/security/roles/assign': '{\n  "user": "alice",\n  "role": "developer"\n}',
+  '/webhooks/github':     '{\n  "action": "push",\n  "ref": "refs/heads/main",\n  "commits": [{"message": "fix: payment timeout"}],\n  "repository": {},\n  "pull_request": {}\n}',
+  '/ws':                  '{"id":"evt-1","type":"pod_crash","source":"k8s","payload":{"pod":"payment-api-xyz","namespace":"production"}}',
+};
+
 function epClick(row) {
-  var path = row.querySelector('.ep-path');
-  if (!path) return;
-  var method = row.dataset.method || 'GET';
-  var pathStr = path.textContent.trim();
+  var pathEl = row.querySelector('.ep-path');
+  if (!pathEl) return;
+  var method  = row.dataset.method || 'GET';
+  var pathStr = pathEl.textContent.trim();
+  openApiModal(method, pathStr);
+}
 
+function openApiModal(method, pathStr) {
+  var badge = document.getElementById('api-m-badge');
+  var pathEl = document.getElementById('api-m-path');
+  var body  = document.getElementById('api-m-body');
+  var sendBtn = document.getElementById('api-send-btn');
+  var statusWrap = document.getElementById('api-status-wrap');
+  _apiLastResp = '';
+  statusWrap.innerHTML = '';
+
+  badge.textContent = method;
+  badge.className = 'api-modal-method ' + method;
+  pathEl.textContent = pathStr;
+
+  // Build body area
   if (method === 'WS') {
-    // Open Swagger docs for WS testing
-    window.open('/docs#/default/websocket_ws_ws_get', '_blank');
-    toast('Opening Swagger — use the /ws WebSocket there', 'info', 2800);
-    return;
-  }
-
-  if (method === 'GET') {
-    if (pathStr.includes('{')) {
-      // Extract all {param} names and prompt user to fill them
-      var filled = pathStr.replace(/\{([^}]+)\}/g, function(_, name) {
-        var val = window.prompt('Enter value for ' + name + ':', '');
-        return val !== null ? encodeURIComponent(val) : '{' + name + '}';
-      });
-      if (!filled.includes('{')) {
-        window.open(filled, '_blank');
-        toast('Opened: ' + filled, 'ok', 1800);
-      }
+    sendBtn.textContent = '\\u26A1 Connect';
+    sendBtn.onclick = function(){ wsConnect(pathStr); };
+    body.innerHTML =
+      '<div class="api-field-label">WebSocket Terminal</div>' +
+      '<div class="ws-terminal" id="ws-term"></div>' +
+      '<div class="ws-input-row">' +
+        '<input class="ws-input" id="ws-msg" placeholder="JSON message to send..." />' +
+        '<button class="ws-send-btn" onclick="wsSend()">Send</button>' +
+      '</div>';
+  } else if (method === 'GET') {
+    sendBtn.textContent = '\\u25B6 Send';
+    sendBtn.onclick = sendApiRequest;
+    // For GET, show optional query params textarea only if path has {params} or endpoint accepts query args
+    var hasPathParam = pathStr.includes('{');
+    var hint = hasPathParam ? 'Replace {param} values in the path below, then send.' : 'No body required for GET. Click Send to call the endpoint.';
+    body.innerHTML =
+      '<div style="font-size:12px;color:var(--muted);line-height:1.6">' + hint + '</div>' +
+      (hasPathParam ?
+        '<div><div class="api-field-label" style="margin-top:10px">Path</div>' +
+        '<input class="api-body-editor" id="api-path-override" style="min-height:0;height:36px;resize:none" value="' + pathStr + '"/></div>'
+        : '') +
+      '<div id="api-resp-wrap" style="display:none"><div class="api-field-label" style="margin-top:2px">Response</div><pre class="api-resp" id="api-resp"></pre></div>';
+  } else {
+    sendBtn.textContent = '\\u25B6 Send';
+    sendBtn.onclick = sendApiRequest;
+    var defaultBody = _EP_DEFAULTS[pathStr] || '{}';
+    // If default starts with '?' it's a query string, put in path
+    if (defaultBody.startsWith('?')) {
+      body.innerHTML =
+        '<div style="font-size:12px;color:var(--muted)">This endpoint accepts query parameters.</div>' +
+        '<div><div class="api-field-label" style="margin-top:10px">Path + Query</div>' +
+        '<input class="api-body-editor" id="api-path-override" style="min-height:0;height:36px;resize:none" value="' + pathStr + defaultBody + '"/></div>' +
+        '<div id="api-resp-wrap" style="display:none"><div class="api-field-label" style="margin-top:2px">Response</div><pre class="api-resp" id="api-resp"></pre></div>';
     } else {
-      window.open(pathStr, '_blank');
-      toast('Opened: ' + pathStr, 'ok', 1800);
+      body.innerHTML =
+        '<div><div class="api-field-label">Request Body (JSON)</div>' +
+        '<textarea class="api-body-editor" id="api-req-body">' + defaultBody + '</textarea></div>' +
+        '<div id="api-resp-wrap" style="display:none"><div class="api-field-label" style="margin-top:2px">Response</div><pre class="api-resp" id="api-resp"></pre></div>';
     }
-    return;
   }
 
-  // POST / DELETE — open Swagger pre-scrolled to the right operation
-  window.open('/docs', '_blank');
-  navigator.clipboard.writeText(pathStr);
-  toast(method + ' ' + pathStr + ' \u2014 Swagger opened, path copied', 'info', 2800);
+  document.getElementById('api-modal').classList.add('open');
+}
+
+function closeApiModal() {
+  document.getElementById('api-modal').classList.remove('open');
+  if (_apiWs) { try { _apiWs.close(); } catch(e){} _apiWs = null; }
+}
+
+function sendApiRequest() {
+  var pathEl = document.getElementById('api-m-path');
+  var method = document.getElementById('api-m-badge').textContent;
+  var path   = pathEl.textContent.trim();
+  // Override path if user edited it (path params or query string)
+  var pathOverride = document.getElementById('api-path-override');
+  if (pathOverride) path = pathOverride.value.trim();
+
+  var sendBtn = document.getElementById('api-send-btn');
+  sendBtn.disabled = true; sendBtn.textContent = '\\u23F3 Sending...';
+
+  var opts = { method: method, headers: {} };
+  if (method !== 'GET' && method !== 'DELETE') {
+    var bodyEl = document.getElementById('api-req-body');
+    if (bodyEl) {
+      try { JSON.parse(bodyEl.value); opts.body = bodyEl.value; }
+      catch(e) { showApiResp('Invalid JSON: ' + e.message, 'err', null); sendBtn.disabled=false; sendBtn.textContent='\\u25B6 Send'; return; }
+      opts.headers['Content-Type'] = 'application/json';
+    }
+    var user = document.getElementById('sec-user');
+    if (user && user.value.trim()) opts.headers['X-User'] = user.value.trim();
+  }
+
+  fetch(path, opts)
+    .then(function(r) {
+      var status = r.status;
+      return r.text().then(function(t){ return {status: status, body: t}; });
+    })
+    .then(function(res) {
+      var pretty = res.body;
+      try { pretty = JSON.stringify(JSON.parse(res.body), null, 2); } catch(e){}
+      _apiLastResp = pretty;
+      showApiResp(pretty, res.status >= 200 && res.status < 300 ? 'ok' : 'err', res.status);
+    })
+    .catch(function(e) { showApiResp('Network error: ' + e, 'err', null); })
+    .finally(function() { sendBtn.disabled=false; sendBtn.textContent='\\u25B6 Send'; });
+}
+
+function showApiResp(text, cls, status) {
+  var wrap = document.getElementById('api-resp-wrap');
+  var el   = document.getElementById('api-resp');
+  var sw   = document.getElementById('api-status-wrap');
+  if (!wrap || !el) return;
+  wrap.style.display = '';
+  el.textContent = text;
+  el.className = 'api-resp ' + cls;
+  if (status !== null) {
+    sw.innerHTML = '<span class="api-status-code ' + cls + '">' + status + '</span>';
+  }
+}
+
+function copyApiResp() {
+  if (_apiLastResp) {
+    navigator.clipboard.writeText(_apiLastResp);
+    toast('Response copied', 'ok', 1600);
+  }
+}
+
+/* ── WS TERMINAL ── */
+function wsLog(msg, cls) {
+  var term = document.getElementById('ws-term');
+  if (!term) return;
+  var p = document.createElement('p');
+  p.className = 'ws-line ' + (cls||'sys');
+  p.textContent = msg;
+  term.appendChild(p);
+  term.scrollTop = term.scrollHeight;
+}
+
+function wsConnect(pathStr) {
+  if (_apiWs) { _apiWs.close(); _apiWs = null; }
+  var btn = document.getElementById('api-send-btn');
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var url = proto + '//' + location.host + pathStr;
+  wsLog('Connecting to ' + url + '...', 'sys');
+  try {
+    _apiWs = new WebSocket(url);
+    _apiWs.onopen = function() {
+      wsLog('\\u2705 Connected', 'sys');
+      btn.textContent = '\\u274C Disconnect';
+      btn.onclick = function(){ _apiWs.close(); };
+    };
+    _apiWs.onmessage = function(e) {
+      var txt = e.data;
+      try { txt = JSON.stringify(JSON.parse(e.data), null, 2); } catch(_){}
+      wsLog('\\u2190 ' + txt, 'recv');
+    };
+    _apiWs.onerror = function() { wsLog('\\u274C Error', 'err'); };
+    _apiWs.onclose = function() {
+      wsLog('Disconnected', 'sys');
+      btn.textContent = '\\u26A1 Connect';
+      btn.onclick = function(){ wsConnect(pathStr); };
+      _apiWs = null;
+    };
+  } catch(e) { wsLog('Failed: ' + e, 'err'); }
+}
+
+function wsSend() {
+  var inp = document.getElementById('ws-msg');
+  if (!inp || !inp.value.trim()) return;
+  if (!_apiWs || _apiWs.readyState !== 1) { wsLog('Not connected — click Connect first', 'err'); return; }
+  _apiWs.send(inp.value.trim());
+  wsLog('\\u2192 ' + inp.value.trim(), 'sent');
+  inp.value = '';
 }
 
 function loadMetrics() {
@@ -1418,6 +1637,7 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') {
     document.getElementById('run-modal').classList.remove('open');
     document.getElementById('gh-drawer').classList.remove('open');
+    closeApiModal();
   }
   if (e.key === 'c' || e.key === 'C') {
     showView('chat','',document.querySelector('.nav-link[onclick*=chat]'));
