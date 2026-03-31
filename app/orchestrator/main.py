@@ -667,92 +667,92 @@ def root():
       <div data-section="general">
         <div class="ep-group">
           <div class="ep-group-hdr"><span class="ico">&#x1F527;</span><span class="g-name">General &amp; AI</span><span class="g-cnt">13</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/</span><span class="ep-desc">Dashboard UI</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/health</span><span class="ep-desc">Basic health check</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/health/full</span><span class="ep-desc">Full integration health</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/health/integrations</span><span class="ep-desc">Integration diagnostics</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/chat</span><span class="ep-desc">Conversational AI (LLM + live context)</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/ws</span><span class="ep-desc">WebSocket streaming chat</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/secrets/status</span><span class="ep-desc">Integration key status</span></div>
-          <div class="ep-row rbac-admin" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/secrets</span><span class="ep-desc">Save/update credentials</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row rbac-admin" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/security/roles</span><span class="ep-desc">List all RBAC roles</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row rbac-admin" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/security/roles/assign</span><span class="ep-desc">Assign role to user</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/warroom/create</span><span class="ep-desc">AI war room + Slack channel</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/grafana/alerts</span><span class="ep-desc">Firing Grafana alerts</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/grafana/dashboards</span><span class="ep-desc">List dashboards</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/</span><span class="ep-desc">Dashboard UI</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/health</span><span class="ep-desc">Basic health check</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/health/full</span><span class="ep-desc">Full integration health</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/health/integrations</span><span class="ep-desc">Integration diagnostics</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/chat</span><span class="ep-desc">Conversational AI (LLM + live context)</span></div>
+          <div class="ep-row" data-ep data-method="WS" onclick="epClick(this)"><span class="badge" style="background:rgba(167,139,250,.12);color:var(--purple);border:1px solid rgba(167,139,250,.25)">WS</span><span class="ep-path">/ws</span><span class="ep-desc">WebSocket real-time events</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/secrets/status</span><span class="ep-desc">Integration key status</span></div>
+          <div class="ep-row rbac-admin" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/secrets</span><span class="ep-desc">Save/update credentials</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row rbac-admin" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/security/roles</span><span class="ep-desc">List all RBAC roles</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row rbac-admin" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/security/roles/assign</span><span class="ep-desc">Assign role to user</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/warroom/create</span><span class="ep-desc">AI war room + Slack channel</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/grafana/alerts</span><span class="ep-desc">Firing Grafana alerts</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/grafana/dashboards</span><span class="ep-desc">Grafana datasources</span></div>
         </div>
       </div>
 
       <div data-section="pipeline" class="rbac-dev">
         <div class="ep-group">
           <div class="ep-group-hdr"><span class="ico">&#x1F916;</span><span class="g-name">AI Response Engine</span><span class="g-cnt">4</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/incidents/run</span><span class="ep-desc">Run full autonomous pipeline</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/incidents/run/async</span><span class="ep-desc">Async pipeline with job ID</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/incidents/{id}</span><span class="ep-desc">Get incident status</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/v2/incident/run</span><span class="ep-desc">V2 pipeline endpoint</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/incidents/run</span><span class="ep-desc">Run full autonomous pipeline</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/incidents/run/async</span><span class="ep-desc">Async pipeline — returns job ID immediately</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/v2/incident/run</span><span class="ep-desc">Multi-agent pipeline (extended)</span></div>
         </div>
       </div>
 
       <div data-section="webhooks" class="rbac-admin">
         <div class="ep-group">
           <div class="ep-group-hdr"><span class="ico">&#x1F517;</span><span class="g-name">Webhooks (Event-Driven)</span><span class="g-cnt">2</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/webhooks/github</span><span class="ep-desc">GitHub push / PR events</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/webhooks/pagerduty</span><span class="ep-desc">PagerDuty incident trigger</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/webhooks/github</span><span class="ep-desc">GitHub push / PR events</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/webhooks/pagerduty</span><span class="ep-desc">PagerDuty incident trigger</span></div>
         </div>
       </div>
 
       <div data-section="k8s">
         <div class="ep-group">
           <div class="ep-group-hdr"><span class="ico">&#x2638;</span><span class="g-name">Kubernetes</span><span class="g-cnt">7</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/health</span><span class="ep-desc">Cluster health overview</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/pods</span><span class="ep-desc">List pods with status</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/deployments</span><span class="ep-desc">Deployment readiness</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/logs/{ns}/{pod}</span><span class="ep-desc">Pod logs</span></div>
-          <div class="ep-row rbac-dev" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/restart</span><span class="ep-desc">Rolling restart deployment</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row rbac-dev" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/scale</span><span class="ep-desc">Scale deployment replicas</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/diagnose</span><span class="ep-desc">AI K8s diagnosis</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/health</span><span class="ep-desc">Cluster health overview</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/pods</span><span class="ep-desc">List pods with status</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/deployments</span><span class="ep-desc">Deployment readiness</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/logs</span><span class="ep-desc">Pod logs (query: namespace, pod)</span></div>
+          <div class="ep-row rbac-dev" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/restart</span><span class="ep-desc">Rolling restart deployment</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row rbac-dev" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/scale</span><span class="ep-desc">Scale deployment replicas</span><span class="ep-lock">&#x1F512;</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/diagnose</span><span class="ep-desc">AI K8s diagnosis</span></div>
         </div>
       </div>
 
       <div data-section="aws">
         <div class="ep-group">
           <div class="ep-group-hdr"><span class="ico">&#x2601;</span><span class="g-name">AWS</span><span class="g-cnt">23</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ec2/instances</span><span class="ep-desc">EC2 instances</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ecs/services</span><span class="ep-desc">ECS services</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/lambda/functions</span><span class="ep-desc">Lambda functions</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudwatch/alarms</span><span class="ep-desc">CloudWatch alarms</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudwatch/logs</span><span class="ep-desc">Log streams</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/rds/instances</span><span class="ep-desc">RDS instances</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/s3/buckets</span><span class="ep-desc">S3 buckets</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/sqs/queues</span><span class="ep-desc">SQS queues</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/dynamodb/tables</span><span class="ep-desc">DynamoDB tables</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudtrail/events</span><span class="ep-desc">CloudTrail events</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/route53/health</span><span class="ep-desc">Route53 health checks</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/sns/topics</span><span class="ep-desc">SNS topics</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/diagnose</span><span class="ep-desc">AI AWS root cause analysis</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/predict-scaling</span><span class="ep-desc">AI scaling prediction</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ec2/console/{id}</span><span class="ep-desc">EC2 console output</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ecs/stopped-tasks</span><span class="ep-desc">Stopped ECS tasks</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/lambda/errors/{fn}</span><span class="ep-desc">Lambda error stats</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/rds/events/{id}</span><span class="ep-desc">RDS events</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudwatch/metrics</span><span class="ep-desc">CloudWatch metrics query</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cost/summary</span><span class="ep-desc">Cost explorer summary</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/assess-deployment</span><span class="ep-desc">Pre-deploy risk gate</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/context</span><span class="ep-desc">Full AWS context snapshot</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/synthesize</span><span class="ep-desc">AI incident synthesis</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ec2/instances</span><span class="ep-desc">EC2 instances</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ecs/services</span><span class="ep-desc">ECS services</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/lambda/functions</span><span class="ep-desc">Lambda functions</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudwatch/alarms</span><span class="ep-desc">CloudWatch alarms</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudwatch/logs</span><span class="ep-desc">Log groups &amp; streams</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/rds/instances</span><span class="ep-desc">RDS instances</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/s3/buckets</span><span class="ep-desc">S3 buckets</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/sqs/queues</span><span class="ep-desc">SQS queues</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/dynamodb/tables</span><span class="ep-desc">DynamoDB tables</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudtrail/events</span><span class="ep-desc">CloudTrail events</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/route53/health</span><span class="ep-desc">Route53 health checks</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/sns/topics</span><span class="ep-desc">SNS topics</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/diagnose</span><span class="ep-desc">AI AWS root cause analysis</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/predict-scaling</span><span class="ep-desc">AI scaling prediction</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ec2/console</span><span class="ep-desc">EC2 console output (query: instance_id)</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ecs/stopped-tasks</span><span class="ep-desc">Stopped ECS tasks</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/lambda/errors</span><span class="ep-desc">Lambda error stats (query: function_name)</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/rds/events</span><span class="ep-desc">RDS events (query: db_instance_id)</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/cloudwatch/metrics</span><span class="ep-desc">CloudWatch metrics query</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cost/summary</span><span class="ep-desc">Resource inventory &amp; cost overview</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/assess-deployment</span><span class="ep-desc">Pre-deploy risk gate</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/context</span><span class="ep-desc">Full AWS context snapshot</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/synthesize</span><span class="ep-desc">AI incident synthesis</span></div>
         </div>
       </div>
 
       <div data-section="deploy">
         <div class="ep-group">
           <div class="ep-group-hdr"><span class="ico">&#x1F680;</span><span class="g-name">Deploy, GitHub &amp; Jira</span><span class="g-cnt">7</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/github/commits</span><span class="ep-desc">Recent commits</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/github/prs</span><span class="ep-desc">Recent pull requests</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge GET">GET</span><span class="ep-path">/github/pr/{n}/review</span><span class="ep-desc">AI PR code review</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/github/issue</span><span class="ep-desc">Create GitHub issue</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/jira/incident</span><span class="ep-desc">Create Jira ticket</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/deploy/assess</span><span class="ep-desc">Pre-deploy AI risk gate</span></div>
-          <div class="ep-row" data-ep onclick="copyPath(this)"><span class="badge POST">POST</span><span class="ep-path">/deploy/jira-to-pr</span><span class="ep-desc">Jira ticket &#x2192; GitHub PR plan</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/github/commits</span><span class="ep-desc">Recent commits</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/github/prs</span><span class="ep-desc">Recent pull requests</span></div>
+          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/github/profile</span><span class="ep-desc">GitHub account summary</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/github/pr/{n}/review</span><span class="ep-desc">AI PR code review</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/github/issue</span><span class="ep-desc">Create GitHub issue</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/jira/incident</span><span class="ep-desc">Create Jira ticket</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/deploy/assess</span><span class="ep-desc">Pre-deploy AI risk gate</span></div>
+          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/deploy/jira-to-pr</span><span class="ep-desc">Jira ticket &#x2192; GitHub PR plan</span></div>
         </div>
       </div>
 
@@ -955,15 +955,33 @@ function filterEps(q) {
   });
 }
 
-function copyPath(row) {
+function epClick(row) {
   var path = row.querySelector('.ep-path');
   if (!path) return;
-  navigator.clipboard.writeText(path.textContent).then(function() {
-    var orig = path.style.color;
-    path.style.color = 'var(--green)';
-    setTimeout(function(){ path.style.color = orig; }, 900);
-    toast('Copied: ' + path.textContent, 'ok', 1800);
-  });
+  var method = row.dataset.method || 'GET';
+  var pathStr = path.textContent;
+
+  if (method === 'GET') {
+    // Open directly in new tab if no path params, else copy
+    if (pathStr.includes('{')) {
+      navigator.clipboard.writeText(pathStr);
+      toast('Copied: ' + pathStr + ' (fill in path params)', 'info', 2400);
+    } else {
+      window.open(pathStr, '_blank');
+      toast('Opened: ' + pathStr, 'ok', 1800);
+    }
+  } else if (method === 'WS') {
+    navigator.clipboard.writeText('ws://' + location.host + pathStr);
+    toast('WS URL copied: ws://' + location.host + pathStr, 'info', 2400);
+  } else {
+    // POST/PUT/DELETE — copy path and suggest using AI chat or Swagger
+    navigator.clipboard.writeText(pathStr).then(function() {
+      var orig = path.style.color;
+      path.style.color = 'var(--blue)';
+      setTimeout(function(){ path.style.color = orig; }, 900);
+      toast('Copied: ' + pathStr + ' \u2014 test via Swagger (/docs) or AI Chat', 'info', 2800);
+    });
+  }
 }
 
 function loadMetrics() {
@@ -2462,6 +2480,183 @@ def health_integrations():
         "github":       github,
         "integrations": integrations,
     }
+
+
+# ── Clean public-facing aliases for all UI-shown paths ───────
+
+# K8s — canonical clean paths
+@app.get("/k8s/health")
+def k8s_health():
+    return {"k8s_check": check_k8s_cluster()}
+
+@app.get("/k8s/pods")
+def k8s_pods_clean(namespace: str = "default"):
+    return {"k8s_pods": check_k8s_pods(namespace)}
+
+@app.get("/k8s/deployments")
+def k8s_deployments_clean(namespace: str = "default"):
+    return {"k8s_deployments": check_k8s_deployments(namespace)}
+
+@app.get("/k8s/nodes")
+def k8s_nodes_clean():
+    return {"k8s_nodes": check_k8s_nodes()}
+
+@app.post("/k8s/diagnose")
+def k8s_diagnose(req: AWSDiagnoseRequest):
+    """AI-powered K8s namespace diagnosis using live pod/deployment data."""
+    from app.llm.claude import analyze_context as _analyze
+    pods = check_k8s_pods(req.resource_id or "default")
+    deps = check_k8s_deployments(req.resource_id or "default")
+    return _analyze({"incident_id": f"k8s-{req.resource_id}", "details": {"pods": pods, "deployments": deps}})
+
+# Incidents — canonical paths matching UI
+@app.post("/incidents/run")
+def incidents_run_alias(req: IncidentRunRequest, x_user: Optional[str] = Header(default=None)):
+    """Alias for /incident/run — matches the documented path."""
+    return incident_run(req, x_user)
+
+@app.post("/incidents/run/async")
+async def incidents_run_async(req: IncidentRunRequest, x_user: Optional[str] = Header(default=None)):
+    """Fire-and-forget async pipeline — returns job ID immediately."""
+    import asyncio, uuid
+    job_id = f"job-{uuid.uuid4().hex[:8]}"
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, lambda: run_incident_pipeline(
+        incident_id=req.incident_id, description=req.description,
+        severity=req.severity, aws_config={}, k8s_config={}, auto_remediate=req.auto_remediate,
+    ))
+    return {"job_id": job_id, "status": "accepted", "incident_id": req.incident_id}
+
+# GitHub — additional aliases
+@app.get("/github/pr/{pr_number}/review")
+def github_pr_review_clean(pr_number: int):
+    """Get AI review for a PR by number."""
+    from app.integrations.github import get_pr_for_review
+    from app.llm.claude import review_pr
+    data = get_pr_for_review(pr_number)
+    if not data.get("success"):
+        raise HTTPException(status_code=404, detail=data.get("error", "PR not found"))
+    review = review_pr(data)
+    return {"pr": pr_number, "review": review, "pr_data": data}
+
+@app.post("/github/issue")
+def github_issue_clean(title: str = "AI DevOps Issue", body: str = "", repo: str = ""):
+    return create_issue(title=title, body=body, repo_name=repo)
+
+# Jira — clean path
+@app.post("/jira/incident")
+def jira_incident_clean(summary: str = "AI DevOps Incident", description: str = ""):
+    return create_incident(summary=summary, description=description or summary)
+
+# Deploy — alias
+@app.post("/aws/assess-deployment")
+def aws_assess_deployment_alias(req: ContextRequest):
+    from app.llm.claude import assess_deployment
+    return assess_deployment(req.model_dump())
+
+@app.post("/deploy/jira-to-pr")
+def deploy_jira_to_pr_clean(issue_key: str):
+    """Same as /jira/webhook but via direct call."""
+    from app.integrations.jira import get_issue
+    from app.llm.claude import interpret_jira_for_pr
+    try:
+        issue = get_issue(issue_key)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return interpret_jira_for_pr(issue)
+
+# Security — GET to list roles
+@app.get("/security/roles")
+def security_roles_list():
+    """List all configured RBAC roles and their permissions."""
+    from app.security.rbac import ROLE_PERMISSIONS, _user_roles
+    return {
+        "roles": {r: list(p) for r, p in ROLE_PERMISSIONS.items()},
+        "assignments": dict(_user_roles),
+    }
+
+@app.post("/security/roles/assign")
+def security_roles_assign(req: RoleAssignment, x_user: Optional[str] = Header(default=None)):
+    _rbac_guard(x_user, "manage_users")
+    return assign_role(req.user, req.role)
+
+# AWS — missing endpoints
+@app.get("/aws/cloudwatch/logs")
+def aws_cw_logs(log_group: str = "", minutes: int = 30):
+    """Recent CloudWatch logs. Pass ?log_group=name to filter."""
+    if log_group:
+        from app.integrations.aws_ops import get_recent_logs
+        result = get_recent_logs(log_group, minutes)
+        return {"logs": result}
+    from app.integrations.aws_ops import list_log_groups
+    result = list_log_groups(limit=50)
+    return {"log_groups": result}
+
+@app.get("/aws/context")
+def aws_context_snapshot():
+    """Full AWS observability snapshot."""
+    result = collect_diagnosis_context()
+    return {"aws_context": result}
+
+@app.get("/aws/synthesize")
+def aws_synthesize(incident_id: str = "snapshot", description: str = "infrastructure status review"):
+    """AI synthesis of current AWS infrastructure state."""
+    from app.llm.claude import synthesize_incident
+    context = collect_diagnosis_context()
+    result = synthesize_incident({"incident_id": incident_id, "description": description, "aws_context": context})
+    return {"synthesis": result}
+
+@app.get("/aws/route53/health")
+def aws_route53_health_alias():
+    """Route53 health checks (alias)."""
+    result = list_route53_healthchecks()
+    return {"route53_healthchecks": result}
+
+@app.get("/aws/cost/summary")
+def aws_cost_summary():
+    """Approximate cost summary from resource counts (AWS Cost Explorer requires separate permission)."""
+    ec2 = list_ec2_instances()
+    rds = list_rds_instances()
+    lam = list_lambda_functions()
+    ecs = list_ecs_services()
+    return {
+        "note": "Resource inventory — configure AWS Cost Explorer for billing data",
+        "ec2_count": len(ec2.get("instances", [])) if ec2.get("success") else "unavailable",
+        "rds_count": len(rds.get("instances", [])) if rds.get("success") else "unavailable",
+        "lambda_count": len(lam.get("functions", [])) if lam.get("success") else "unavailable",
+        "ecs_services": len(ecs.get("services", [])) if ecs.get("success") else "unavailable",
+    }
+
+# Grafana — full implementation
+@app.get("/grafana/alerts")
+def grafana_alerts():
+    """Firing Grafana alerts."""
+    from app.integrations.grafana import get_firing_alerts
+    return get_firing_alerts()
+
+@app.get("/grafana/dashboards")
+def grafana_dashboards():
+    """Grafana datasources (dashboards API requires Grafana admin token)."""
+    from app.integrations.grafana import get_datasources
+    return get_datasources()
+
+# WebSocket — clean /ws alias
+@app.websocket("/ws")
+async def websocket_ws(websocket: WebSocket):
+    """WebSocket alias for /realtime/events."""
+    await websocket.accept()
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            events = [payload] if isinstance(payload, dict) else payload if isinstance(payload, list) else None
+            if events is None:
+                await websocket.send_json({"error": "invalid payload"})
+                continue
+            correlation = correlate_events(events)
+            analysis = analyze_context({"incident_id": "ws-realtime", "details": events})
+            await websocket.send_json({"correlation": correlation, "analysis": analysis})
+    except WebSocketDisconnect:
+        pass
 
 
 @app.websocket("/realtime/events")
