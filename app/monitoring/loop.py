@@ -56,7 +56,22 @@ def _detect_k8s_anomalies() -> list[str]:
 
 def _detect_anomalies() -> list[str]:
     """Aggregate anomaly detectors. Add more sources here (AWS, Grafana, etc.)."""
-    return _detect_k8s_anomalies()
+    anomalies = _detect_k8s_anomalies()
+
+    # Check Grafana alerts
+    try:
+        from app.integrations.grafana import get_alerts
+        gf = get_alerts()
+        if gf.get("success"):
+            for alert in gf.get("alerts", []):
+                if alert.get("state") in ("alerting", "pending"):
+                    anomalies.append(
+                        f"Grafana alert firing: {alert.get('name', 'unknown')}"
+                    )
+    except Exception:
+        pass
+
+    return anomalies
 
 
 async def monitoring_loop() -> None:

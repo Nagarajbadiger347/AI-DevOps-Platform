@@ -16,11 +16,14 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from botocore.config import Config as _BotoCfg
+
+_BOTO_CFG = _BotoCfg(connect_timeout=10, read_timeout=30, retries={"max_attempts": 2})
 
 
 def _client(service: str):
     region = os.getenv("AWS_REGION", "us-west-2")
-    return boto3.client(service, region_name=region)
+    return boto3.client(service, region_name=region, config=_BOTO_CFG)
 
 def _now():
     return datetime.datetime.now(datetime.timezone.utc)
