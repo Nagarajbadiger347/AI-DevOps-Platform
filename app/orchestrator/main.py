@@ -14,7 +14,12 @@ from typing import List, Any, Optional, Dict
 from app.correlation.engine import correlate_events
 from app.plugins.aws_checker import check_aws_infrastructure
 from app.plugins.k8s_checker import check_k8s_cluster, check_k8s_nodes, check_k8s_pods, check_k8s_deployments
-from app.integrations.github import get_recent_commits as _get_recent_commits
+from app.integrations.github import (
+    get_recent_commits as _get_recent_commits,
+    get_recent_prs as _get_recent_prs,
+    list_repos as _list_repos,
+    get_profile_summary as _get_github_profile,
+)
 from app.integrations.k8s_ops import restart_deployment, scale_deployment, get_pod_logs
 from app.integrations.aws_ops import (
     list_ec2_instances, get_ec2_status_checks, get_ec2_console_output,
@@ -1046,7 +1051,14 @@ loadMetrics();
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    incident_count = 0
+    try:
+        from app.memory.vector_db import search_similar_incidents
+        results = search_similar_incidents("incident", n_results=100)
+        incident_count = len(results) if isinstance(results, list) else 0
+    except Exception:
+        pass
+    return {"status": "ok", "incident_count": incident_count, "version": "2.0.0"}
 
 @app.post("/correlate")
 def correlate(event_list: List[Event]):
@@ -1710,11 +1722,22 @@ class PagerDutyWebhookPayload(BaseModel):
 
 @app.post("/webhooks/github", tags=["Webhooks"])
 async def webhook_github(
+    request: Request,
     payload: GitHubWebhookPayload,
     x_github_event: str = Header("", alias="X-GitHub-Event"),
     x_hub_signature_256: str = Header("", alias="X-Hub-Signature-256"),
 ):
     """Receive GitHub push/PR events and trigger pipeline automatically."""
+    # Verify webhook signature when GITHUB_WEBHOOK_SECRET is set
+    webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
+    if webhook_secret and x_hub_signature_256:
+        import hmac, hashlib
+        body = await request.body()
+        expected = "sha256=" + hmac.new(
+            webhook_secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, x_hub_signature_256):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "Invalid webhook signature"})
     event = x_github_event
     if event == "push":
         commits = payload.commits or []
@@ -1850,6 +1873,26 @@ def health_full():
     return {"status": "healthy" if health["healthy"] else "degraded", "health": health}
 
 
+@app.get("/github/repos")
+def github_repos():
+    """List all repositories for the configured GitHub account."""
+    return _list_repos()
+
+@app.get("/github/profile")
+def github_profile():
+    """GitHub account summary — repos, stars, top languages."""
+    return _get_github_profile()
+
+@app.get("/github/commits")
+def github_commits(hours: int = 24, repo: str = ""):
+    """Recent commits across all repos (or a specific one)."""
+    return _get_recent_commits(hours=hours, repo_name=repo)
+
+@app.get("/github/prs")
+def github_prs(hours: int = 48, repo: str = ""):
+    """Recent merged PRs across all repos (or a specific one)."""
+    return _get_recent_prs(hours=hours, repo_name=repo)
+
 @app.get("/health/integrations")
 def health_integrations():
     """Diagnostic endpoint — shows exactly which integrations and LLM providers are configured.
@@ -1887,18 +1930,19 @@ def health_integrations():
     gh_error = None
     if gh_repo:
         try:
-            from app.integrations.github import _parse_repo_slug
-            gh_slug = _parse_repo_slug(gh_repo)
-        except RuntimeError as e:
+            from app.integrations.github import _parse_github_url
+            owner, repo_name = _parse_github_url(gh_repo)
+            gh_slug = f"{owner}/{repo_name}" if repo_name else f"{owner} (profile-level)"
+        except Exception as e:
             gh_error = str(e)
 
     github = {
-        "token_set":  bool(gh_token),
-        "repo_raw":   gh_repo or "(not set)",
+        "token_set":   bool(gh_token),
+        "repo_raw":    gh_repo or "(not set)",
         "repo_parsed": gh_slug,
-        "repo_valid":  gh_slug is not None,
+        "repo_valid":  bool(gh_token and gh_slug),
         "error":       gh_error,
-        "note":        "GITHUB_REPO must be 'owner/repo-name', e.g. 'Nagarajbadiger347/my-repo'" if not gh_slug else None,
+        "note":        "Profile-level access — works across all repos" if gh_slug and "profile-level" in (gh_slug or "") else None,
     }
 
     # ── Other integrations ────────────────────────────────────────────────
