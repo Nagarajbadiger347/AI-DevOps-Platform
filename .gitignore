@@ -23,6 +23,8 @@ build/
 
 # RBAC runtime state
 app/security/roles.json
+app/security/users.json
+app/security/invites.json
 
 # OS
 .DS_Store

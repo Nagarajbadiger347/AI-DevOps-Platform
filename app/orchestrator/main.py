@@ -86,6 +86,13 @@ async def _lifespan(_: FastAPI):
         import asyncio
         from app.monitoring.loop import monitoring_loop
         asyncio.create_task(monitoring_loop())
+    # Validate critical configuration
+    import warnings as _warnings
+    if not os.getenv("JWT_SECRET_KEY"):
+        _warnings.warn("JWT_SECRET_KEY not set — using insecure default. Set it with: openssl rand -hex 32")
+    llm_keys = [os.getenv(k) for k in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY")]
+    if not any(llm_keys):
+        _warnings.warn("No LLM API key configured (ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY). AI features will fail.")
     yield
 
 app = FastAPI(
@@ -121,18 +128,41 @@ _rate_store: dict = _defaultdict(list)
 _RATE_LIMIT = 60   # requests
 _RATE_WINDOW = 60  # seconds
 
+# ── Prometheus-style in-memory metrics ────────────────────────
+_METRICS: dict = _defaultdict(int)
+_METRICS_HIST: dict = _defaultdict(list)  # path → list of durations
+
+def _inc(key: str, amount: int = 1):
+    _METRICS[key] += amount
+
 @app.middleware("http")
 async def _rate_limit_middleware(request: Request, call_next):
+    path = request.url.path
+    method = request.method
     # Only rate-limit AI-heavy endpoints
-    if request.url.path in ("/chat", "/incidents/run", "/warroom/create"):
+    if path in ("/chat", "/incidents/run", "/warroom/create"):
         client_ip = request.client.host if request.client else "unknown"
         now = _time.time()
         window_start = now - _RATE_WINDOW
         _rate_store[client_ip] = [t for t in _rate_store[client_ip] if t > window_start]
         if len(_rate_store[client_ip]) >= _RATE_LIMIT:
             from fastapi.responses import JSONResponse
+            _inc(f"nexusops_errors_total{{endpoint=\"{path}\"}}")
             return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded. Try again in a minute."})
         _rate_store[client_ip].append(now)
+    # Track metrics for all non-static paths
+    if not path.startswith("/static") and path not in ("/favicon.ico",):
+        t0 = _time.time()
+        response = await call_next(request)
+        duration = _time.time() - t0
+        _inc(f'nexusops_requests_total{{endpoint="{path}",method="{method}"}}')
+        _METRICS_HIST[path].append(duration)
+        # keep only last 1000 samples per path
+        if len(_METRICS_HIST[path]) > 1000:
+            _METRICS_HIST[path] = _METRICS_HIST[path][-1000:]
+        if response.status_code >= 400:
+            _inc(f'nexusops_errors_total{{endpoint="{path}"}}')
+        return response
     return await call_next(request)
 
 class Event(BaseModel):
@@ -473,16 +503,61 @@ def root():
     /* ── KEYBOARD SHORTCUT HINT ── */
     .kbd{display:inline-flex;align-items:center;gap:3px;font-size:9.5px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-family:'JetBrains Mono',monospace}
 
-    /* ── API TESTER MODAL ── */
-    .api-modal-overlay{position:fixed;inset:0;background:rgba(4,6,15,.75);backdrop-filter:blur(6px);z-index:200;display:none;align-items:center;justify-content:center}
-    .api-modal-overlay.open{display:flex}
-    .api-modal{background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius-lg);width:560px;max-width:96vw;max-height:88vh;display:flex;flex-direction:column;animation:slideUp .22s ease;box-shadow:0 24px 60px rgba(0,0,0,.55)}
-    .api-modal-hdr{display:flex;align-items:center;gap:10px;padding:16px 18px 14px;border-bottom:1px solid var(--border);flex-shrink:0}
-    .api-modal-method{font-size:10px;font-weight:800;padding:3px 9px;border-radius:5px;letter-spacing:.06em;flex-shrink:0}
-    .api-modal-path{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text);font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .api-modal-close{background:transparent;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0 4px;border-radius:4px;line-height:1;transition:color .15s;flex-shrink:0}
-    .api-modal-close:hover{color:var(--text)}
-    .api-modal-body{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:12px;min-height:0}
+    /* ── API EXPLORER DRAWER ── */
+    .ep-drawer-backdrop{position:fixed;inset:0;background:rgba(4,6,15,.6);backdrop-filter:blur(4px);z-index:200;display:none;opacity:0;transition:opacity .25s}
+    .ep-drawer-backdrop.open{display:block;opacity:1}
+    .ep-drawer{position:fixed;top:0;right:-520px;width:480px;max-width:100vw;height:100vh;background:var(--bg2);border-left:1px solid var(--border2);z-index:201;display:flex;flex-direction:column;transition:right .3s cubic-bezier(.4,0,.2,1);box-shadow:-12px 0 48px rgba(0,0,0,.5)}
+    .ep-drawer.open{right:0}
+    .ep-drawer-hdr{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surface)}
+    .ep-drawer-method{font-size:10px;font-weight:800;padding:3px 9px;border-radius:5px;letter-spacing:.06em;flex-shrink:0}
+    .ep-drawer-path{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text);font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ep-drawer-close{background:transparent;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:2px 6px;border-radius:4px;line-height:1;transition:color .15s;flex-shrink:0}
+    .ep-drawer-close:hover{color:var(--text)}
+    .ep-drawer-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0}
+    .ep-section{padding:16px 18px;border-bottom:1px solid var(--border)}
+    .ep-section-title{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px}
+    .ep-section-title::after{content:'';flex:1;height:1px;background:var(--border)}
+    .ep-desc-text{font-size:12.5px;color:var(--text2);line-height:1.6;margin-bottom:10px}
+    .ep-auth-badge{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.06em}
+    .ep-auth-none{background:rgba(52,211,153,.1);color:var(--green);border:1px solid rgba(52,211,153,.3)}
+    .ep-auth-viewer{background:rgba(34,211,238,.1);color:var(--cyan);border:1px solid rgba(34,211,238,.3)}
+    .ep-auth-developer{background:rgba(79,142,247,.1);color:var(--blue);border:1px solid rgba(79,142,247,.3)}
+    .ep-auth-admin{background:rgba(167,139,250,.1);color:var(--purple);border:1px solid rgba(167,139,250,.3)}
+    .ep-field{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+    .ep-field-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;align-items:center;gap:5px}
+    .ep-field-label .req{color:var(--red);font-size:11px}
+    .ep-field-type{font-size:9px;color:var(--muted);background:var(--surface3);padding:1px 6px;border-radius:10px;font-weight:600;margin-left:auto}
+    .ep-input{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 11px;font-size:12.5px;color:var(--text);outline:none;font-family:inherit;transition:border-color .15s,box-shadow .15s;width:100%;box-sizing:border-box}
+    .ep-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
+    .ep-input::placeholder{color:var(--muted)}
+    .ep-select{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 11px;font-size:12.5px;color:var(--text);outline:none;font-family:inherit;transition:border-color .15s;width:100%;box-sizing:border-box;cursor:pointer}
+    .ep-select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
+    .ep-textarea{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 11px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;resize:vertical;min-height:72px;line-height:1.55;transition:border-color .15s;width:100%;box-sizing:border-box}
+    .ep-textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
+    .ep-toggle-wrap{display:flex;align-items:center;gap:8px}
+    .ep-toggle{width:36px;height:20px;background:var(--border2);border-radius:20px;cursor:pointer;position:relative;transition:background .2s;flex-shrink:0;border:none}
+    .ep-toggle.on{background:var(--blue2)}
+    .ep-toggle::after{content:'';position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:left .2s}
+    .ep-toggle.on::after{left:19px}
+    .ep-toggle-label{font-size:12px;color:var(--text2)}
+    .ep-resp-wrap{display:none;flex-direction:column;gap:8px}
+    .ep-resp-wrap.visible{display:flex}
+    .ep-status-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .ep-status-badge{font-weight:700;font-family:'JetBrains Mono',monospace;padding:2px 9px;border-radius:4px;font-size:11px}
+    .ep-status-2xx{background:rgba(52,211,153,.12);color:var(--green);border:1px solid rgba(52,211,153,.3)}
+    .ep-status-3xx{background:rgba(251,191,36,.12);color:var(--amber);border:1px solid rgba(251,191,36,.3)}
+    .ep-status-4xx,.ep-status-5xx{background:rgba(248,113,113,.12);color:var(--red);border:1px solid rgba(248,113,113,.3)}
+    .ep-timing{font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace}
+    .ep-resp-pre{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text2);max-height:340px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;line-height:1.6}
+    .ep-resp-pre.ok{border-color:rgba(52,211,153,.25);color:var(--text)}
+    .ep-resp-pre.err{border-color:rgba(248,113,113,.25)}
+    .ep-drawer-ftr{display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid var(--border);flex-shrink:0;background:var(--surface)}
+    .ep-exec-btn{padding:8px 22px;background:linear-gradient(135deg,#2563eb,#1d4ed8);border:none;border-radius:var(--radius-sm);font-size:12px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit;transition:all .15s;box-shadow:0 0 14px rgba(37,99,235,.25)}
+    .ep-exec-btn:hover{box-shadow:0 0 22px rgba(79,142,247,.45)}
+    .ep-exec-btn:disabled{background:var(--surface2);box-shadow:none;color:var(--muted);cursor:not-allowed}
+    .ep-outline-btn{padding:7px 14px;background:transparent;border:1px solid var(--border2);border-radius:var(--radius-sm);font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;font-family:inherit;transition:all .15s}
+    .ep-outline-btn:hover{border-color:var(--blue);color:var(--blue)}
+    /* legacy — keep for WS terminal */
     .api-field-label{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px}
     .api-body-editor{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;resize:vertical;min-height:110px;line-height:1.6;transition:border-color .15s;box-sizing:border-box}
     .api-body-editor:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
@@ -493,12 +568,6 @@ def root():
     .api-status-code{font-weight:700;font-family:'JetBrains Mono',monospace;padding:2px 8px;border-radius:4px}
     .api-status-code.ok{background:rgba(52,211,153,.12);color:var(--green)}
     .api-status-code.err{background:rgba(248,113,113,.12);color:var(--red)}
-    .api-modal-ftr{display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid var(--border);flex-shrink:0}
-    .api-send-btn{padding:7px 20px;background:linear-gradient(135deg,#2563eb,#1d4ed8);border:none;border-radius:var(--radius-sm);font-size:12px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit;transition:all .15s;box-shadow:0 0 12px rgba(37,99,235,.25)}
-    .api-send-btn:hover{box-shadow:0 0 20px rgba(79,142,247,.4)}
-    .api-send-btn:disabled{background:var(--surface2);box-shadow:none;color:var(--muted);cursor:not-allowed}
-    .api-copy-btn{padding:7px 14px;background:transparent;border:1px solid var(--border2);border-radius:var(--radius-sm);font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;font-family:inherit;transition:all .15s}
-    .api-copy-btn:hover{border-color:var(--blue);color:var(--blue)}
 
     /* ── WS TERMINAL ── */
     .ws-terminal{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;font-family:'JetBrains Mono',monospace;font-size:11.5px;height:200px;overflow-y:auto;line-height:1.7}
@@ -986,22 +1055,22 @@ def root():
 
 </div><!-- /main -->
 
-<!-- ── API TESTER MODAL ── -->
-<div class="api-modal-overlay" id="api-modal" onclick="if(event.target===this)closeApiModal()">
-  <div class="api-modal">
-    <div class="api-modal-hdr">
-      <span class="api-modal-method GET" id="api-m-badge">GET</span>
-      <span class="api-modal-path" id="api-m-path">/health</span>
-      <button class="api-modal-close" onclick="closeApiModal()">&times;</button>
-    </div>
-    <div class="api-modal-body" id="api-m-body">
-      <!-- GET: no body shown; POST: body editor shown; WS: terminal shown -->
-    </div>
-    <div class="api-modal-ftr">
-      <button class="api-send-btn" id="api-send-btn" onclick="sendApiRequest()">&#x25B6; Send</button>
-      <button class="api-copy-btn" id="api-copy-btn" onclick="copyApiResp()">&#x1F4CB; Copy</button>
-      <span id="api-status-wrap" style="margin-left:auto"></span>
-    </div>
+<!-- ── API EXPLORER DRAWER ── -->
+<div class="ep-drawer-backdrop" id="ep-backdrop" onclick="closeApiModal()"></div>
+<div class="ep-drawer" id="ep-drawer">
+  <div class="ep-drawer-hdr">
+    <span class="ep-drawer-method GET" id="ep-method-badge">GET</span>
+    <span class="ep-drawer-path" id="ep-path-label">/health</span>
+    <button class="ep-drawer-close" onclick="closeApiModal()">&times;</button>
+  </div>
+  <div class="ep-drawer-body" id="ep-drawer-body">
+    <!-- populated by openApiModal() -->
+  </div>
+  <div class="ep-drawer-ftr">
+    <button class="ep-exec-btn" id="ep-exec-btn" onclick="sendApiRequest()">&#x25B6; Execute</button>
+    <button class="ep-outline-btn" id="ep-curl-btn" onclick="copyAsCurl()">Copy cURL</button>
+    <button class="ep-outline-btn" id="ep-copy-resp-btn" onclick="copyApiResp()" style="display:none">Copy Response</button>
+    <span id="api-status-wrap" style="margin-left:auto"></span>
   </div>
 </div>
 
@@ -1102,9 +1171,11 @@ function filterEps(q) {
   });
 }
 
-/* ── API TESTER ── */
+/* ── API EXPLORER ── */
 var _apiWs = null;
 var _apiLastResp = '';
+var _apiCurrentMethod = 'GET';
+var _apiCurrentPath = '';
 
 var _EP_DEFAULTS = {
   '/incidents/run':       '{\\n  "incident_id": "INC-001",\\n  "description": "Payment service pods crash-looping",\\n  "severity": "high",\\n  "auto_remediate": false\\n}',
@@ -1122,6 +1193,104 @@ var _EP_DEFAULTS = {
   '/ws':                  '{"id":"evt-1","type":"pod_crash","source":"k8s","payload":{"pod":"payment-api-xyz","namespace":"production"}}',
 };
 
+var _EP_META = {
+  '/health':          { desc:'Basic liveness check — returns status and incident memory count.', auth:'none', params:[] },
+  '/health/full':     { desc:'Full integration health with per-service latency probing.', auth:'none', params:[] },
+  '/health/live':     { desc:'Kubernetes liveness probe — always returns 200 if process is alive.', auth:'none', params:[] },
+  '/health/ready':    { desc:'Kubernetes readiness probe — verifies ChromaDB, modules, and LLM key.', auth:'none', params:[] },
+  '/metrics':         { desc:'Prometheus text-format metrics — hook this into your scrape config.', auth:'none', params:[] },
+  '/chat':            { desc:'Conversational AI with live infrastructure context (AWS, K8s, GitHub).', auth:'viewer', params:[
+    {name:'message',type:'string',required:true,placeholder:'What is the current status of api-gateway?'},
+    {name:'history',type:'array',required:false,default:'[]'},
+    {name:'provider',type:'select',options:['','anthropic','groq','ollama'],required:false}
+  ]},
+  '/warroom/create':  { desc:'Create an AI war room: runs multi-source analysis and posts to Slack.', auth:'developer', params:[
+    {name:'incident_id',type:'string',required:true,placeholder:'INC-2024-001'},
+    {name:'severity',type:'select',options:['critical','high','medium','low'],required:true},
+    {name:'description',type:'string',required:true,placeholder:'Payment service pods crash-looping in prod'},
+    {name:'post_to_slack',type:'boolean',default:false}
+  ]},
+  '/incidents/run':   { desc:'Run the full 7-stage autonomous incident response pipeline.', auth:'developer', params:[
+    {name:'incident_id',type:'string',required:true,placeholder:'INC-2024-001'},
+    {name:'description',type:'string',required:true,placeholder:'Describe the incident'},
+    {name:'severity',type:'select',options:['critical','high','medium','low'],required:true},
+    {name:'auto_remediate',type:'boolean',default:false}
+  ]},
+  '/k8s/pods':        { desc:'List all pods across namespaces with phase and readiness status.', auth:'viewer', params:[] },
+  '/k8s/deployments': { desc:'Deployment readiness — replica counts and rollout status.', auth:'viewer', params:[] },
+  '/k8s/logs':        { desc:'Fetch recent log lines from a pod container.', auth:'viewer', params:[
+    {name:'pod',type:'string',required:true,placeholder:'api-gateway-7d9f-xxx'},
+    {name:'namespace',type:'string',required:false,default:'default'},
+    {name:'lines',type:'number',required:false,default:100}
+  ]},
+  '/aws/cloudwatch/alarms': { desc:'CloudWatch alarms currently in ALARM state.', auth:'viewer', params:[] },
+  '/aws/logs/recent': { desc:'Recent CloudWatch log events from a log group.', auth:'viewer', params:[
+    {name:'group',type:'string',required:false,placeholder:'/aws/lambda/my-function'},
+    {name:'hours',type:'number',required:false,default:1}
+  ]},
+  '/grafana/alerts':  { desc:'Active Grafana alert rules that are firing.', auth:'viewer', params:[] },
+  '/github/prs':      { desc:'Open pull requests across the configured repository.', auth:'viewer', params:[] },
+  '/kb/query':        { desc:'Query the RAG knowledge base for runbook and incident history.', auth:'viewer', params:[
+    {name:'query',type:'string',required:true,placeholder:'How to handle OOMKilled pods?'},
+    {name:'top_k',type:'number',required:false,default:3}
+  ]},
+  '/correlate':       { desc:'AI correlation of multiple events to find causal patterns.', auth:'viewer', params:[
+    {name:'events',type:'array',required:true,placeholder:'["CPU spike at 14:00","deployment at 13:55"]'}
+  ]},
+  '/secrets':         { desc:'Save integration credentials to the server .env file.', auth:'admin', params:[] },
+  '/users':           { desc:'List all platform users and their roles.', auth:'admin', params:[] },
+};
+
+function _getFieldId(name) { return 'ep-field-' + name.replace(/[^a-z0-9]/gi,'-'); }
+
+function _buildFormFields(params) {
+  if (!params || !params.length) return '<div style="font-size:12px;color:var(--muted);padding:4px 0">No parameters required for this endpoint.</div>';
+  return params.map(function(p) {
+    var fid = _getFieldId(p.name);
+    var typeTag = '<span class="ep-field-type">' + p.type + '</span>';
+    var reqTag  = p.required ? '<span class="req">*</span>' : '';
+    var label   = '<div class="ep-field-label">' + p.name + reqTag + typeTag + '</div>';
+    var input   = '';
+    if (p.type === 'select') {
+      input = '<select class="ep-select" id="' + fid + '">' +
+        p.options.map(function(o){ return '<option value="' + o + '">' + (o || '(default)') + '</option>'; }).join('') +
+        '</select>';
+    } else if (p.type === 'boolean') {
+      var checked = p.default ? 'on' : '';
+      input = '<div class="ep-toggle-wrap">' +
+        '<button type="button" class="ep-toggle ' + checked + '" id="' + fid + '" onclick="this.classList.toggle(&apos;on&apos;)" data-val="' + (p.default||false) + '"></button>' +
+        '<span class="ep-toggle-label" id="' + fid + '-lbl">' + (p.default ? 'true' : 'false') + '</span></div>';
+    } else if (p.type === 'array') {
+      input = '<textarea class="ep-textarea" id="' + fid + '" placeholder="' + (p.placeholder||'[]') + '" rows="3">' + (p.default||'') + '</textarea>';
+    } else {
+      var defVal = (p.default !== undefined && p.default !== false) ? String(p.default) : '';
+      input = '<input class="ep-input" id="' + fid + '" type="' + (p.type==='number'?'number':'text') + '" placeholder="' + (p.placeholder||defVal||'') + '" value="' + defVal + '"/>';
+    }
+    return '<div class="ep-field">' + label + input + '</div>';
+  }).join('');
+}
+
+function _collectParams(params) {
+  var obj = {};
+  (params||[]).forEach(function(p) {
+    var fid = _getFieldId(p.name);
+    var el  = document.getElementById(fid);
+    if (!el) return;
+    var val;
+    if (p.type === 'boolean') {
+      val = el.classList.contains('on');
+    } else if (p.type === 'number') {
+      val = el.value.trim() !== '' ? Number(el.value) : (p.default !== undefined ? p.default : null);
+    } else if (p.type === 'array') {
+      try { val = JSON.parse(el.value.trim() || '[]'); } catch(_){ val = el.value.trim(); }
+    } else {
+      val = el.value.trim();
+    }
+    if (val !== '' && val !== null) obj[p.name] = val;
+  });
+  return obj;
+}
+
 function epClick(row) {
   var pathEl = row.querySelector('.ep-path');
   if (!pathEl) return;
@@ -1131,118 +1300,213 @@ function epClick(row) {
 }
 
 function openApiModal(method, pathStr) {
-  var badge = document.getElementById('api-m-badge');
-  var pathEl = document.getElementById('api-m-path');
-  var body  = document.getElementById('api-m-body');
-  var sendBtn = document.getElementById('api-send-btn');
-  var statusWrap = document.getElementById('api-status-wrap');
-  _apiLastResp = '';
-  statusWrap.innerHTML = '';
+  _apiCurrentMethod = method;
+  _apiCurrentPath   = pathStr;
+  _apiLastResp      = '';
 
+  // Header
+  var badge = document.getElementById('ep-method-badge');
   badge.textContent = method;
-  badge.className = 'api-modal-method ' + method;
-  pathEl.textContent = pathStr;
+  badge.className   = 'ep-drawer-method ' + method;
+  document.getElementById('ep-path-label').textContent = pathStr;
 
-  // Build body area
+  // Reset footer state
+  var execBtn = document.getElementById('ep-exec-btn');
+  execBtn.disabled  = false;
+  execBtn.textContent = '\\u25B6 Execute';
+  document.getElementById('ep-copy-resp-btn').style.display = 'none';
+  document.getElementById('api-status-wrap').innerHTML = '';
+
+  var meta   = _EP_META[pathStr] || {};
+  var desc   = meta.desc || '';
+  var auth   = meta.auth || 'viewer';
+  var params = meta.params || [];
+
+  var authClass = 'ep-auth-' + auth;
+  var authLabel = auth === 'none' ? '&#x1F513; Public' : '&#x1F512; ' + auth;
+
+  // Build drawer body
+  var html = '';
+
+  // Overview section
+  html += '<div class="ep-section">';
+  html += '<div class="ep-section-title">Overview</div>';
+  if (desc) html += '<div class="ep-desc-text">' + desc + '</div>';
+  html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+  html += '<span class="badge ' + method + '" style="font-size:10px">' + method + '</span>';
+  html += '<span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--text2)">' + pathStr + '</span>';
+  html += '<span class="ep-auth-badge ' + authClass + '">' + authLabel + '</span>';
+  html += '</div>';
+  html += '</div>';
+
+  // Request section
   if (method === 'WS') {
-    sendBtn.textContent = '\\u26A1 Connect';
-    sendBtn.onclick = function(){ wsConnect(pathStr); };
-    body.innerHTML =
-      '<div class="api-field-label">WebSocket Terminal</div>' +
-      '<div class="ws-terminal" id="ws-term"></div>' +
-      '<div class="ws-input-row">' +
-        '<input class="ws-input" id="ws-msg" placeholder="JSON message to send..." />' +
-        '<button class="ws-send-btn" onclick="wsSend()">Send</button>' +
-      '</div>';
-  } else if (method === 'GET') {
-    sendBtn.textContent = '\\u25B6 Send';
-    sendBtn.onclick = sendApiRequest;
-    // For GET, show optional query params textarea only if path has {params} or endpoint accepts query args
-    var hasPathParam = pathStr.includes('{');
-    var hint = hasPathParam ? 'Replace {param} values in the path below, then send.' : 'No body required for GET. Click Send to call the endpoint.';
-    body.innerHTML =
-      '<div style="font-size:12px;color:var(--muted);line-height:1.6">' + hint + '</div>' +
-      (hasPathParam ?
-        '<div><div class="api-field-label" style="margin-top:10px">Path</div>' +
-        '<input class="api-body-editor" id="api-path-override" style="min-height:0;height:36px;resize:none" value="' + pathStr + '"/></div>'
-        : '') +
-      '<div id="api-resp-wrap" style="display:none"><div class="api-field-label" style="margin-top:2px">Response</div><pre class="api-resp" id="api-resp"></pre></div>';
+    html += '<div class="ep-section" style="flex:1">';
+    html += '<div class="ep-section-title">WebSocket Terminal</div>';
+    html += '<div class="ws-terminal" id="ws-term"></div>';
+    html += '<div class="ws-input-row"><input class="ws-input" id="ws-msg" placeholder="JSON message to send..."/><button class="ws-send-btn" onclick="wsSend()">Send</button></div>';
+    html += '</div>';
+    execBtn.textContent = '\\u26A1 Connect';
+    execBtn.onclick = function(){ wsConnect(pathStr); };
   } else {
-    sendBtn.textContent = '\\u25B6 Send';
-    sendBtn.onclick = sendApiRequest;
-    var defaultBody = _EP_DEFAULTS[pathStr] || '{}';
-    // If default starts with '?' it's a query string, put in path
-    if (defaultBody.startsWith('?')) {
-      body.innerHTML =
-        '<div style="font-size:12px;color:var(--muted)">This endpoint accepts query parameters.</div>' +
-        '<div><div class="api-field-label" style="margin-top:10px">Path + Query</div>' +
-        '<input class="api-body-editor" id="api-path-override" style="min-height:0;height:36px;resize:none" value="' + pathStr + defaultBody + '"/></div>' +
-        '<div id="api-resp-wrap" style="display:none"><div class="api-field-label" style="margin-top:2px">Response</div><pre class="api-resp" id="api-resp"></pre></div>';
+    html += '<div class="ep-section">';
+    html += '<div class="ep-section-title">Request</div>';
+    if (params.length > 0) {
+      html += _buildFormFields(params);
     } else {
-      body.innerHTML =
-        '<div><div class="api-field-label">Request Body (JSON)</div>' +
-        '<textarea class="api-body-editor" id="api-req-body">' + defaultBody + '</textarea></div>' +
-        '<div id="api-resp-wrap" style="display:none"><div class="api-field-label" style="margin-top:2px">Response</div><pre class="api-resp" id="api-resp"></pre></div>';
+      // Fallback: show path-override input for GET with path params, or raw textarea for POST
+      var hasPathParam = pathStr.includes('{');
+      if (hasPathParam) {
+        html += '<div class="ep-field"><div class="ep-field-label">Path</div>';
+        html += '<input class="ep-input" id="api-path-override" value="' + pathStr + '"/></div>';
+      } else if (method !== 'GET') {
+        var defaultBody = _EP_DEFAULTS[pathStr] || '{}';
+        if (defaultBody.startsWith('?')) {
+          html += '<div class="ep-field"><div class="ep-field-label">Path + Query</div>';
+          html += '<input class="ep-input" id="api-path-override" value="' + pathStr + defaultBody + '"/></div>';
+        } else {
+          html += '<div class="ep-field"><div class="ep-field-label">Request Body (JSON)</div>';
+          html += '<textarea class="ep-textarea" id="api-req-body" style="min-height:110px">' + defaultBody + '</textarea></div>';
+        }
+      } else {
+        html += '<div style="font-size:12px;color:var(--muted)">No parameters required — click Execute to call this endpoint.</div>';
+      }
     }
+    html += '</div>';
+    // Response section (hidden until executed)
+    html += '<div class="ep-section ep-resp-wrap" id="ep-resp-wrap">';
+    html += '<div class="ep-section-title">Response</div>';
+    html += '<div class="ep-status-row" id="ep-status-row"></div>';
+    html += '<pre class="ep-resp-pre" id="ep-resp-pre" style="margin-top:8px"></pre>';
+    html += '</div>';
+    execBtn.onclick = sendApiRequest;
   }
 
-  document.getElementById('api-modal').classList.add('open');
+  document.getElementById('ep-drawer-body').innerHTML = html;
+
+  // Wire up boolean toggle labels
+  (params||[]).forEach(function(p) {
+    if (p.type !== 'boolean') return;
+    var btn = document.getElementById(_getFieldId(p.name));
+    if (!btn) return;
+    var lbl = document.getElementById(_getFieldId(p.name) + '-lbl');
+    btn.addEventListener('click', function(){ if(lbl) lbl.textContent = btn.classList.contains('on') ? 'true' : 'false'; });
+  });
+
+  // Open drawer + backdrop
+  document.getElementById('ep-backdrop').classList.add('open');
+  document.getElementById('ep-drawer').classList.add('open');
 }
 
 function closeApiModal() {
-  document.getElementById('api-modal').classList.remove('open');
+  document.getElementById('ep-backdrop').classList.remove('open');
+  document.getElementById('ep-drawer').classList.remove('open');
   if (_apiWs) { try { _apiWs.close(); } catch(e){} _apiWs = null; }
 }
 
 function sendApiRequest() {
-  var pathEl = document.getElementById('api-m-path');
-  var method = document.getElementById('api-m-badge').textContent;
-  var path   = pathEl.textContent.trim();
-  // Override path if user edited it (path params or query string)
+  var method  = _apiCurrentMethod;
+  var path    = _apiCurrentPath;
+
+  // Path override
   var pathOverride = document.getElementById('api-path-override');
   if (pathOverride) path = pathOverride.value.trim();
 
-  var sendBtn = document.getElementById('api-send-btn');
-  sendBtn.disabled = true; sendBtn.textContent = '\\u23F3 Sending...';
+  var execBtn = document.getElementById('ep-exec-btn');
+  execBtn.disabled = true;
+  execBtn.textContent = '\\u23F3 Running...';
 
-  var opts = { method: method, headers: {} };
+  var opts = { method: method, headers: Object.assign({}, authHeaders()) };
+  delete opts.headers['Content-Type']; // set below only if needed
+
+  var meta   = _EP_META[path] || _EP_META[_apiCurrentPath] || {};
+  var params = meta.params || [];
+
   if (method !== 'GET' && method !== 'DELETE') {
-    var bodyEl = document.getElementById('api-req-body');
-    if (bodyEl) {
-      try { JSON.parse(bodyEl.value); opts.body = bodyEl.value; }
-      catch(e) { showApiResp('Invalid JSON: ' + e.message, 'err', null); sendBtn.disabled=false; sendBtn.textContent='\\u25B6 Send'; return; }
-      opts.headers['Content-Type'] = 'application/json';
+    var bodyObj = null;
+    var rawBody = document.getElementById('api-req-body');
+    if (rawBody) {
+      try { bodyObj = JSON.parse(rawBody.value); }
+      catch(e) { _showDrawerResp('Invalid JSON: ' + e.message, 'err', null, 0); execBtn.disabled=false; execBtn.textContent='\\u25B6 Execute'; return; }
+    } else if (params.length > 0) {
+      bodyObj = _collectParams(params);
+    } else {
+      bodyObj = {};
     }
-    var user = document.getElementById('sec-user');
-    if (user && user.value.trim()) opts.headers['X-User'] = user.value.trim();
+    opts.body = JSON.stringify(bodyObj);
+    opts.headers['Content-Type'] = 'application/json';
   }
 
+  var t0 = Date.now();
   fetch(path, opts)
     .then(function(r) {
       var status = r.status;
-      return r.text().then(function(t){ return {status: status, body: t}; });
+      var ms     = Date.now() - t0;
+      return r.text().then(function(t){ return {status: status, body: t, ms: ms}; });
     })
     .then(function(res) {
       var pretty = res.body;
       try { pretty = JSON.stringify(JSON.parse(res.body), null, 2); } catch(e){}
       _apiLastResp = pretty;
-      showApiResp(pretty, res.status >= 200 && res.status < 300 ? 'ok' : 'err', res.status);
+      var cls = res.status >= 200 && res.status < 300 ? 'ok' : 'err';
+      _showDrawerResp(pretty, cls, res.status, res.ms);
     })
-    .catch(function(e) { showApiResp('Network error: ' + e, 'err', null); })
-    .finally(function() { sendBtn.disabled=false; sendBtn.textContent='\\u25B6 Send'; });
+    .catch(function(e) { _showDrawerResp('Network error: ' + e, 'err', null, 0); })
+    .finally(function() { execBtn.disabled=false; execBtn.textContent='\\u25B6 Execute'; });
 }
 
-function showApiResp(text, cls, status) {
-  var wrap = document.getElementById('api-resp-wrap');
-  var el   = document.getElementById('api-resp');
-  var sw   = document.getElementById('api-status-wrap');
-  if (!wrap || !el) return;
-  wrap.style.display = '';
-  el.textContent = text;
-  el.className = 'api-resp ' + cls;
-  if (status !== null) {
-    sw.innerHTML = '<span class="api-status-code ' + cls + '">' + status + '</span>';
+function _showDrawerResp(text, cls, status, ms) {
+  var wrap   = document.getElementById('ep-resp-wrap');
+  var pre    = document.getElementById('ep-resp-pre');
+  var srow   = document.getElementById('ep-status-row');
+  var sw     = document.getElementById('api-status-wrap');
+  var copyBtn = document.getElementById('ep-copy-resp-btn');
+  if (!wrap || !pre) return;
+  wrap.classList.add('visible');
+  pre.textContent = text;
+  pre.className   = 'ep-resp-pre ' + cls;
+  if (srow && status !== null) {
+    var sc = status >= 200 && status < 300 ? '2xx' : status >= 300 && status < 400 ? '3xx' : status >= 500 ? '5xx' : '4xx';
+    srow.innerHTML = '<span class="ep-status-badge ep-status-' + sc + '">' + status + '</span>' +
+      (ms > 0 ? '<span class="ep-timing">' + ms + ' ms</span>' : '');
+    if (sw) sw.innerHTML = '<span class="ep-status-badge ep-status-' + sc + '">' + status + '</span>';
   }
+  if (copyBtn) copyBtn.style.display = '';
+  // Scroll response into view
+  wrap.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function copyAsCurl() {
+  var method  = _apiCurrentMethod;
+  var path    = _apiCurrentPath;
+  var pathOv  = document.getElementById('api-path-override');
+  if (pathOv) path = pathOv.value.trim();
+  var base    = location.origin + path;
+  var headers = authHeaders();
+  var hParts  = Object.keys(headers).filter(function(k){ return k !== 'Content-Type'; }).map(function(k){
+    return "-H '" + k + ': ' + headers[k] + "'";
+  });
+
+  var meta   = _EP_META[path] || _EP_META[_apiCurrentPath] || {};
+  var params = meta.params || [];
+  var body   = '';
+  if (method !== 'GET' && method !== 'DELETE') {
+    var rawBody = document.getElementById('api-req-body');
+    if (rawBody) {
+      body = rawBody.value.trim();
+    } else if (params.length > 0) {
+      body = JSON.stringify(_collectParams(params));
+    }
+  }
+
+  var cmd = "curl -X " + method + " '" + base + "'";
+  hParts.forEach(function(h){ cmd += ' ' + h; });
+  if (body) {
+    cmd += " -H 'Content-Type: application/json'";
+    cmd += " -d " + JSON.stringify(body);
+  }
+  navigator.clipboard.writeText(cmd);
+  toast('cURL command copied', 'ok', 1800);
 }
 
 function copyApiResp() {
@@ -2093,6 +2357,8 @@ document.addEventListener('keydown', function(e) {
     document.getElementById('run-modal').classList.remove('open');
     document.getElementById('gh-drawer').classList.remove('open');
     closeApiModal();
+    var backdrop = document.getElementById('ep-backdrop');
+    if (backdrop && backdrop.classList.contains('open')) closeApiModal();
   }
   if (e.key === 'c' || e.key === 'C') {
     showView('chat','',document.querySelector('.nav-link[onclick*=chat]'));
@@ -2475,6 +2741,106 @@ def health():
     except Exception:
         pass
     return {"status": "ok", "incident_count": incident_count, "version": "2.0.0"}
+
+
+@app.get("/health/live", tags=["health"])
+def health_live():
+    """Liveness probe — returns 200 if the process is alive."""
+    return {"status": "alive"}
+
+
+@app.get("/health/ready", tags=["health"])
+def health_ready():
+    """Readiness probe — checks ChromaDB, required env vars, and module imports."""
+    from fastapi.responses import JSONResponse
+    checks: dict = {}
+    all_ok = True
+
+    # 1. Core module imports
+    try:
+        from app.llm import claude as _claude_mod  # noqa: F401
+        from app.memory import vector_db as _vdb_mod  # noqa: F401
+        checks["modules"] = "ok"
+    except Exception as exc:
+        checks["modules"] = f"error: {exc}"
+        all_ok = False
+
+    # 2. ChromaDB accessible
+    try:
+        from app.memory.vector_db import search_similar_incidents
+        search_similar_incidents("probe", n_results=1)
+        checks["chroma"] = "ok"
+    except Exception as exc:
+        checks["chroma"] = f"error: {exc}"
+        all_ok = False
+
+    # 3. At least one LLM key present
+    import os as _os
+    llm_keys = ["ANTHROPIC_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY"]
+    checks["llm_key"] = "ok" if any(_os.getenv(k) for k in llm_keys) else "missing"
+    if checks["llm_key"] != "ok":
+        all_ok = False
+
+    status = "ready" if all_ok else "not_ready"
+    code = 200 if all_ok else 503
+    return JSONResponse(status_code=code, content={"status": status, "checks": checks})
+
+
+@app.get("/metrics", tags=["observability"])
+def prometheus_metrics(auth: AuthContext = Depends(require_viewer)):
+    """Prometheus text-format metrics endpoint."""
+    from fastapi.responses import PlainTextResponse
+
+    lines: list[str] = []
+
+    # ── nexusops_requests_total ───────────────────────────────
+    lines.append("# HELP nexusops_requests_total Total HTTP requests")
+    lines.append("# TYPE nexusops_requests_total counter")
+    for key, val in _METRICS.items():
+        if key.startswith("nexusops_requests_total"):
+            lines.append(f"{key} {val}")
+
+    # ── nexusops_errors_total ─────────────────────────────────
+    lines.append("# HELP nexusops_errors_total Total HTTP errors (4xx/5xx)")
+    lines.append("# TYPE nexusops_errors_total counter")
+    for key, val in _METRICS.items():
+        if key.startswith("nexusops_errors_total"):
+            lines.append(f"{key} {val}")
+
+    # ── nexusops_incidents_total ──────────────────────────────
+    lines.append("# HELP nexusops_incidents_total Total incidents processed")
+    lines.append("# TYPE nexusops_incidents_total counter")
+    lines.append(f"nexusops_incidents_total {_METRICS.get('nexusops_incidents_total', 0)}")
+
+    # ── nexusops_active_warrooms ──────────────────────────────
+    lines.append("# HELP nexusops_active_warrooms Currently active war rooms")
+    lines.append("# TYPE nexusops_active_warrooms gauge")
+    lines.append(f"nexusops_active_warrooms {_METRICS.get('nexusops_active_warrooms', 0)}")
+
+    # ── nexusops_llm_calls_total ──────────────────────────────
+    lines.append("# HELP nexusops_llm_calls_total Total LLM API calls")
+    lines.append("# TYPE nexusops_llm_calls_total counter")
+    lines.append(f"nexusops_llm_calls_total {_METRICS.get('nexusops_llm_calls_total', 0)}")
+
+    # ── nexusops_request_duration_seconds ────────────────────
+    lines.append("# HELP nexusops_request_duration_seconds Request duration histogram")
+    lines.append("# TYPE nexusops_request_duration_seconds histogram")
+    buckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    for path, durations in _METRICS_HIST.items():
+        if not durations:
+            continue
+        safe_path = path.replace('"', '\\"')
+        total_count = len(durations)
+        total_sum = sum(durations)
+        for b in buckets:
+            count_le = sum(1 for d in durations if d <= b)
+            lines.append(f'nexusops_request_duration_seconds_bucket{{endpoint="{safe_path}",le="{b}"}} {count_le}')
+        lines.append(f'nexusops_request_duration_seconds_bucket{{endpoint="{safe_path}",le="+Inf"}} {total_count}')
+        lines.append(f'nexusops_request_duration_seconds_sum{{endpoint="{safe_path}"}} {total_sum:.6f}')
+        lines.append(f'nexusops_request_duration_seconds_count{{endpoint="{safe_path}"}} {total_count}')
+
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
 
 @app.post("/correlate")
 def correlate(event_list: List[Event]):
@@ -3090,7 +3456,7 @@ class SecretsPayload(BaseModel):
 
 
 @app.get("/secrets/status")
-def secrets_status():
+def secrets_status(auth: AuthContext = Depends(require_viewer)):
     """Return which env vars are configured (boolean only — never exposes values)."""
     status: Dict[str, Dict[str, bool]] = {}
     for group, keys in _SECRET_SCHEMA.items():
@@ -3684,10 +4050,10 @@ def _build_action_reply(action_name: str, user_msg: str, action_result: dict,
 
 
 @app.post("/chat")
-def chat(payload: ChatPayload, x_user: str = Header(default="anonymous")):
+def chat(payload: ChatPayload, auth: AuthContext = Depends(require_viewer)):
     """Conversational DevOps AI with confirmation flow, rate limiting, audit log, and dry-run."""
     try:
-        return _chat_inner(payload, x_user)
+        return _chat_inner(payload, auth.username)
     except HTTPException:
         raise
     except Exception as exc:
@@ -4155,6 +4521,18 @@ def grafana_dashboards():
 @app.websocket("/ws")
 async def websocket_ws(websocket: WebSocket):
     """WebSocket alias for /realtime/events."""
+    # Check auth token from query param
+    token = websocket.query_params.get("token", "")
+    if token:
+        try:
+            from app.core.auth import decode_token
+            payload = decode_token(token)
+            ws_user = payload.get("sub", "anonymous")
+        except Exception:
+            await websocket.close(code=4401, reason="Invalid token")
+            return
+    else:
+        ws_user = "anonymous"
     await websocket.accept()
     try:
         while True:

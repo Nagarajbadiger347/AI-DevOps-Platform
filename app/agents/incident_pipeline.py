@@ -236,10 +236,11 @@ def _execute_actions(incident_id: str, actions: list, synthesis: dict,
 
             results.append({"type": action_type, "reason": reason, "result": res})
         except Exception as exc:
+            print(f"[ERROR] action={action_type}: {traceback.format_exc()}")
             results.append({
                 "type":   action_type,
                 "reason": reason,
-                "result": {"success": False, "error": str(exc), "trace": traceback.format_exc()},
+                "result": {"success": False, "error": str(exc)},
             })
 
     return results

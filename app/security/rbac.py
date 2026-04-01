@@ -60,8 +60,8 @@ _save_to_file(_config_path)
 
 
 def assign_role(user: str, role: str) -> dict:
-    user = user.strip().lower()   
     """Assign a role to a user at runtime (persisted to disk)."""
+    user = user.strip().lower()
     if role not in ROLE_PERMISSIONS:
         return {"success": False, "reason": f"Unknown role '{role}'. Valid roles: {list(ROLE_PERMISSIONS)}"}
     _user_roles[user] = role

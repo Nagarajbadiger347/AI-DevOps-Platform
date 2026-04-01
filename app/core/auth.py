@@ -26,10 +26,15 @@ try:
 except ImportError:
     _JOSE_AVAILABLE = False
 
-SECRET_KEY   = os.getenv("JWT_SECRET_KEY", "change-me-in-production-use-openssl-rand-hex-32")
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-me-in-production-use-openssl-rand-hex-32")
+if os.getenv("ENVIRONMENT", "development").lower() == "production" and SECRET_KEY == "change-me-in-production-use-openssl-rand-hex-32":
+    raise RuntimeError("JWT_SECRET_KEY must be set in production. Run: openssl rand -hex 32")
 ALGORITHM    = os.getenv("JWT_ALGORITHM", "HS256")
 EXPIRE_MINS  = int(os.getenv("JWT_EXPIRE_MINS", "480"))
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").lower() != "false"
+if not AUTH_ENABLED:
+    import warnings
+    warnings.warn("AUTH_ENABLED=false — authentication is disabled. Set AUTH_ENABLED=true in production.", stacklevel=1)
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -37,10 +42,12 @@ _bearer = HTTPBearer(auto_error=False)
 def create_token(username: str, role: str) -> str:
     """Create a signed JWT for the given user."""
     if not _JOSE_AVAILABLE:
-        # Fallback: return opaque token (base64 of username:role:expiry)
-        import base64
-        payload = f"{username}:{role}:{int(time.time()) + EXPIRE_MINS * 60}"
-        return base64.b64encode(payload.encode()).decode()
+        # Secure fallback using HMAC-SHA256 when jose is unavailable
+        import base64, hmac, hashlib
+        exp = int(time.time()) + EXPIRE_MINS * 60
+        payload = f"{username}:{role}:{exp}"
+        sig = hmac.new(SECRET_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
+        return base64.b64encode(f"{payload}:{sig}".encode()).decode()
 
     payload = {
         "sub": username,
@@ -54,13 +61,22 @@ def create_token(username: str, role: str) -> str:
 def decode_token(token: str) -> dict:
     """Decode and validate a JWT. Returns payload dict or raises HTTPException."""
     if not _JOSE_AVAILABLE:
-        # Fallback decode
-        import base64
+        import base64, hmac, hashlib
         try:
-            parts = base64.b64decode(token.encode()).decode().split(":")
-            if len(parts) != 3 or int(parts[2]) < time.time():
-                raise HTTPException(status_code=401, detail="Token expired or invalid")
-            return {"sub": parts[0], "role": parts[1]}
+            decoded = base64.b64decode(token.encode()).decode()
+            parts = decoded.split(":")
+            if len(parts) != 4:
+                raise HTTPException(status_code=401, detail="Invalid token")
+            username, role, exp_str, sig = parts
+            if int(exp_str) < time.time():
+                raise HTTPException(status_code=401, detail="Token has expired")
+            expected_payload = f"{username}:{role}:{exp_str}"
+            expected_sig = hmac.new(SECRET_KEY.encode(), expected_payload.encode(), hashlib.sha256).hexdigest()[:16]
+            if not hmac.compare_digest(sig, expected_sig):
+                raise HTTPException(status_code=401, detail="Invalid token signature")
+            return {"sub": username, "role": role}
+        except HTTPException:
+            raise
         except Exception:
             raise HTTPException(status_code=401, detail="Invalid token")
 

@@ -34,5 +34,23 @@
     "email": "nagarajbadiger347@gmail.com",
     "otp": "404479",
     "expires_at": "2026-04-01T12:12:23.741335"
+  },
+  "Ml-kE0VZCbv5zbLhfatlkyAqkefa5ReWnhxr7BCH8rY": {
+    "username": "testuser99",
+    "email": "test@example.com",
+    "otp": "836780",
+    "expires_at": "2026-04-02T05:23:10.167836"
+  },
+  "UrSu55tEmu66xd30hTSAYXOGq6GIu1QrrbQdS1brQyE": {
+    "username": "testuser99",
+    "email": "test@example.com",
+    "otp": "569572",
+    "expires_at": "2026-04-02T05:23:22.652932"
+  },
+  "XlsEpA4wYotliJ81WBlQC580CbRGHhEDpddCbfFgloM": {
+    "username": "smoketest_del",
+    "email": "test@test.com",
+    "otp": "368959",
+    "expires_at": "2026-04-02T05:29:49.138061"
   }
 }
