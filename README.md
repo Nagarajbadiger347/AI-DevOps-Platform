@@ -2,7 +2,7 @@
 
 Autonomous DevOps management powered by a **multi-agent AI system** — built by **Nagaraj**.
 
-One platform to detect incidents, analyse root cause, plan and safely execute remediation, assess deployments, and close the loop back to Jira and GitHub — automatically.
+One platform to detect incidents, analyse root cause, plan and safely execute remediation, assess deployments, run interactive Slack war rooms, and close the loop back to Jira and GitHub — automatically.
 
 ---
 
@@ -13,14 +13,16 @@ One platform to detect incidents, analyse root cause, plan and safely execute re
 | 🤖 **Multi-Agent Incident Pipeline** | LangGraph-orchestrated agents collect context, plan remediation, score risk, execute safely (with policy guardrails), validate outcome, and store to memory |
 | 🔍 **Pre-deployment Assessment** | Before any deploy, Claude assesses cluster state, active alarms, and past incidents → go / no-go decision with checklist |
 | 🎫 **Jira → Auto PR** | When a Jira change-request ticket is created, Claude interprets it and opens a GitHub PR with file patches |
-| ☁️ **AWS Observability** | Read-only collection across EC2, ECS, Lambda, RDS, ALB, CloudWatch Logs/Metrics/Alarms, CloudTrail |
-| ☸️ **Kubernetes Operations** | Health checks + rolling restarts + scale deployments + fetch pod logs |
+| ☁️ **AWS Observability** | Read-only collection across EC2, ECS, Lambda, RDS, ALB, CloudWatch Logs/Metrics/Alarms, CloudTrail, S3, SQS, DynamoDB, Route53, SNS |
+| ☸️ **Kubernetes Operations** | Health checks + rolling restarts + scale deployments + fetch pod logs + unhealthy pod detection |
 | 📈 **Predictive Scaling** | Analyse CloudWatch metric trends and predict if scaling is needed before a breach occurs |
 | 🔎 **AI PR Review** | Claude reviews GitHub PRs for security issues, infra concerns, and code quality |
-| 🔐 **RBAC + Policy Engine** | Role-based access control + declarative policy guardrails enforced before every action |
+| 🔐 **JWT Auth + RBAC** | JWT-based authentication with role-based access control (admin / developer / viewer) enforced on every endpoint |
 | 🧠 **ChromaDB Memory** | All incidents stored in vector DB; similar past incidents feed into future planning decisions |
 | 🔁 **Continuous Monitoring** | Background loop polls K8s/AWS for anomalies and auto-triggers the pipeline |
 | 🔀 **Multi-LLM Support** | Claude (primary) → OpenAI (fallback) → Groq/Llama → Ollama (local) — automatic fallback chain |
+| 💬 **Slack War Room Bot** | Dedicated incident channel auto-created with full AI analysis; bot answers live questions (PRs, logs, K8s state, AWS alarms) in thread |
+| 🌐 **Nginx + TLS** | Production-grade reverse proxy with rate limiting, HTTPS redirect, security headers, WebSocket support |
 
 ---
 
@@ -53,6 +55,18 @@ One platform to detect incidents, analyse root cause, plan and safely execute re
                          │                 ▼                       │
                          │           MemoryAgent (ChromaDB)        │
                          └─────────────────────────────────────────┘
+
+  Browser / API Client
+        │
+        ▼
+  Nginx (TLS + Rate Limiting)
+        │
+        ▼
+  FastAPI App (4 uvicorn workers)
+        │
+        ├── JWT Auth middleware (Bearer token / X-User dev mode)
+        ├── Redis (rate limiting + response cache)
+        └── ChromaDB (incident memory)
 ```
 
 ### Core design principles
@@ -73,7 +87,7 @@ One platform to detect incidents, analyse root cause, plan and safely execute re
 ```
 app/
 ├── orchestrator/
-│   ├── main.py           # FastAPI server — all REST & WebSocket endpoints (v1 + v2)
+│   ├── main.py           # FastAPI server — all REST & WebSocket endpoints
 │   ├── graph.py          # LangGraph StateGraph definition
 │   ├── state.py          # PipelineState TypedDict — shared across all nodes
 │   └── runner.py         # run_pipeline() — public entry point
@@ -86,11 +100,11 @@ app/
 │   ├── infra/k8s_agent.py         # K8s context collector (read-only)
 │   ├── scm/github_agent.py        # GitHub commits/PRs collector
 │   ├── memory/agent.py            # ChromaDB read (retrieve) + write (store)
-│   └── incident_pipeline.py       # v1 pipeline (kept for backwards compatibility)
+│   └── incident_pipeline.py       # v1 pipeline (backwards-compatible)
 │
 ├── llm/
 │   ├── base.py           # BaseLLM ABC + LLMResponse dataclass
-│   ├── claude.py         # ClaudeProvider + all existing AI functions
+│   ├── claude.py         # ClaudeProvider + all AI analysis functions
 │   ├── openai.py         # OpenAIProvider (GPT-4o fallback)
 │   └── factory.py        # LLMFactory — automatic provider selection + fallback
 │
@@ -106,18 +120,26 @@ app/
 ├── monitoring/
 │   └── loop.py            # Background anomaly detection loop
 │
-├── integrations/          # External service connectors (unchanged)
-│   ├── aws_ops.py         # AWS observability + predictive scaling metrics
-│   ├── github.py          # Commits, PRs, diffs, PR review, incident PRs
-│   ├── jira.py            # Jira incident creation, comments, issue fetch
-│   ├── slack.py           # Slack war-room automation
-│   ├── opsgenie.py        # OpsGenie on-call notification
-│   ├── k8s_ops.py         # K8s restart / scale / logs
-│   ├── gitlab_ops.py      # GitLab pipelines/deployments
-│   ├── grafana.py         # Grafana alert queries
+├── core/
+│   ├── auth.py            # JWT authentication + require_admin/developer/viewer deps
+│   ├── config.py          # Centralised pydantic-settings configuration
+│   ├── ratelimit.py       # Rate limiter (Redis-backed with in-memory fallback)
+│   ├── audit.py           # Audit log for all mutating actions
+│   └── logging.py         # Structured JSON logger + correlation IDs
+│
+├── integrations/
+│   ├── aws_ops.py              # AWS observability + operations
+│   ├── github.py               # Commits, PRs, diffs, reviews, incident PRs
+│   ├── jira.py                 # Jira incident creation, comments, issue fetch
+│   ├── slack.py                # Slack messaging, war room channels, rich Block Kit summaries
+│   ├── slack_bot.py            # War room bot — answers questions in Slack threads
+│   ├── opsgenie.py             # OpsGenie on-call notification
+│   ├── k8s_ops.py              # K8s restart / scale / logs / node ops
+│   ├── grafana.py              # Grafana alerts, annotations, datasources
+│   ├── gitlab_ops.py           # GitLab pipelines/deployments
 │   └── universal_collector.py  # Multi-integration parallel aggregator
 │
-├── plugins/               # Local health checkers (unchanged)
+├── plugins/
 │   ├── aws_checker.py
 │   ├── k8s_checker.py
 │   └── linux_checker.py
@@ -128,19 +150,16 @@ app/
 ├── security/
 │   └── rbac.py            # Role-based access control with file persistence
 │
-├── core/
-│   ├── config.py          # Centralised pydantic-settings configuration
-│   └── logging.py         # Structured JSON logger + correlation IDs
-│
 └── correlation/
     └── engine.py          # Event correlation logic
 
-tests/test_main.py         # 68 pytest tests
-test_websocket.py          # Manual WebSocket test
+nginx/
+└── nginx.conf             # Reverse proxy: TLS, rate limiting, security headers
+
+Dockerfile                 # Multi-stage build — builder + production (non-root user)
+docker-compose.yml         # App + Nginx + Redis with health checks and resource limits
+tests/test_main.py
 requirements.txt
-Dockerfile                 # Python 3.11-slim
-docker-compose.yml
-.env.example
 ```
 
 ---
@@ -150,9 +169,9 @@ docker-compose.yml
 ### Requirements
 
 - Python 3.9+ (3.11 recommended)
-- Docker & Docker Compose (optional)
+- Docker & Docker Compose
 
-### Local
+### Local development
 
 ```bash
 python3 -m venv .venv
@@ -162,18 +181,84 @@ cp .env.example .env          # fill in credentials
 uvicorn app.orchestrator.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### Docker
+Open: http://127.0.0.1:8000
+
+### Production (Docker)
 
 ```bash
-cp .env.example .env
-docker compose up --build
+cp .env.example .env          # fill in all credentials + set AUTH_ENABLED=true + JWT_SECRET_KEY
+docker compose up --build -d
 ```
 
-Open: http://127.0.0.1:8000
+The stack starts three services:
+- **nginx** — TLS termination, rate limiting, security headers on port 443 (HTTP redirects to HTTPS)
+- **app** — FastAPI with 4 uvicorn workers, resource limits (2 CPU / 2 GB RAM)
+- **redis** — Rate limiting + response cache, 256 MB LRU eviction
+
+> **TLS certs:** Place `server.crt` and `server.key` in `nginx/certs/`. For production use Let's Encrypt or ACM. For local testing: `openssl req -x509 -newkey rsa:4096 -keyout nginx/certs/server.key -out nginx/certs/server.crt -days 365 -nodes -subj "/CN=localhost"`
+
+---
+
+## Authentication
+
+The platform uses JWT-based authentication.
+
+### Get a token
+
+```bash
+curl -X POST http://localhost:8000/auth/token \
+  -d "username=nagaraj&password=your-password"
+# → {"access_token": "eyJ...", "token_type": "bearer"}
+```
+
+### Use the token
+
+```bash
+curl http://localhost:8000/aws/ec2/instances \
+  -H "Authorization: Bearer eyJ..."
+```
+
+### Dev mode (no token required)
+
+Set `AUTH_ENABLED=false` in `.env`. The platform trusts the `X-User` header and defaults to the `developer` role for unknown users.
+
+```bash
+curl http://localhost:8000/aws/ec2/instances -H "X-User: nagaraj"
+```
+
+### Roles
+
+| Role | Permissions | Default user |
+|---|---|---|
+| `admin` | All permissions — deploy, manage users, manage secrets | `nagaraj` |
+| `developer` | deploy, read, write | Any unregistered user (dev mode) |
+| `viewer` | read only | — |
+
+Assign roles via API:
+```bash
+curl -X POST http://localhost:8000/security/roles/assign \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"user": "alice", "role": "developer"}'
+```
+
+Persist roles via file — set `RBAC_CONFIG_PATH=/path/to/roles.json`:
+```json
+{"alice": "developer", "bob": "viewer", "charlie": "admin"}
+```
 
 ---
 
 ## Environment Variables
+
+### Auth
+
+| Variable | Default | Description |
+|---|---|---|
+| `AUTH_ENABLED` | `true` | Set `false` to use dev mode (X-User header, no JWT) |
+| `JWT_SECRET_KEY` | `change-me-...` | Random 32-byte hex: `openssl rand -hex 32` |
+| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
+| `JWT_EXPIRE_MINS` | `480` | Token lifetime in minutes (8 hours) |
 
 ### LLM Providers
 
@@ -204,20 +289,26 @@ Open: http://127.0.0.1:8000
 
 | Variable | Required for | Description |
 |---|---|---|
-| `GITHUB_TOKEN` | GitHub features | Personal access token |
+| `GITHUB_TOKEN` | GitHub features | Personal access token (repo + PR scope) |
 | `GITHUB_REPO` | GitHub features | `owner/repo` format |
-| `SLACK_BOT_TOKEN` | Slack | Bot token |
-| `SLACK_CHANNEL` | Slack | Default channel (default: `#incidents`) |
+| `GITHUB_WEBHOOK_SECRET` | GitHub webhooks | HMAC secret for signature verification |
+| `SLACK_BOT_TOKEN` | Slack | Bot token (`xoxb-...`) — channels:write, chat:write |
+| `SLACK_CHANNEL` | Slack | Default channel (default: `#general`) |
+| `SLACK_SIGNING_SECRET` | Slack war room bot | From Slack app → Basic Information |
+| `SLACK_BOT_USER_ID` | Slack war room bot | Bot's Slack user ID (prevents self-replies) |
 | `JIRA_URL` | Jira | e.g. `https://yourorg.atlassian.net` |
 | `JIRA_USER` | Jira | User email |
 | `JIRA_TOKEN` | Jira | API token |
 | `JIRA_PROJECT` | Jira | Project key |
 | `OPSGENIE_API_KEY` | OpsGenie | API key |
+| `GRAFANA_URL` | Grafana | e.g. `http://grafana:3000` |
+| `GRAFANA_TOKEN` | Grafana | Service account token |
 | `AWS_REGION` | AWS | Region (default: `us-east-1`) |
 | `AWS_ACCESS_KEY_ID` | AWS | Access key (or use IAM role) |
 | `AWS_SECRET_ACCESS_KEY` | AWS | Secret key (or use IAM role) |
 | `K8S_IN_CLUSTER` | K8s (in-pod) | Set `true` when running inside a pod |
 | `KUBECONFIG` | K8s (local) | Path to kubeconfig (default: `~/.kube/config`) |
+| `REDIS_URL` | Rate limiting | Redis connection URL (default: `redis://localhost:6379/0`) |
 | `RBAC_CONFIG_PATH` | Optional | Path to JSON file with user→role mappings |
 | `CORS_ORIGINS` | Optional | Comma-separated allowed CORS origins |
 
@@ -225,162 +316,235 @@ All integrations degrade gracefully — missing credentials return a structured 
 
 ---
 
+## Slack War Room Bot
+
+When a war room is created (`POST /warroom/create`), the platform:
+
+1. Creates a dedicated `#inc-<incident-id>` Slack channel
+2. Posts a rich summary with: severity, AI confidence score, root cause, findings, infrastructure snapshot (firing alarms, unhealthy pods, last commit), PR links, and action plan
+3. Activates a **bot that answers questions from engineers in the thread**
+
+### Bot capabilities
+
+Ask anything in the channel and the bot replies in the thread:
+
+| Question | What it does |
+|---|---|
+| "which PR raised this?" | Fetches recent GitHub PRs and commits with direct links |
+| "check last 30 min grafana alerts" | Queries firing Grafana alerts and annotations |
+| "why are pods crashing?" | Shows unhealthy pods + deployment replica status |
+| "any AWS alarms firing?" | Lists CloudWatch alarms in ALARM state + unhealthy EC2 |
+| "what should we do next?" | AI synthesises current state into actionable next steps |
+
+### Enabling the bot
+
+1. Add to `.env`:
+   ```env
+   SLACK_SIGNING_SECRET=your-slack-signing-secret
+   SLACK_BOT_USER_ID=U0XXXXXXXXX
+   ```
+
+2. In Slack app settings:
+   - **Event Subscriptions** → Request URL: `https://your-domain/webhooks/slack`
+   - Subscribe to bot events: `message.channels`, `message.groups`, `app_mention`
+   - **OAuth Scopes**: `channels:read`, `channels:write`, `chat:write`, `groups:write`, `groups:read`
+
+---
+
 ## API Reference
+
+### Authentication
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/auth/token` | Get JWT — form body: `username` + `password` |
+| `GET` | `/auth/me` | Current user identity and role |
 
 ### General
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/` | Dashboard UI |
-| `GET` | `/health` | Health status |
-| `GET` | `/docs` | Swagger UI |
-| `GET` | `/redoc` | ReDoc reference |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/` | None | Dashboard UI |
+| `GET` | `/health` | None | Health status |
+| `GET` | `/health/full` | None | Full integration health check |
+| `GET` | `/health/integrations` | viewer | Which integrations are configured |
+| `GET` | `/docs` | None | Swagger UI |
+
+### Chat
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/chat` | None | Conversational DevOps AI with action confirmation flow |
+| `GET` | `/chat/action_count` | viewer | Number of actions executed this session |
 
 ### Incident Pipelines
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/incident/run` | **v1** — monolithic pipeline (original, backwards-compatible) |
-| `POST` | `/v2/incident/run` | **v2** — LangGraph multi-agent pipeline with policy engine |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/incident/run` | developer | v1 monolithic pipeline (backwards-compatible) |
+| `POST` | `/incidents/run` | developer | Alias for `/incident/run` |
+| `POST` | `/incidents/run/async` | developer | Fire-and-forget — returns job ID immediately |
+| `POST` | `/v2/incident/run` | developer | v2 LangGraph multi-agent pipeline with policy engine |
 
-Both accept the same core fields. v2 adds `user`, `role`, `aws_cfg`, `k8s_cfg`, `slack_channel`.
-
-> ⚠️ Requires `X-User` header with `deploy` permission when `auto_remediate: true`.
-
-**v2 request body:**
-
+**Request body (both versions):**
 ```json
 {
   "incident_id":    "INC-001",
   "description":   "API pods crash-looping in prod",
+  "severity":      "critical",
   "auto_remediate": false,
-  "user":           "alice",
-  "role":           "developer",
-  "aws_cfg":        {"resource_type": "ecs", "resource_id": "prod-cluster", "log_group": "/ecs/api"},
-  "k8s_cfg":        {"namespace": "production"},
-  "hours":          2,
-  "slack_channel":  "#incidents"
+  "aws":           {"resource_type": "ecs", "resource_id": "prod-cluster"},
+  "k8s":           {"namespace": "production"},
+  "hours":          2
 }
 ```
 
-**v2 response includes:**
-- `plan` — structured JSON plan from PlannerAgent (`actions`, `confidence`, `risk`, `root_cause`)
-- `executed_actions` — each action's result
-- `blocked_actions` — actions blocked by policy (with reason)
-- `validation_passed` — post-execution health check result
-- `risk_score` — numeric risk score
-- `requires_human_approval` — whether approval gate was triggered
-- `status` — `completed` \| `escalated` \| `awaiting_approval` \| `failed`
-- `correlation_id` — for request tracing
+### War Room
 
-### AI & Correlation
-
-| Method | Path | Body | Description |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/correlate` | `[{id, type, source, payload}]` | Correlate events, find patterns |
-| `POST` | `/llm/analyze` | `{incident_id, details}` | Claude root cause analysis |
+| `POST` | `/warroom/create` | developer | Create Slack war room with full AI analysis + activate bot |
 
-### Infrastructure Checks
+**Request body:**
+```json
+{
+  "incident_id":   "INC-001",
+  "description":   "API latency spike in production",
+  "severity":      "high",
+  "post_to_slack": true
+}
+```
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/check/aws` | AWS EC2 / CloudWatch health |
-| `GET` | `/check/linux` | Linux node health |
+**What gets posted to Slack:** severity badge, AI confidence %, root cause, findings list, infrastructure snapshot (firing alarms, unhealthy pods, last commit), PR links, full action plan.
 
 ### Kubernetes
 
-> ⚠️ `/k8s/restart` and `/k8s/scale` require `X-User` with `deploy` permission.
-
-| Method | Path | Params / Body | Description |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/check/k8s` | — | Cluster summary |
-| `GET` | `/check/k8s/nodes` | — | Per-node ready status |
-| `GET` | `/check/k8s/pods` | `namespace` | Pod status |
-| `GET` | `/check/k8s/deployments` | `namespace` | Deployment rollout status |
-| `POST` | `/k8s/restart` | `{namespace, deployment}` | Rolling restart |
-| `POST` | `/k8s/scale` | `{namespace, deployment, replicas}` | Scale replicas |
-| `GET` | `/k8s/logs` | `namespace, pod, container, tail_lines` | Fetch pod logs |
+| `GET` | `/k8s/health` | viewer | Cluster summary |
+| `GET` | `/k8s/nodes` | viewer | Per-node ready status |
+| `GET` | `/k8s/pods` | viewer | Pod status (`?namespace=`) |
+| `GET` | `/k8s/deployments` | viewer | Deployment rollout status |
+| `POST` | `/k8s/diagnose` | developer | AI-powered K8s diagnosis |
+| `POST` | `/k8s/restart` | developer | Rolling restart |
+| `POST` | `/k8s/scale` | developer | Scale replicas |
+| `GET` | `/k8s/logs` | viewer | Fetch pod logs |
 
-### AWS Observability
+### AWS Observability (all read-only)
 
-All AWS endpoints are **read-only**.
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/aws/ec2/instances` | List EC2 instances |
-| `GET` | `/aws/ec2/status` | EC2 status checks |
-| `GET` | `/aws/ec2/console` | Serial console output |
-| `GET` | `/aws/logs/groups` | List CloudWatch log groups |
-| `GET` | `/aws/logs/recent` | Recent log events |
-| `GET` | `/aws/logs/search` | Search logs by pattern |
-| `GET` | `/aws/cloudwatch/alarms` | CloudWatch alarms |
-| `POST` | `/aws/cloudwatch/metrics` | Fetch metric series |
-| `GET` | `/aws/ecs/services` | ECS service counts |
-| `GET` | `/aws/ecs/stopped-tasks` | Stopped ECS task reasons |
-| `GET` | `/aws/lambda/functions` | List Lambda functions |
-| `GET` | `/aws/lambda/errors` | Lambda error metrics |
-| `GET` | `/aws/rds/instances` | RDS instance list |
-| `GET` | `/aws/rds/events` | RDS events |
-| `GET` | `/aws/elb/target-health` | ALB target health |
-| `GET` | `/aws/cloudtrail/events` | Recent CloudTrail API events |
-| `GET` | `/aws/s3/buckets` | S3 bucket list |
-| `GET` | `/aws/sqs/queues` | SQS queue list |
-| `GET` | `/aws/dynamodb/tables` | DynamoDB table list |
-| `GET` | `/aws/route53/healthchecks` | Route53 health checks |
-| `GET` | `/aws/sns/topics` | SNS topic list |
-| `POST` | `/aws/diagnose` | AI root cause analysis from live AWS data |
-| `POST` | `/aws/predict-scaling` | Predict if scaling needed from metric trends |
-
-### Incident Management
-
-| Method | Path | Body | Description |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/incident/war-room` | `{topic}` | Create Slack war room |
-| `POST` | `/incident/jira` | `{summary, description}` | Create Jira incident |
-| `POST` | `/incident/opsgenie` | `{message}` | Notify OpsGenie on-call |
-| `POST` | `/incident/github/issue` | `{title, body}` | Create GitHub issue |
-| `POST` | `/incident/github/pr` | `{head, base, title, body}` | Create GitHub PR |
+| `GET` | `/check/aws` | viewer | AWS health summary |
+| `GET` | `/aws/ec2/instances` | viewer | List EC2 instances |
+| `GET` | `/aws/ec2/status` | viewer | EC2 status checks |
+| `GET` | `/aws/ec2/console` | viewer | Serial console output |
+| `GET` | `/aws/logs/groups` | viewer | List CloudWatch log groups |
+| `GET` | `/aws/logs/recent` | viewer | Recent log events |
+| `GET` | `/aws/logs/search` | viewer | Search logs by pattern |
+| `GET` | `/aws/cloudwatch/alarms` | viewer | CloudWatch alarms |
+| `GET` | `/aws/cloudwatch/logs` | viewer | Recent logs (simplified) |
+| `POST` | `/aws/cloudwatch/metrics` | viewer | Fetch metric series |
+| `GET` | `/aws/ecs/services` | viewer | ECS service counts |
+| `GET` | `/aws/ecs/stopped-tasks` | viewer | Stopped ECS task reasons |
+| `GET` | `/aws/lambda/functions` | viewer | List Lambda functions |
+| `GET` | `/aws/lambda/errors` | viewer | Lambda error metrics |
+| `GET` | `/aws/rds/instances` | viewer | RDS instance list |
+| `GET` | `/aws/rds/events` | viewer | RDS events |
+| `GET` | `/aws/elb/target-health` | viewer | ALB target health |
+| `GET` | `/aws/cloudtrail/events` | viewer | Recent CloudTrail API events |
+| `GET` | `/aws/s3/buckets` | viewer | S3 bucket list |
+| `GET` | `/aws/sqs/queues` | viewer | SQS queue list |
+| `GET` | `/aws/dynamodb/tables` | viewer | DynamoDB table list |
+| `GET` | `/aws/route53/healthchecks` | viewer | Route53 health checks |
+| `GET` | `/aws/sns/topics` | viewer | SNS topic list |
+| `GET` | `/aws/context` | viewer | Full AWS observability snapshot |
+| `GET` | `/aws/cost/summary` | viewer | Resource inventory cost summary |
+| `POST` | `/aws/diagnose` | developer | AI root cause from live AWS data |
+| `POST` | `/aws/predict-scaling` | viewer | Predict if scaling needed |
+| `POST` | `/aws/synthesize` | developer | AI synthesis of full AWS state |
+| `POST` | `/aws/assess-deployment` | developer | Pre-deploy assessment alias |
+
+### GitHub
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/github/repos` | viewer | List repositories |
+| `GET` | `/github/profile` | viewer | Account summary — repos, stars, languages |
+| `GET` | `/github/commits` | viewer | Recent commits (`?hours=24&repo=`) |
+| `GET` | `/github/prs` | viewer | Recent merged PRs (`?hours=48&repo=`) |
+| `GET` | `/github/pr/{pr_number}/review` | developer | AI review of a specific PR |
+| `POST` | `/github/issue` | developer | Create a GitHub issue |
+| `POST` | `/github/review-pr` | developer | AI code review with optional PR comment |
+
+### Grafana
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/grafana/alerts` | viewer | Firing Grafana alerts |
+| `GET` | `/grafana/dashboards` | viewer | Grafana datasources |
 
 ### Deployment & Code Review
 
-| Method | Path | Body | Description |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/deploy/assess` | `{deployment, namespace, new_image, description}` | Pre-deploy go/no-go assessment |
-| `POST` | `/github/review-pr` | `{pr_number, post_comment}` | AI code review of a GitHub PR |
+| `POST` | `/deploy/assess` | developer | Pre-deploy go/no-go assessment |
+| `POST` | `/deploy/jira-to-pr` | developer | Convert Jira issue to GitHub PR |
+
+### Incident Management
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/incident/war-room` | developer | Basic Slack war room announcement |
+| `POST` | `/incident/jira` | developer | Create Jira incident |
+| `POST` | `/incident/opsgenie` | developer | Notify OpsGenie on-call |
+| `POST` | `/incident/github/issue` | developer | Create GitHub issue |
+| `POST` | `/incident/github/pr` | developer | Create GitHub PR |
+| `POST` | `/jira/incident` | developer | Create Jira incident (alias) |
+
+### Secrets & Configuration
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/secrets/status` | admin | Which env vars are configured (boolean only, no values) |
+| `POST` | `/secrets` | admin | Write secrets to `.env` file |
 
 ### Security / RBAC
 
-| Method | Path | Body | Description |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/security/check` | `{user, action}` | Check if user can perform action |
-| `POST` | `/security/roles` | `{user, role}` | Assign role to user |
-| `DELETE` | `/security/roles/{user}` | — | Revoke user role |
-| `GET` | `/security/roles` | — | List all user roles |
-
-**Roles:** `admin` · `developer` · `viewer`
-
-| Role | Permissions |
-|---|---|
-| `admin` | deploy, rollback, read, write, delete, manage_users, manage_secrets |
-| `developer` | deploy, read, write |
-| `viewer` | read |
+| `POST` | `/security/check` | viewer | Check if user can perform action |
+| `POST` | `/security/roles` | developer | Assign role (legacy endpoint) |
+| `DELETE` | `/security/roles/{user}` | admin | Revoke user role |
+| `GET` | `/security/roles` | admin | List all user roles and permissions |
+| `POST` | `/security/roles/assign` | admin | Assign role to user |
 
 ### Memory
 
-| Method | Path | Body | Description |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/memory/incidents` | `{id, type, source, payload}` | Store incident in ChromaDB |
-| `GET` | `/memory/incidents` | `query, n` | Search similar past incidents |
+| `POST` | `/memory/incidents` | developer | Store incident in ChromaDB |
+| `GET` | `/memory/incidents` | viewer | Search similar past incidents |
 
-### Jira Webhook
+### Audit & Rate Limiting
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/audit/log` | viewer | Recent audit log entries |
+| `GET` | `/rate-limit/status` | viewer | Current rate limit usage |
+
+### Webhooks (no auth — verified by signature)
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/jira/webhook` | Receives Jira issue-created events → auto-creates GitHub PR |
+| `POST` | `/webhooks/github` | GitHub push/PR events → auto-trigger pipeline |
+| `POST` | `/webhooks/slack` | Slack Events API — war room bot messages |
+| `POST` | `/webhooks/pagerduty` | PagerDuty incident trigger → auto-pipeline |
+| `POST` | `/jira/webhook` | Jira issue-created → auto-create GitHub PR |
 
 ### WebSocket
 
 ```
+WS /ws
 WS /realtime/events
 ```
 
@@ -415,6 +579,14 @@ Input → collect_context → PlannerAgent → DecisionAgent
 | **5. Validate** | `Validator` | Re-checks K8s health; triggers retry (up to 3×) or escalates |
 | **6. Memory** | `MemoryAgent` | Stores outcome + actions to ChromaDB |
 
+**v2 response includes:**
+- `plan` — structured JSON plan (`actions`, `confidence`, `risk`, `root_cause`)
+- `executed_actions` — each action's result
+- `blocked_actions` — actions blocked by policy (with reason)
+- `validation_passed` — post-execution health check result
+- `requires_human_approval` — whether approval gate was triggered
+- `status` — `completed` | `escalated` | `awaiting_approval` | `failed`
+
 ### Policy Engine
 
 Actions are blocked before execution by `app/policies/rules.json`:
@@ -439,56 +611,12 @@ Add new rules to `rules.json` without changing any Python code.
 
 ---
 
-## Original Incident Pipeline (v1)
-
-**`POST /incident/run`** — backwards-compatible, unchanged.
-
-```bash
-curl -X POST http://127.0.0.1:8000/incident/run \
-  -H "Content-Type: application/json" \
-  -H "X-User: alice" \
-  -d '{
-    "incident_id":    "INC-001",
-    "description":   "High 5xx rate on API",
-    "severity":      "critical",
-    "aws":           {"resource_type": "ecs", "resource_id": "my-cluster", "log_group": "/ecs/api"},
-    "k8s":           {"namespace": "production"},
-    "auto_remediate": true,
-    "hours":          2
-  }'
-```
-
----
-
-## Pre-deployment Assessment
-
-**`POST /deploy/assess`** — get a go/no-go before deploying.
-
-> Requires `X-User` header with `deploy` permission.
-
-```bash
-curl -X POST http://127.0.0.1:8000/deploy/assess \
-  -H "Content-Type: application/json" \
-  -H "X-User: alice" \
-  -d '{
-    "deployment":  "api-server",
-    "namespace":   "production",
-    "new_image":   "myapp:v2.1.0",
-    "description": "Add new payment endpoint"
-  }'
-```
-
-**Response:** `go_no_go` (`go` / `go_with_caution` / `no_go`), `risk_score`, `concerns[]`, `checklist[]`, `safe_window`
-
----
-
 ## Jira Webhook → Auto PR
 
-**`POST /jira/webhook`** — register this URL in Jira to auto-create GitHub PRs.
+Register `https://your-platform/jira/webhook` in Jira:
+**Project Settings → Webhooks → Event: Issue Created**
 
-**Jira setup:** Project Settings → Webhooks → URL: `https://your-platform/jira/webhook` → Event: Issue Created
-
-Triggers when: Issue type is **Change Request**, **Task**, or **Story** — or issue has label **`auto-pr`**
+Triggers when issue type is **Change Request**, **Task**, or **Story** — or has label `auto-pr`.
 
 **Flow:**
 1. Claude reads the Jira ticket description
@@ -498,17 +626,35 @@ Triggers when: Issue type is **Change Request**, **Task**, or **Story** — or i
 
 ---
 
-## AI PR Review
+## GitHub Webhook
 
-**`POST /github/review-pr`**
+Register `https://your-platform/webhooks/github` in GitHub:
+**Settings → Webhooks → Content type: application/json**
+
+Set `GITHUB_WEBHOOK_SECRET` in `.env` and use the same value in GitHub. The platform verifies HMAC-SHA256 signatures on every request.
+
+Triggers on: `push` to `main`/`master`, PR `opened`/`synchronize` events.
+
+---
+
+## Nginx Rate Limits
+
+| Zone | Limit | Applied to |
+|---|---|---|
+| `api` | 60 req/min | All endpoints |
+| `chat` | 20 req/min | `/chat` |
+| `auth` | 10 req/min | `/auth/*` |
+| `webhooks` | 30 req/min | `/webhooks/*` |
+
+---
+
+## Running Tests
 
 ```bash
-curl -X POST http://127.0.0.1:8000/github/review-pr \
-  -H "Content-Type: application/json" \
-  -d '{"pr_number": 42, "post_comment": true}'
+pytest -q                         # all tests
+pytest -q tests/test_main.py     # API tests only
+python test_websocket.py          # manual WebSocket test (needs running server)
 ```
-
-Claude analyses the PR diff for security vulnerabilities, infra changes, and code quality. Set `post_comment: true` to post the review directly on the PR.
 
 ---
 
@@ -520,7 +666,7 @@ The platform automatically selects the best available LLM:
 Claude (ANTHROPIC_API_KEY) → OpenAI (OPENAI_API_KEY) → Groq (GROQ_API_KEY) → Ollama (local)
 ```
 
-Override per-request by setting `LLM_PROVIDER` in `.env`. The factory is in `app/llm/factory.py` — add new providers by implementing `BaseLLM` in `app/llm/base.py`.
+Override per-request with `provider` field in chat payload. The factory is in `app/llm/factory.py` — add new providers by implementing `BaseLLM` in `app/llm/base.py`.
 
 ---
 
@@ -535,56 +681,3 @@ AUTO_REMEDIATE_ON_MONITOR=false   # alert-only until you're confident
 ```
 
 The monitor (`app/monitoring/loop.py`) polls K8s for crash-looping pods and unhealthy states. When anomalies are found it triggers the v2 pipeline with `auto_remediate=AUTO_REMEDIATE_ON_MONITOR`.
-
----
-
-## RBAC Usage
-
-```bash
-# Assign developer role
-curl -X POST http://127.0.0.1:8000/security/roles \
-  -H "Content-Type: application/json" \
-  -d '{"user": "alice", "role": "developer"}'
-
-# Use protected endpoint
-curl -X POST http://127.0.0.1:8000/k8s/restart \
-  -H "Content-Type: application/json" \
-  -H "X-User: alice" \
-  -d '{"namespace": "default", "deployment": "api-server"}'
-```
-
-**Protected endpoints** require `X-User` header:
-
-| Endpoint | Required permission |
-|---|---|
-| `POST /k8s/restart` | `deploy` |
-| `POST /k8s/scale` | `deploy` |
-| `POST /deploy/assess` | `deploy` |
-| `POST /incident/run` (auto_remediate=true) | `deploy` |
-| `POST /v2/incident/run` (auto_remediate=true) | `deploy` |
-
-Persist users via file — set `RBAC_CONFIG_PATH=/path/to/roles.json`:
-
-```json
-{"alice": "developer", "bob": "viewer", "charlie": "admin"}
-```
-
----
-
-## Running Tests
-
-```bash
-pytest -q                         # all 68 tests
-pytest -q tests/test_main.py     # API tests only
-python test_websocket.py          # manual WebSocket test (needs running server)
-```
-
----
-
-## Docker
-
-```bash
-docker compose up --build
-```
-
-The `docker-compose.yml` mounts the project directory, loads `.env`, and restarts on failure.

@@ -1,0 +1,38 @@
+{
+  "Wa_XjrEqSq3KEfpPBu9WPYE6mGiBp0x_td2Fw_NXTMw": {
+    "username": "test_invite",
+    "email": "test@example.com",
+    "otp": "958799",
+    "expires_at": "2026-04-01T11:35:32.385128"
+  },
+  "fOyo3RuAAGMDt_2POh_oHAcClhQ_3W28mss6hCTXPdw": {
+    "username": "new_engineer",
+    "email": "test@gmail.com",
+    "otp": "934196",
+    "expires_at": "2026-04-01T11:36:40.514879"
+  },
+  "7IeAmSrIQw2_PFx4TZHP7Af1BK61RLGmV0jMGHFPdq8": {
+    "username": "nagaraj",
+    "email": "nagarajbadiger347@gmail.com",
+    "otp": "251191",
+    "expires_at": "2026-04-01T11:36:51.724398"
+  },
+  "F1UCMbyVSgDGgdrHnW3p4XBqeQWFWFcKPwMkesluLkA": {
+    "username": "engineer_bob",
+    "email": "bob@company.com",
+    "otp": "589687",
+    "expires_at": "2026-04-01T11:37:50.179600"
+  },
+  "cnZypoq0VkJCXBwYEnhRvrD8df5KzrSSe64xolUh6g0": {
+    "username": "testuser",
+    "email": "test@example.com",
+    "otp": "800601",
+    "expires_at": "2026-04-01T12:11:40.239785"
+  },
+  "_uHK-Rdld_Fwa7ISb5TS0zC-fn_aX8DNZHnMJ6GdQ1U": {
+    "username": "nagaraj",
+    "email": "nagarajbadiger347@gmail.com",
+    "otp": "404479",
+    "expires_at": "2026-04-01T12:12:23.741335"
+  }
+}

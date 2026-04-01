@@ -5,7 +5,8 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends
+from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
@@ -523,9 +524,11 @@ def root():
 
     /* ── RBAC VISIBILITY ── */
     /* viewer: hide write ops and admin panels */
-    body[data-role="viewer"] .rbac-dev,.body[data-role="viewer"] .rbac-admin{display:none!important}
+    body[data-role="viewer"] .rbac-dev,body[data-role="viewer"] .rbac-admin{display:none!important}
     /* developer: hide admin-only */
     body[data-role="developer"] .rbac-admin{display:none!important}
+    /* before login: hide role-gated items */
+    body:not([data-role]) .rbac-dev,body:not([data-role]) .rbac-admin{display:none!important}
     /* generic hidden util */
     .rbac-dev,.rbac-admin{transition:opacity .2s}
   </style>
@@ -560,6 +563,7 @@ def root():
   <div class="sb-section">
     <span class="sb-label">Tools</span>
     <button type="button" class="nav-link rbac-admin" onclick="showView('secrets','',this)"><span class="ico">&#x1F511;</span>Secrets &amp; Config</button>
+    <button type="button" class="nav-link rbac-admin" onclick="showView('users','',this)"><span class="ico">&#x1F465;</span>Team &amp; Access</button>
     <button type="button" class="nav-link" onclick="showView('chat','',this)"><span class="ico">&#x1F4AC;</span>AI Chat</button>
   </div>
 
@@ -838,7 +842,7 @@ def root():
       <div class="sec-actions-bar">
         <div class="sec-user-wrap">
           <span class="sec-user-lbl">Authenticated as</span>
-          <input class="sec-user-input" id="sec-user" type="text" value="nagaraj" placeholder="username"/>
+          <input class="sec-user-input" id="sec-user" type="text" placeholder="username" readonly/>
         </div>
         <button id="save-btn" class="save-btn" onclick="saveSecrets()">&#x1F4BE; Save to .env</button>
         <span id="sec-msg" class="sec-msg"></span>
@@ -890,7 +894,82 @@ def root():
         <div class="sec-row"><span class="sec-key">GITLAB_PROJECT</span><input class="sec-input" id="GITLAB_PROJECT" type="text" placeholder="namespace/project"/><span class="sec-status" id="st-GITLAB_PROJECT"></span></div>
       </div>
 
+      <!-- ── EMAIL / SMTP CONFIG ── -->
+      <div class="sec-card" style="border:1px solid rgba(79,142,247,.25);background:rgba(79,142,247,.04)">
+        <div class="sec-card-hdr">
+          <span class="ico">&#x2709;</span>
+          <span class="g-name">Email / SMTP</span>
+          <span class="int-chip" id="int-smtp-s"><span class="dot"></span>SMTP</span>
+        </div>
+        <div class="sec-row"><span class="sec-key">SMTP_USER</span><input class="sec-input" id="smtp_user_inp" type="email" placeholder="you@gmail.com"/></div>
+        <div class="sec-row"><span class="sec-key">SMTP_PASSWORD</span><input class="sec-input" id="smtp_pass_inp" type="password" placeholder="16-char Gmail App Password"/></div>
+        <div class="sec-row"><span class="sec-key">SMTP_FROM</span><input class="sec-input" id="smtp_from_inp" type="text" placeholder="DevOps AI &lt;you@gmail.com&gt;"/></div>
+        <div class="sec-row"><span class="sec-key">APP_URL</span><input class="sec-input" id="app_url_inp" type="text" placeholder="http://localhost:8000"/></div>
+        <div style="padding:10px 16px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button onclick="saveSMTP()" style="padding:6px 16px;background:var(--blue2);border:none;border-radius:5px;color:#fff;font-size:.82em;font-weight:700;cursor:pointer">Save &amp; Test Connection</button>
+          <button onclick="testEmail()" style="padding:6px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:.82em;cursor:pointer">Send Test Email to Myself</button>
+          <span id="smtp-msg" style="font-size:.8em;display:none"></span>
+        </div>
+        <div style="padding:0 16px 12px;font-size:.76em;color:var(--muted);line-height:1.6">
+          Gmail: enable 2FA &#x2192; <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--blue)">myaccount.google.com/apppasswords</a> &#x2192; create App Password for "Mail".
+        </div>
+      </div>
+
     </div><!-- /view-secrets -->
+
+    <!-- ── TEAM & ACCESS PANEL ── -->
+    <div id="view-users" style="display:none;padding:24px;max-width:900px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+        <div>
+          <h2 style="font-size:1.2em;font-weight:700;margin-bottom:4px">&#x1F465; Team &amp; Access</h2>
+          <p style="font-size:.82em;color:var(--muted)">Manage users, roles, and send invites. Admin only.</p>
+        </div>
+        <button onclick="showInviteModal()" style="padding:8px 18px;background:var(--blue2);border:none;border-radius:var(--radius-sm);color:#fff;font-weight:700;font-size:13px;cursor:pointer">+ Invite User</button>
+      </div>
+
+      <!-- Role legend -->
+      <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;background:var(--surface2);padding:6px 12px;border-radius:20px"><span style="background:rgba(239,68,68,.2);color:#f87171;padding:2px 8px;border-radius:10px;font-size:.78em;font-weight:700">admin</span> Full access</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;background:var(--surface2);padding:6px 12px;border-radius:20px"><span style="background:rgba(34,211,238,.15);color:#22d3ee;padding:2px 8px;border-radius:10px;font-size:.78em;font-weight:700">developer</span> Read &amp; write</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;background:var(--surface2);padding:6px 12px;border-radius:20px"><span style="background:rgba(167,139,250,.15);color:#a78bfa;padding:2px 8px;border-radius:10px;font-size:.78em;font-weight:700">viewer</span> Read-only</div>
+      </div>
+
+      <!-- User table -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)">
+        <div style="padding:14px 18px;border-bottom:1px solid var(--border);font-size:11px;font-weight:700;opacity:.5;display:grid;grid-template-columns:1fr 160px 140px 100px;gap:10px;text-transform:uppercase;letter-spacing:.06em">
+          <span>User</span><span>Role</span><span>Created</span><span>Actions</span>
+        </div>
+        <div id="users-list">
+          <div style="padding:24px;text-align:center;opacity:.5;font-size:13px">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Invite result -->
+      <div id="invite-result" style="display:none;margin-top:16px;padding:16px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface2);font-size:13px"></div>
+    </div>
+
+    <!-- Invite Modal -->
+    <div id="invite-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:999;align-items:center;justify-content:center">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;width:100%;max-width:400px">
+        <h3 style="margin-bottom:6px;font-size:1.1em;font-weight:700">Invite New User</h3>
+        <p style="font-size:.82em;color:var(--muted);margin-bottom:20px">They will receive a one-time OTP by email to set their password.</p>
+        <div id="invite-err" style="color:#f87171;font-size:.82em;margin-bottom:10px;display:none"></div>
+        <label style="display:block;font-size:.82em;color:var(--muted);margin-bottom:4px">Username</label>
+        <input id="inv-username" type="text" placeholder="alice" style="width:100%;box-sizing:border-box;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9em;margin-bottom:12px;outline:none"/>
+        <label style="display:block;font-size:.82em;color:var(--muted);margin-bottom:4px">Email</label>
+        <input id="inv-email" type="email" placeholder="alice@company.com" style="width:100%;box-sizing:border-box;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9em;margin-bottom:12px;outline:none"/>
+        <label style="display:block;font-size:.82em;color:var(--muted);margin-bottom:4px">Role</label>
+        <select id="inv-role" style="width:100%;box-sizing:border-box;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9em;margin-bottom:20px;outline:none">
+          <option value="viewer">viewer</option>
+          <option value="developer" selected>developer</option>
+          <option value="admin">admin</option>
+        </select>
+        <div style="display:flex;gap:10px">
+          <button onclick="closeInviteModal()" style="flex:1;padding:10px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:.9em;cursor:pointer">Cancel</button>
+          <button id="inv-send-btn" onclick="sendInvite()" style="flex:2;padding:10px;border-radius:6px;border:none;background:var(--blue2);color:#fff;font-weight:700;font-size:.9em;cursor:pointer">Send Invite</button>
+        </div>
+      </div>
+    </div>
 
     <div class="footer">
       <span>&#x26A1; NexusOps</span>
@@ -1000,6 +1079,8 @@ function showView(view, section, btn) {
     if (ep) ep.style.display = view === 'endpoints' ? '' : 'none';
     var sp = document.getElementById('view-secrets');
     if (sp) { if (view === 'secrets') { sp.classList.add('active'); } else { sp.classList.remove('active'); } }
+    var up = document.getElementById('view-users');
+    if (up) { up.style.display = view === 'users' ? 'block' : 'none'; if (view === 'users') loadUsers(); }
     if (view === 'endpoints') filterSection(section || 'all');
   } catch(e) { console.error('showView error:', e); }
 }
@@ -1305,12 +1386,11 @@ function saveSecrets() {
     if (el && el.value.trim()) secrets[k] = el.value.trim();
   });
   if (Object.keys(secrets).length === 0) { showMsg('No values entered', 'err'); return; }
-  var user = document.getElementById('sec-user').value.trim() || 'nagaraj';
   var btn = document.getElementById('save-btn');
   btn.disabled = true; btn.textContent = 'Saving...';
   fetch('/secrets', {
     method: 'POST',
-    headers: {'Content-Type':'application/json','X-User': user},
+    headers: authHeaders(),
     body: JSON.stringify({secrets: secrets})
   }).then(function(r){ return r.json().then(function(d){ return {ok: r.ok, data: d}; }); })
   .then(function(res) {
@@ -1320,12 +1400,47 @@ function saveSecrets() {
       loadMetrics();
     } else { showMsg(res.data.detail || 'Error', 'err'); }
   }).catch(function(){ showMsg('Network error', 'err'); })
-  .finally(function(){ btn.disabled=false; btn.textContent='\\u1F4BE Save to .env'; });
+  .finally(function(){ btn.disabled=false; btn.textContent='&#x1F4BE; Save to .env'; });
 }
 function showMsg(text, type) {
   var m = document.getElementById('sec-msg');
   m.textContent = text; m.className = 'sec-msg ' + type; m.style.display = '';
   setTimeout(function(){ m.style.display='none'; }, 4000);
+}
+
+function smtpMsg(text, ok) {
+  var m = document.getElementById('smtp-msg');
+  if (!m) return;
+  m.textContent = text;
+  m.style.color = ok ? 'var(--green)' : '#f87171';
+  m.style.display = 'inline';
+  setTimeout(function(){ m.style.display='none'; }, 6000);
+}
+
+function saveSMTP() {
+  var user = (document.getElementById('smtp_user_inp')||{}).value||'';
+  var pass = (document.getElementById('smtp_pass_inp')||{}).value||'';
+  var from = (document.getElementById('smtp_from_inp')||{}).value||'';
+  var url  = (document.getElementById('app_url_inp')||{}).value||'';
+  if (!user || !pass) { smtpMsg('Enter SMTP_USER and SMTP_PASSWORD', false); return; }
+  smtpMsg('Saving & testing...', true);
+  fetch('/auth/configure-smtp', {
+    method: 'POST', headers: authHeaders(),
+    body: JSON.stringify({smtp_user: user, smtp_password: pass, smtp_from: from||user,
+                          app_url: url||'http://localhost:8000', smtp_host:'smtp.gmail.com', smtp_port:587})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    smtpMsg(d.message || (d.success ? 'Saved' : 'Error'), d.success);
+  }).catch(function(){ smtpMsg('Network error', false); });
+}
+
+function testEmail() {
+  smtpMsg('Sending test email...', true);
+  fetch('/auth/test-email', {method:'POST', headers: authHeaders()})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (d.success) smtpMsg(d.message, true);
+      else smtpMsg(d.detail || 'Failed', false);
+    }).catch(function(){ smtpMsg('Network error', false); });
 }
 
 /* ── MARKDOWN RENDERER ── */
@@ -1370,7 +1485,7 @@ function appendMsg(role, text, isHtml) {
 }
 
 function sendSuggestion(btn) {
-  document.getElementById('chat-input').value = btn.textContent.replace(/^[\\u{1F300}-\\u{1FFFF}]\\s*/u, '');
+  document.getElementById('chat-input').value = btn.textContent.replace(/^\\S+\\s*/, '');
   sendChat();
 }
 
@@ -1534,7 +1649,6 @@ function createWarRoom() {
 }
 
 loadMetrics();
-loadRole('nagaraj');
 
 // Restore last active view so page reloads/restarts keep you where you were
 (function() {
@@ -1552,23 +1666,72 @@ loadRole('nagaraj');
   } catch(e) {}
 })();
 
+// On load: check JWT and show login or restore session
+(function() {
+  var token = localStorage.getItem('devops_jwt');
+  if (!token) {
+    showLoginPage();
+    return;
+  }
+  fetch('/auth/me', {headers: {'Authorization': 'Bearer ' + token}})
+    .then(function(r){ return r.json().then(function(d){ return {ok: r.ok, data: d}; }); })
+    .then(function(res) {
+      if (!res.ok) { showLoginPage(); return; }
+      _currentUser = res.data.username || res.data.user || _currentUser;
+      _currentRole = res.data.role || 'viewer';
+      applyRoleUI(res.data);
+    })
+    .catch(function(){ showLoginPage(); });
+})();
+
 /* ── RBAC ROLE LOADER ── */
-var _currentUser = 'nagaraj';
-var _currentRole = 'admin';
+var _currentUser = localStorage.getItem('devops_user') || '';
+var _currentRole = localStorage.getItem('devops_role') || 'viewer';
+
+function authHeaders(extra) {
+  var h = Object.assign({'Content-Type': 'application/json'}, extra || {});
+  var token = localStorage.getItem('devops_jwt');
+  if (token) {
+    h['Authorization'] = 'Bearer ' + token;
+  } else if (_currentUser) {
+    h['X-User'] = _currentUser;
+  }
+  return h;
+}
+
+function doLogin(username, password, onSuccess, onError) {
+  var body = 'username=' + encodeURIComponent(username) + '&password=' + encodeURIComponent(password);
+  fetch('/auth/token', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body})
+    .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, data:d}; }); })
+    .then(function(res) {
+      if (!res.ok) { onError(res.data.detail || 'Invalid credentials'); return; }
+      _currentUser = res.data.username;
+      _currentRole = res.data.role;
+      localStorage.setItem('devops_jwt',  res.data.access_token);
+      localStorage.setItem('devops_user', res.data.username);
+      localStorage.setItem('devops_role', res.data.role);
+      onSuccess(res.data);
+    })
+    .catch(function(e){ onError('Network error: ' + e); });
+}
+
+function doLogout() {
+  localStorage.removeItem('devops_jwt');
+  localStorage.removeItem('devops_user');
+  localStorage.removeItem('devops_role');
+  _currentUser = ''; _currentRole = 'viewer';
+  document.body.removeAttribute('data-role');
+  showLoginPage();
+}
 
 function loadRole(user) {
-  _currentUser = user || 'nagaraj';
-  fetch('/auth/me?user=' + encodeURIComponent(_currentUser))
-    .then(function(r){ return r.json(); })
-    .then(function(d) {
-      _currentRole = d.role || 'viewer';
-      applyRoleUI(d);
-    }).catch(function(){});
+  // Legacy no-op - identity comes from JWT
 }
 
 function applyRoleUI(d) {
   var role = d.role || 'viewer';
   var perms = d.permissions || [];
+  var resolvedUser = d.username || d.user || _currentUser;
   // Set body data-role for CSS visibility rules
   document.body.dataset.role = role;
   // Update sidebar footer
@@ -1578,9 +1741,9 @@ function applyRoleUI(d) {
     badge.className = 'role-badge role-' + role;
   }
   var uname = document.getElementById('sb-uname');
-  if (uname) uname.textContent = d.user || _currentUser;
+  if (uname) uname.textContent = resolvedUser;
   var avatar = document.getElementById('sb-avatar');
-  if (avatar) avatar.textContent = (d.user || _currentUser)[0].toUpperCase();
+  if (avatar) avatar.textContent = resolvedUser[0].toUpperCase();
   // Update role metric card
   var mRole = document.getElementById('m-role');
   if (mRole) mRole.textContent = role.charAt(0).toUpperCase() + role.slice(1);
@@ -1589,8 +1752,90 @@ function applyRoleUI(d) {
   if (mRolePerms) mRolePerms.textContent = roleDesc[role] || 'Limited access';
   // Sync user field in secrets panel
   var secUser = document.getElementById('sec-user');
-  if (secUser) secUser.value = d.user || _currentUser;
-  toast('Signed in as ' + (d.user || _currentUser) + ' (' + role + ')', 'info', 2000);
+  if (secUser) secUser.value = resolvedUser;
+  toast('Signed in as ' + resolvedUser + ' (' + role + ')', 'info', 2000);
+}
+
+function showLoginPage() {
+  var existing = document.getElementById('login-page');
+  if (existing) { existing.style.display = 'flex'; setTimeout(function(){ var u=document.getElementById('login-username'); if(u)u.focus(); },80); return; }
+  var page = document.createElement('div');
+  page.id = 'login-page';
+  page.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;overflow:hidden;font-family:Inter,sans-serif';
+  page.innerHTML =
+    /* ── animated gradient background ── */
+    '<style>' +
+    '@keyframes lp-bg{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}' +
+    '@keyframes lp-float{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-18px) scale(1.04)}}' +
+    '@keyframes lp-in{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}' +
+    '#login-page{background:#04060f}' +
+    '#lp-bg{position:absolute;inset:0;background:linear-gradient(135deg,#04060f 0%,#0d1424 40%,#0a0f1e 70%,#04060f 100%);background-size:400% 400%;animation:lp-bg 12s ease infinite}' +
+    '#lp-orb1{position:absolute;width:500px;height:500px;border-radius:50%;background:radial-gradient(circle,rgba(124,58,237,.18) 0%,transparent 70%);top:-120px;right:-100px;animation:lp-float 8s ease-in-out infinite}' +
+    '#lp-orb2{position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,rgba(37,99,235,.15) 0%,transparent 70%);bottom:-100px;left:-80px;animation:lp-float 10s ease-in-out infinite reverse}' +
+    '#lp-card{position:relative;z-index:2;width:100%;max-width:400px;margin:0 20px;animation:lp-in .5s ease both}' +
+    '#lp-card input{transition:border-color .15s,box-shadow .15s}' +
+    '#lp-card input:focus{border-color:#4f8ef7!important;box-shadow:0 0 0 3px rgba(79,142,247,.15)!important;outline:none}' +
+    '#login-btn{transition:all .15s;letter-spacing:.02em}' +
+    '#login-btn:hover:not(:disabled){background:linear-gradient(135deg,#3b82f6,#2563eb)!important;box-shadow:0 4px 20px rgba(79,142,247,.4)!important;transform:translateY(-1px)}' +
+    '#login-btn:active:not(:disabled){transform:translateY(0)}' +
+    '#login-btn:disabled{opacity:.6;cursor:not-allowed}' +
+    '</style>' +
+    '<div id="lp-bg"></div>' +
+    '<div id="lp-orb1"></div>' +
+    '<div id="lp-orb2"></div>' +
+    '<div id="lp-card">' +
+      /* logo + title */
+      '<div style="text-align:center;margin-bottom:28px">' +
+        '<div style="display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;background:linear-gradient(135deg,#7c3aed,#2563eb);border-radius:14px;margin-bottom:14px;box-shadow:0 8px 32px rgba(124,58,237,.4)">' +
+          '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>' +
+        '</div>' +
+        '<h1 style="font-size:1.5em;font-weight:800;color:#e2e8f0;letter-spacing:-.02em;margin:0 0 4px">NexusOps</h1>' +
+        '<p style="font-size:.83em;color:#4f6a9a;margin:0">AI-Powered DevOps Platform</p>' +
+      '</div>' +
+      /* card */
+      '<div style="background:rgba(13,20,36,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(79,142,247,.18);border-radius:16px;padding:32px;box-shadow:0 24px 64px rgba(0,0,0,.6)">' +
+        '<div id="login-err" style="display:none;color:#fca5a5;font-size:.82em;margin-bottom:16px;padding:10px 14px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);border-radius:8px;line-height:1.4"></div>' +
+        '<div style="margin-bottom:16px">' +
+          '<label style="display:block;font-size:.78em;font-weight:600;color:#4f8ef7;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Username</label>' +
+          '<input id="login-username" type="text" placeholder="Enter your username" autocomplete="username" style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:8px;border:1px solid rgba(79,142,247,.2);background:rgba(4,6,15,.6);color:#e2e8f0;font-size:.9em;font-family:inherit"/>' +
+        '</div>' +
+        '<div style="margin-bottom:24px">' +
+          '<label style="display:block;font-size:.78em;font-weight:600;color:#4f8ef7;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Password</label>' +
+          '<input id="login-password" type="password" placeholder="Enter your password" autocomplete="current-password" style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:8px;border:1px solid rgba(79,142,247,.2);background:rgba(4,6,15,.6);color:#e2e8f0;font-size:.9em;font-family:inherit"/>' +
+        '</div>' +
+        '<button id="login-btn" onclick="submitLoginPage()" style="width:100%;padding:12px;border-radius:8px;border:none;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-weight:700;font-size:.95em;cursor:pointer;font-family:inherit">Sign In</button>' +
+        '<p style="text-align:center;font-size:.75em;color:#3d5080;margin-top:16px;margin-bottom:0">Press <kbd style="background:rgba(79,142,247,.12);border:1px solid rgba(79,142,247,.2);padding:1px 5px;border-radius:3px;font-family:monospace">Ctrl+K</kbd> to open AI Chat anytime</p>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(page);
+  var uInput = document.getElementById('login-username');
+  var pInput = document.getElementById('login-password');
+  if (uInput) setTimeout(function(){ uInput.focus(); }, 100);
+  if (pInput) pInput.addEventListener('keydown', function(e){ if (e.key === 'Enter') submitLoginPage(); });
+  if (uInput) uInput.addEventListener('keydown', function(e){ if (e.key === 'Enter') { var p=document.getElementById('login-password'); if(p)p.focus(); } });
+}
+
+function submitLoginPage() {
+  var username = (document.getElementById('login-username') || {}).value || '';
+  var password = (document.getElementById('login-password') || {}).value || '';
+  var errEl = document.getElementById('login-err');
+  var btn = document.getElementById('login-btn');
+  if (!username.trim()) { if(errEl){errEl.textContent='Enter username';errEl.style.display='block';} return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Signing in...'; }
+  doLogin(username.trim(), password, function(data) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
+    var page = document.getElementById('login-page');
+    if (page) page.style.display = 'none';
+    applyRoleUI(data);
+    loadMetrics();
+  }, function(err) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
+    if (errEl) { errEl.textContent = err; errEl.style.display = 'block'; }
+  });
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function toggleUserSwitch() {
@@ -1704,6 +1949,134 @@ function openGhDrawer() {
     .catch(function(){ body.innerHTML = '<div style="padding:20px;color:var(--muted);font-size:12px">Failed to load repos</div>'; });
 }
 
+/* ── TEAM & ACCESS ── */
+var _ROLES = ['viewer','developer','admin'];
+
+function loadUsers() {
+  var list = document.getElementById('users-list');
+  if (!list) return;
+  list.innerHTML = '<div style="padding:20px;text-align:center;opacity:.5;font-size:13px">Loading...</div>';
+  fetch('/users', {headers: authHeaders()})
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      var users = d.users || [];
+      if (!users.length) { list.innerHTML = '<div style="padding:20px;text-align:center;opacity:.5;font-size:13px">No users</div>'; return; }
+      list.innerHTML = users.map(function(u) {
+        var isMe = u.username === _currentUser;
+        var roleOpts = _ROLES.map(function(r){ return '<option value="'+r+'"'+(u.role===r?' selected':'')+'>'+r+'</option>'; }).join('');
+        var created = u.created_at ? u.created_at.slice(0,10) : '\\u2014';
+        return '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr 160px 140px 100px;gap:10px;align-items:center;font-size:13px">' +
+          '<div style="display:flex;align-items:center;gap:10px">' +
+            '<div style="width:32px;height:32px;background:linear-gradient(135deg,#7c3aed,#2563eb);border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">'+u.username[0].toUpperCase()+'</div>' +
+            '<div><div style="font-weight:600">'+escHtml(u.username)+(isMe?' <span style="font-size:.75em;opacity:.5">(you)</span>':'')+'</div>' +
+            '<div style="font-size:.75em;color:var(--muted)">by '+escHtml(u.created_by||'system')+'</div></div>' +
+          '</div>' +
+          '<div><select data-un="'+escHtml(u.username)+'" onchange="changeRole(this.dataset.un,this.value)" style="background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:.82em;padding:4px 6px;width:100%;cursor:pointer">'+roleOpts+'</select></div>' +
+          '<div style="color:var(--muted);font-size:.82em">'+created+'</div>' +
+          '<div style="display:flex;gap:6px">' +
+            '<button data-un="'+escHtml(u.username)+'" onclick="resetPw(this.dataset.un)" style="padding:4px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;font-size:.78em;cursor:pointer;color:var(--text)" title="Reset password">&#x1F511;</button>' +
+            (isMe ? '' : '<button data-un="'+escHtml(u.username)+'" onclick="removeUser(this.dataset.un)" style="padding:4px 8px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);border-radius:4px;font-size:.78em;cursor:pointer;color:#f87171" title="Remove">&#x1F5D1;</button>') +
+          '</div>' +
+        '</div>';
+      }).join('');
+    })
+    .catch(function(e){ list.innerHTML = '<div style="padding:20px;color:#f87171;font-size:13px">Error: '+e+'</div>'; });
+}
+
+function changeRole(username, role) {
+  fetch('/users/'+encodeURIComponent(username)+'/role', {
+    method: 'PUT', headers: authHeaders(),
+    body: JSON.stringify({user: username, role: role})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d.success) toast('Role updated for '+username, 'ok');
+    else toast(d.detail || d.reason || 'Failed', 'err');
+    loadUsers();
+  });
+}
+
+function removeUser(username) {
+  if (!confirm('Delete user "'+username+'"? This cannot be undone.')) return;
+  fetch('/users/'+encodeURIComponent(username), {method:'DELETE', headers: authHeaders()})
+    .then(function(r){ return r.json(); }).then(function(d){
+      if (d.success) { toast('User removed', 'ok'); loadUsers(); }
+      else toast(d.detail || 'Failed', 'err');
+    });
+}
+
+function resetPw(username) {
+  var pw = prompt('Set new password for "'+username+'" (min 8 chars):');
+  if (!pw) return;
+  if (pw.length < 8) { toast('Password too short', 'err'); return; }
+  fetch('/users/'+encodeURIComponent(username)+'/password', {
+    method:'PUT', headers: authHeaders(),
+    body: JSON.stringify({new_password: pw})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d.success) toast('Password reset', 'ok');
+    else toast(d.detail || d.error || 'Failed', 'err');
+  });
+}
+
+function showInviteModal() {
+  var m = document.getElementById('invite-modal');
+  if (m) { m.style.display = 'flex'; var u=document.getElementById('inv-username'); if(u) u.focus(); }
+}
+function closeInviteModal() {
+  var m = document.getElementById('invite-modal');
+  if (m) m.style.display = 'none';
+  var e = document.getElementById('invite-err'); if(e) e.style.display='none';
+}
+
+function sendInvite() {
+  var username = document.getElementById('inv-username').value.trim();
+  var email    = document.getElementById('inv-email').value.trim();
+  var role     = document.getElementById('inv-role').value;
+  var errEl    = document.getElementById('invite-err');
+  errEl.style.display = 'none';
+  if (!username) { errEl.textContent='Enter a username'; errEl.style.display='block'; return; }
+  if (!email || !email.includes('@')) { errEl.textContent='Enter a valid email'; errEl.style.display='block'; return; }
+  var btn = document.getElementById('inv-send-btn');
+  btn.disabled = true; btn.textContent = 'Sending...';
+  fetch('/users/invite', {method:'POST', headers: authHeaders(), body: JSON.stringify({username:username,email:email,role:role})})
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      btn.disabled=false; btn.textContent='Send Invite';
+      closeInviteModal();
+      var res = document.getElementById('invite-result');
+      if (d.success) {
+        var html = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">' +
+          '<span style="color:var(--green);font-size:1.1em">&#x2705;</span>' +
+          '<div><div style="font-weight:600;color:var(--green)">User created successfully</div>' +
+          '<div style="font-size:.8em;color:var(--muted)">Share the OTP and setup link with '+escHtml(username)+'</div></div>' +
+          '</div>';
+        if (d.otp) {
+          html += '<div style="margin-bottom:10px">' +
+            '<div style="font-size:.75em;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">One-Time Password (OTP)</div>' +
+            '<div style="background:var(--bg);border:1px solid var(--border2);padding:12px 16px;border-radius:8px;display:flex;align-items:center;justify-content:space-between">' +
+              '<span style="font-family:JetBrains Mono,monospace;font-size:1.4em;font-weight:700;letter-spacing:.25em;color:var(--blue)">'+escHtml(d.otp)+'</span>' +
+              '<button onclick="navigator.clipboard.writeText(this.dataset.v)" data-v="'+escHtml(d.otp)+'" style="padding:4px 10px;font-size:.75em;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer">Copy</button>' +
+            '</div></div>';
+        }
+        if (d.setup_link) {
+          html += '<div>' +
+            '<div style="font-size:.75em;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">Setup Link</div>' +
+            '<div style="background:var(--bg);border:1px solid var(--border);padding:10px 12px;border-radius:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+              '<a href="'+escHtml(d.setup_link)+'" target="_blank" style="color:var(--blue);font-size:.8em;word-break:break-all;flex:1">'+escHtml(d.setup_link)+'</a>' +
+              '<button onclick="navigator.clipboard.writeText(this.dataset.v)" data-v="'+escHtml(d.setup_link)+'" style="padding:4px 10px;font-size:.75em;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer;flex-shrink:0">Copy</button>' +
+            '</div></div>';
+        }
+        if (d.email_sent === false) {
+          html += '<div style="margin-top:10px;padding:8px 12px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);border-radius:6px;font-size:.78em;color:var(--amber)">&#x26A0; Email not sent — SMTP not configured. Share OTP manually.</div>';
+        }
+        res.innerHTML = html;
+        loadUsers();
+      } else {
+        res.innerHTML = '<div style="color:#f87171;display:flex;gap:8px;align-items:flex-start"><span>&#x274C;</span><span>'+escHtml(d.detail||'Failed to create invite')+'</span></div>';
+      }
+      res.style.display = 'block';
+    })
+    .catch(function(e){ btn.disabled=false; btn.textContent='Send Invite'; toast('Network error','err'); });
+}
+
 /* ── KEYBOARD SHORTCUTS ── */
 document.addEventListener('keydown', function(e) {
   // Ignore if typing in an input
@@ -1725,20 +2098,371 @@ document.addEventListener('keydown', function(e) {
     showView('chat','',document.querySelector('.nav-link[onclick*=chat]'));
   }
 });
+
+// Keyboard shortcut: Ctrl+K or Cmd+K opens AI Chat panel
+document.addEventListener('keydown', function(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault();
+    var chatLink = document.querySelector('.nav-link[onclick*="chat"]');
+    if (chatLink) chatLink.click();
+    var chatInput = document.getElementById('chat-input');
+    if (chatInput) { setTimeout(function(){ chatInput.focus(); }, 100); }
+  }
+});
 </script>
 </body>
 </html>
 """, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+class AuthContext:
+    def __init__(self, username: str, role: str):
+        self.username = username
+        self.role = role
+
+def _resolve_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+    x_user: Optional[str] = Header(default=None),
+) -> AuthContext:
+    from app.security.rbac import get_user_role
+    username = None
+    jwt_role = None
+    if credentials and credentials.credentials:
+        try:
+            from app.core.auth import decode_token
+            payload = decode_token(credentials.credentials)
+            username = payload.get("sub")
+            jwt_role = payload.get("role")  # trust role embedded in JWT
+        except Exception:
+            pass
+    if not username and x_user:
+        username = x_user.strip().lower()
+    if not username:
+        username = "anonymous"
+    # JWT role takes precedence; fall back to RBAC lookup for X-User / anonymous
+    role = jwt_role if jwt_role else get_user_role(username)
+    return AuthContext(username=username, role=role)
+
+def require_admin(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    if auth.role not in ("admin",):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return auth
+
+def require_developer(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    if auth.role not in ("admin", "developer"):
+        raise HTTPException(status_code=403, detail="Role 'developer' or 'admin' required")
+    return auth
+
+def require_viewer(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    if auth.role not in ("admin", "developer", "viewer"):
+        raise HTTPException(status_code=403, detail="Authentication required")
+    return auth
+
+# ── /auth/me ──────────────────────────────────────────────────────────────────
+
 @app.get("/auth/me")
-def auth_me(user: str = "nagaraj"):
-    """Return role and permissions for a user. Defaults to 'nagaraj' (admin)."""
-    from app.security.rbac import ROLE_PERMISSIONS, _user_roles
-    u = user.strip().lower()
-    role = _user_roles.get(u, "viewer")
+def auth_me(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+    user: str = "nagaraj",
+    x_user: Optional[str] = Header(default=None),
+):
+    """Return role and permissions for a user. Supports JWT Bearer token."""
+    from app.security.rbac import ROLE_PERMISSIONS, get_user_role
+    # Try JWT first
+    username = None
+    if credentials and credentials.credentials:
+        try:
+            from app.core.auth import decode_token
+            payload = decode_token(credentials.credentials)
+            username = payload.get("sub")
+        except Exception:
+            pass
+    if not username:
+        username = (x_user or user or "nagaraj").strip().lower()
+    role = get_user_role(username)
     perms = list(ROLE_PERMISSIONS.get(role, set()))
-    return {"user": u, "role": role, "permissions": perms}
+    return {"username": username, "user": username, "role": role, "permissions": perms}
+
+
+@app.post("/auth/token", tags=["auth"])
+def login(form: OAuth2PasswordRequestForm = Depends()):
+    from app.security.users import authenticate, user_exists
+    from app.security.rbac import get_user_role
+    from app.core.auth import create_token
+    username = form.username.strip().lower()
+    if not user_exists(username) or not authenticate(username, form.password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    role = get_user_role(username)
+    token = create_token(username, role)
+    return {"access_token": token, "token_type": "bearer", "role": role, "username": username}
+
+
+class UserCreateRequest(BaseModel):
+    username: str
+    password: str = "INVITE_PENDING"
+    role: str = "viewer"
+    email: Optional[str] = None
+
+class PasswordChangeRequest(BaseModel):
+    new_password: str
+
+@app.get("/users", tags=["users"])
+def list_users_endpoint(auth: AuthContext = Depends(require_admin)):
+    from app.security.users import list_users as _list
+    return {"users": _list()}
+
+@app.post("/users", tags=["users"])
+def create_user_endpoint(req: UserCreateRequest, auth: AuthContext = Depends(require_admin)):
+    from app.security.users import create_user as _create
+    from app.security.rbac import assign_role
+    result = _create(req.username, req.password, created_by=auth.username)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    assign_role(req.username, req.role)
+    return {"success": True, "username": req.username.lower(), "role": req.role}
+
+@app.delete("/users/{username}", tags=["users"])
+def delete_user_endpoint(username: str, auth: AuthContext = Depends(require_admin)):
+    if username.strip().lower() == auth.username:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    from app.security.users import delete_user as _delete
+    from app.security.rbac import revoke_role
+    result = _delete(username)
+    if not result["success"]:
+        raise HTTPException(status_code=404, detail=result["error"])
+    revoke_role(username)
+    return {"success": True, "username": username}
+
+@app.put("/users/{username}/role", tags=["users"])
+def set_user_role_endpoint(username: str, req: RoleAssignment, auth: AuthContext = Depends(require_admin)):
+    from app.security.rbac import assign_role
+    result = assign_role(username, req.role)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("reason", "Failed"))
+    return result
+
+@app.put("/users/{username}/password", tags=["users"])
+def reset_password_endpoint(username: str, req: PasswordChangeRequest, auth: AuthContext = Depends(require_admin)):
+    from app.security.users import change_password
+    result = change_password(username, req.new_password)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/users/invite", tags=["users"])
+def invite_user_endpoint(req: UserCreateRequest, auth: AuthContext = Depends(require_admin)):
+    from app.security.invite import create_invite, send_invite_email
+    from app.security.users import create_user as _create
+    from app.security.rbac import assign_role
+    result = _create(req.username, "INVITE_PENDING", created_by=auth.username)
+    if not result["success"] and "already" not in result.get("error", "").lower():
+        raise HTTPException(status_code=400, detail=result["error"])
+    assign_role(req.username, req.role)
+    email = req.email or req.username + "@company.com"
+    invite = create_invite(req.username, email)
+    email_result = send_invite_email(email, req.username, invite["otp"], invite["token"])
+    email_sent = isinstance(email_result, dict) and email_result.get("success") is True
+    import os as _os
+    app_url = _os.getenv("APP_URL", "http://localhost:8000")
+    return {"success": True, "username": req.username, "otp": invite["otp"],
+            "email_sent": email_sent,
+            "setup_link": f"{app_url}/auth/setup-password?token={invite['token']}"}
+
+
+@app.get("/auth/setup-password", response_class=HTMLResponse, include_in_schema=False)
+def setup_password_page(token: str = ""):
+    """Password setup page for invited users."""
+    if not token:
+        return HTMLResponse("<h2>Invalid link — no token provided.</h2>", status_code=400)
+    from app.security.invite import get_invite_username
+    username = get_invite_username(token)
+    if not username:
+        return HTMLResponse("""<!DOCTYPE html><html><head><meta charset="UTF-8"/>
+<title>Expired Link</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Inter,sans-serif;background:#04060f;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}</style>
+</head><body><div style="text-align:center;padding:40px">
+<div style="font-size:3em;margin-bottom:16px">&#x274C;</div>
+<h2 style="font-size:1.3em;margin-bottom:8px">Link Expired or Invalid</h2>
+<p style="color:#4f6a9a">This invite link has expired or already been used.<br>Ask your admin to send a new invite.</p>
+</div></body></html>""", status_code=400)
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Set Your Password — NexusOps</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <style>
+    *{{margin:0;padding:0;box-sizing:border-box}}
+    body{{font-family:Inter,sans-serif;background:#04060f;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}}
+    @keyframes bg{{0%{{background-position:0% 50%}}50%{{background-position:100% 50%}}100%{{background-position:0% 50%}}}}
+    @keyframes in{{from{{opacity:0;transform:translateY(20px)}}to{{opacity:1;transform:translateY(0)}}}}
+    .orb1{{position:fixed;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,rgba(124,58,237,.2) 0%,transparent 70%);top:-80px;right:-60px;pointer-events:none}}
+    .orb2{{position:fixed;width:350px;height:350px;border-radius:50%;background:radial-gradient(circle,rgba(37,99,235,.15) 0%,transparent 70%);bottom:-60px;left:-40px;pointer-events:none}}
+    .card{{position:relative;z-index:1;background:rgba(13,20,36,.9);backdrop-filter:blur(20px);border:1px solid rgba(79,142,247,.2);border-radius:16px;padding:36px;width:100%;max-width:420px;animation:in .4s ease both}}
+    .logo{{display:flex;align-items:center;gap:10px;margin-bottom:28px}}
+    .logo-icon{{width:40px;height:40px;background:linear-gradient(135deg,#7c3aed,#2563eb);border-radius:10px;display:flex;align-items:center;justify-content:center}}
+    .logo-text{{font-size:1.1em;font-weight:800;letter-spacing:-.02em}}
+    h2{{font-size:1.25em;font-weight:700;margin-bottom:4px}}
+    .sub{{font-size:.83em;color:#4f6a9a;margin-bottom:24px}}
+    .field{{margin-bottom:16px}}
+    label{{display:block;font-size:.76em;font-weight:600;color:#4f8ef7;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}}
+    input{{width:100%;padding:11px 14px;border-radius:8px;border:1px solid rgba(79,142,247,.2);background:rgba(4,6,15,.6);color:#e2e8f0;font-size:.9em;font-family:inherit;transition:border-color .15s,box-shadow .15s;outline:none}}
+    input:focus{{border-color:#4f8ef7;box-shadow:0 0 0 3px rgba(79,142,247,.15)}}
+    .err{{display:none;color:#fca5a5;font-size:.82em;padding:10px 14px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);border-radius:8px;margin-bottom:14px}}
+    .btn{{width:100%;padding:12px;border-radius:8px;border:none;background:linear-gradient(135deg,#7c3aed,#2563eb);color:#fff;font-weight:700;font-size:.95em;cursor:pointer;font-family:inherit;transition:all .15s;margin-top:8px}}
+    .btn:hover:not(:disabled){{filter:brightness(1.1);box-shadow:0 4px 20px rgba(124,58,237,.4);transform:translateY(-1px)}}
+    .btn:disabled{{opacity:.6;cursor:not-allowed}}
+    .req{{font-size:.75em;color:#3d5080;margin-top:4px}}
+    .success{{display:none;text-align:center;padding:20px 0}}
+    .success .check{{font-size:3em;margin-bottom:12px}}
+    .success h3{{font-size:1.1em;font-weight:700;margin-bottom:6px}}
+    .success p{{font-size:.85em;color:#4f6a9a}}
+  </style>
+</head>
+<body>
+  <div class="orb1"></div>
+  <div class="orb2"></div>
+  <div class="card">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      </div>
+      <span class="logo-text">NexusOps</span>
+    </div>
+    <h2>Set Your Password</h2>
+    <p class="sub">Welcome, <strong>{username}</strong>. Enter the OTP from your invite email and choose a password.</p>
+    <div id="err" class="err"></div>
+    <div class="field">
+      <label>One-Time Password (OTP)</label>
+      <input id="otp" type="text" placeholder="6-digit code from email" maxlength="6" inputmode="numeric" autocomplete="one-time-code"/>
+    </div>
+    <div class="field">
+      <label>New Password</label>
+      <input id="pw1" type="password" placeholder="Choose a strong password" autocomplete="new-password"/>
+      <div class="req">Min 8 characters</div>
+    </div>
+    <div class="field">
+      <label>Confirm Password</label>
+      <input id="pw2" type="password" placeholder="Repeat your password" autocomplete="new-password"/>
+    </div>
+    <button class="btn" id="btn" onclick="submit()">Activate Account</button>
+    <div class="success" id="success">
+      <div class="check">&#x2705;</div>
+      <h3>Password set!</h3>
+      <p>Your account is ready. <a href="/" style="color:#7c3aed;font-weight:600">Sign in now &rarr;</a></p>
+    </div>
+  </div>
+  <script>
+    var TOKEN = '{token}';
+    function submit() {{
+      var otp = document.getElementById('otp').value.trim();
+      var pw1 = document.getElementById('pw1').value;
+      var pw2 = document.getElementById('pw2').value;
+      var err = document.getElementById('err');
+      var btn = document.getElementById('btn');
+      err.style.display = 'none';
+      if (!otp || otp.length < 6) {{ err.textContent = 'Enter the 6-digit OTP from your email'; err.style.display='block'; return; }}
+      if (pw1.length < 8) {{ err.textContent = 'Password must be at least 8 characters'; err.style.display='block'; return; }}
+      if (pw1 !== pw2) {{ err.textContent = 'Passwords do not match'; err.style.display='block'; return; }}
+      btn.disabled = true; btn.textContent = 'Activating...';
+      fetch('/auth/setup-password', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{token: TOKEN, otp: otp, new_password: pw1}})
+      }}).then(function(r){{ return r.json(); }}).then(function(d) {{
+        btn.disabled = false; btn.textContent = 'Activate Account';
+        if (d.success) {{
+          document.getElementById('success').style.display = 'block';
+          btn.style.display = 'none';
+          document.querySelectorAll('.field').forEach(function(f){{ f.style.display='none'; }});
+          document.getElementById('err').style.display = 'none';
+        }} else {{
+          err.textContent = d.detail || d.error || 'Invalid OTP or link expired';
+          err.style.display = 'block';
+        }}
+      }}).catch(function(){{ btn.disabled=false; btn.textContent='Activate Account'; err.textContent='Network error'; err.style.display='block'; }});
+    }}
+    document.addEventListener('keydown', function(e){{ if(e.key==='Enter') submit(); }});
+  </script>
+</body>
+</html>""")
+
+
+class SetupPasswordRequest(BaseModel):
+    token: str
+    otp: str
+    new_password: str
+
+@app.post("/auth/setup-password", tags=["auth"])
+def setup_password(req: SetupPasswordRequest):
+    """Complete account setup: validate OTP, set password, consume invite token."""
+    from app.security.invite import validate_invite, consume_invite
+    from app.security.users import change_password
+    result = validate_invite(req.token, req.otp)
+    if not result["valid"]:
+        raise HTTPException(status_code=400, detail=result["error"])
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    username = result["username"]
+    pw_result = change_password(username, req.new_password)
+    if not pw_result.get("success"):
+        raise HTTPException(status_code=400, detail=pw_result.get("error", "Failed to set password"))
+    consume_invite(req.token)
+    return {"success": True, "username": username, "message": "Password set. You can now sign in."}
+
+
+class SmtpConfigRequest(BaseModel):
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    app_url: str = "http://localhost:8000"
+
+@app.post("/auth/configure-smtp", tags=["auth"])
+def configure_smtp(req: SmtpConfigRequest, auth: AuthContext = Depends(require_admin)):
+    """Save SMTP settings to .env and test the connection. Admin only."""
+    import smtplib
+    updates = {}
+    if req.smtp_host:    updates["SMTP_HOST"]     = req.smtp_host
+    if req.smtp_user:    updates["SMTP_USER"]     = req.smtp_user
+    if req.smtp_password: updates["SMTP_PASSWORD"] = req.smtp_password
+    if req.smtp_from or req.smtp_user:
+        updates["SMTP_FROM"] = req.smtp_from or req.smtp_user
+    updates["SMTP_PORT"] = str(req.smtp_port)
+    if req.app_url:      updates["APP_URL"]       = req.app_url
+    _write_env(updates)
+    # reload env vars in this process
+    import os
+    for k, v in updates.items():
+        os.environ[k] = v
+    # test connection
+    if req.smtp_host and req.smtp_user and req.smtp_password:
+        try:
+            with smtplib.SMTP(req.smtp_host, req.smtp_port, timeout=8) as s:
+                s.ehlo(); s.starttls(); s.login(req.smtp_user, req.smtp_password)
+            return {"success": True, "message": "SMTP configured and connection verified"}
+        except Exception as e:
+            return {"success": False, "message": f"Settings saved but SMTP test failed: {e}"}
+    return {"success": True, "message": "SMTP settings saved (no test — fill all fields to verify)"}
+
+@app.post("/auth/test-email", tags=["auth"])
+def test_email(auth: AuthContext = Depends(require_admin)):
+    """Send a test email to the configured SMTP_USER address."""
+    from app.security.invite import send_invite_email
+    import os
+    to = os.getenv("SMTP_USER", "")
+    if not to or "@" not in to:
+        raise HTTPException(400, detail="SMTP_USER not configured — set it in .env or via /auth/configure-smtp")
+    result = send_invite_email(to, auth.username, "123456", "test-token")
+    if result.get("success"):
+        return {"success": True, "message": f"Test email sent to {to}"}
+    raise HTTPException(400, detail=result.get("error", "Failed to send test email"))
 
 
 @app.get("/health")
@@ -2375,9 +3099,8 @@ def secrets_status():
 
 
 @app.post("/secrets")
-def secrets_update(payload: SecretsPayload, x_user: str = Header(...)):
+def secrets_update(payload: SecretsPayload, auth: AuthContext = Depends(require_admin)):
     """Write secrets to .env file. Requires admin role."""
-    _rbac_guard(x_user, "manage_secrets")
     if not payload.secrets:
         raise HTTPException(status_code=400, detail="No secrets provided.")
     _write_env(payload.secrets)
@@ -3115,7 +3838,7 @@ def chat_action_count():
     return {"count": _chat_action_count}
 
 @app.post("/warroom/create")
-def warroom_create(req: WarRoomRequest):
+def warroom_create(req: WarRoomRequest, auth: AuthContext = Depends(require_developer)):
     """Create a war room: collect universal context, run AI analysis, create Slack channel, post findings."""
     # 1. Collect context from all integrations
     context: dict = {}

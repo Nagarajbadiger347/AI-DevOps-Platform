@@ -155,12 +155,37 @@ def _exec_jira(incident_id: str, params: dict, synthesis: dict) -> dict:
     return jira.create_incident(summary=summary, description=body)
 
 
-def _exec_slack(incident_id: str, params: dict, synthesis: dict) -> dict:
+def _exec_slack(incident_id: str, params: dict, synthesis: dict, context: dict = None) -> dict:
     topic = params.get(
         "title",
         f"Incident {incident_id} | {synthesis.get('severity', 'unknown').upper()} | "
         f"{synthesis.get('summary', '')}"
     )
+    # Create dedicated channel
+    channel_result = slack.create_incident_channel(incident_id, topic=topic)
+    if channel_result.get("success"):
+        channel_id = channel_result["channel_id"]
+        # Extract PR links from synthesis actions
+        pr_links = []
+        for action in synthesis.get("actions_to_take", []):
+            if isinstance(action, dict) and action.get("type") == "github_pr":
+                p = action.get("params", {})
+                if p.get("url"):
+                    pr_links.append((p.get("title", "PR fix"), p["url"]))
+        slack.post_incident_summary(
+            channel      = channel_id,
+            incident_id  = incident_id,
+            summary      = synthesis.get("summary", ""),
+            findings     = synthesis.get("findings", []),
+            severity     = synthesis.get("severity", "high"),
+            actions      = synthesis.get("actions_to_take", []),
+            root_cause   = synthesis.get("root_cause", ""),
+            confidence   = synthesis.get("confidence", 0.0),
+            infra_context= context or {},
+            pr_links     = pr_links,
+        )
+        return channel_result
+    # Fallback to basic announcement
     return slack.create_war_room(topic=topic)
 
 
@@ -171,7 +196,7 @@ def _exec_opsgenie(incident_id: str, params: dict, synthesis: dict) -> dict:
 
 
 def _execute_actions(incident_id: str, actions: list, synthesis: dict,
-                     auto_remediate: bool) -> list:
+                     auto_remediate: bool, context: dict = None) -> list:
     """Execute each recommended action and return results."""
     results = []
     for action in actions:
@@ -203,7 +228,7 @@ def _execute_actions(incident_id: str, actions: list, synthesis: dict,
             elif action_type == "jira_ticket":
                 res = _exec_jira(incident_id, params, synthesis)
             elif action_type == "slack_warroom":
-                res = _exec_slack(incident_id, params, synthesis)
+                res = _exec_slack(incident_id, params, synthesis, context=context)
             elif action_type == "opsgenie_alert":
                 res = _exec_opsgenie(incident_id, params, synthesis)
             else:
@@ -257,6 +282,7 @@ def run_incident_pipeline(
         actions        = synthesis.get("actions_to_take", []),
         synthesis      = synthesis,
         auto_remediate = auto_remediate,
+        context        = obs,
     )
 
     # ── Step 4: Store in ChromaDB memory ──────────────────────

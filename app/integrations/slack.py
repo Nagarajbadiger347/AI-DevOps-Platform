@@ -130,23 +130,83 @@ def create_incident_channel(incident_id: str, topic: str = "") -> dict:
 
 def post_incident_summary(channel: str, incident_id: str, summary: str,
                           findings: list, severity: str = "high",
-                          actions: list = None) -> dict:
-    """Post a formatted incident analysis to a Slack channel using Block Kit."""
+                          actions: list = None, root_cause: str = "",
+                          confidence: float = 0.0, infra_context: dict = None,
+                          pr_links: list = None) -> dict:
+    """Post a rich incident analysis to a Slack channel using Block Kit.
+
+    Includes root cause, findings, infra snapshot, PR links, and action plan.
+    """
     if not SLACK_BOT_TOKEN:
         return {"success": False, "error": "SLACK_BOT_TOKEN not configured"}
 
     sev_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(severity.lower(), "⚪")
+    conf_bar  = "█" * int((confidence or 0) * 10) + "░" * (10 - int((confidence or 0) * 10))
 
-    findings_text = "\n".join(f"• {f}" for f in (findings or [])[:8]) or "_No findings_"
-    actions_text  = "\n".join(f"• {a if isinstance(a, str) else a.get('reason', str(a))}" for a in (actions or [])[:5]) or "_No actions_"
+    findings_text = "\n".join(f"• {f}" for f in (findings or [])[:10]) or "_No findings detected_"
+
+    # Build action lines with type + reason
+    action_lines = []
+    for a in (actions or [])[:8]:
+        if isinstance(a, str):
+            action_lines.append(f"• {a}")
+        else:
+            atype  = a.get("type", "action")
+            reason = a.get("reason", "")
+            params = a.get("params", {})
+            line = f"• *[{atype}]* {reason}"
+            if params:
+                detail = ", ".join(f"{k}={v}" for k, v in params.items() if v)
+                if detail:
+                    line += f" `{detail}`"
+            action_lines.append(line)
+    actions_text = "\n".join(action_lines) or "_No actions required_"
 
     blocks = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"{sev_emoji} Incident {incident_id} — AI Analysis"}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Summary:* {summary}"}},
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Findings:*\n{findings_text}"}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Recommended Actions:*\n{actions_text}"}},
-        {"type": "context", "elements": [{"type": "mrkdwn", "text": "🤖 AI DevOps Intelligence Platform"}]},
+        {"type": "header", "text": {"type": "plain_text", "text": f"{sev_emoji} Incident {incident_id} — AI War Room"}},
+        {"type": "section", "fields": [
+            {"type": "mrkdwn", "text": f"*Severity:*\n{sev_emoji} {severity.upper()}"},
+            {"type": "mrkdwn", "text": f"*AI Confidence:*\n`{conf_bar}` {int((confidence or 0)*100)}%"},
+        ]},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*📋 Summary*\n{summary}"}},
     ]
 
-    return post_message(channel, text=f"Incident {incident_id} analysis", blocks=blocks)
+    if root_cause:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*🔍 Root Cause*\n{root_cause}"}})
+
+    blocks.append({"type": "divider"})
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*🔬 Findings*\n{findings_text}"}})
+
+    # Infrastructure snapshot
+    if infra_context:
+        infra_lines = []
+        aws = infra_context.get("aws", {})
+        k8s = infra_context.get("k8s", {})
+        gh  = infra_context.get("github", {})
+        if aws.get("alarms"):
+            firing = [a for a in aws.get("alarms", []) if str(a.get("state", "")).upper() == "ALARM"]
+            if firing:
+                infra_lines.append(f"• *AWS Alarms firing:* {len(firing)} — " + ", ".join(a.get("name", "") for a in firing[:3]))
+        if aws.get("instances"):
+            unhealthy = [i for i in aws.get("instances", []) if i.get("state") not in ("running", "stopped")]
+            if unhealthy:
+                infra_lines.append(f"• *EC2 unhealthy:* {', '.join(i.get('id','') for i in unhealthy[:3])}")
+        if k8s.get("unhealthy_pods"):
+            infra_lines.append(f"• *K8s unhealthy pods:* {len(k8s['unhealthy_pods'])} — " + ", ".join(p.get("name","") for p in k8s["unhealthy_pods"][:3]))
+        if gh.get("recent_commits"):
+            last = gh["recent_commits"][0] if gh["recent_commits"] else {}
+            if last:
+                infra_lines.append(f"• *Last commit:* `{last.get('sha','')[:7]}` {last.get('message','')[:60]} by {last.get('author','')}")
+        if infra_lines:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*🏗️ Infrastructure Snapshot*\n" + "\n".join(infra_lines)}})
+
+    # PR links
+    if pr_links:
+        pr_text = "\n".join(f"• <{url}|{title}>" for title, url in pr_links)
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*🔀 Related Pull Requests*\n{pr_text}"}})
+
+    blocks.append({"type": "divider"})
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*⚡ Action Plan*\n{actions_text}"}})
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "🤖 AI DevOps Intelligence Platform — automated incident analysis"}]})
+
+    return post_message(channel, text=f"{sev_emoji} Incident {incident_id}: {summary}", blocks=blocks)

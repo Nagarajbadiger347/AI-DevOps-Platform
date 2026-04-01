@@ -58,11 +58,6 @@ def _save_to_file(path: Path) -> None:
 _load_from_file(_config_path)
 _save_to_file(_config_path)
 
-# Ensure default admin user exists
-if "nagaraj" not in _user_roles:
-    _user_roles["nagaraj"] = "admin"
-    _save_to_file(_config_path)
-
 
 def assign_role(user: str, role: str) -> dict:
     user = user.strip().lower()   
@@ -81,6 +76,12 @@ def revoke_role(user: str) -> dict:
     del _user_roles[user]
     _save_to_file(_config_path)
     return {"success": True, "user": user}
+
+
+def get_user_role(user: str) -> str:
+    """Return the role for a user, defaulting to 'viewer' if no role is assigned."""
+    user = user.strip().lower()
+    return _user_roles.get(user, "viewer")
 
 
 def check_access(user: str, action: str) -> dict:
