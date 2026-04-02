@@ -31,7 +31,7 @@ if os.getenv("ENVIRONMENT", "development").lower() == "production" and SECRET_KE
     raise RuntimeError("JWT_SECRET_KEY must be set in production. Run: openssl rand -hex 32")
 ALGORITHM    = os.getenv("JWT_ALGORITHM", "HS256")
 EXPIRE_MINS  = int(os.getenv("JWT_EXPIRE_MINS", "480"))
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").lower() != "false"
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() != "false"
 if not AUTH_ENABLED:
     import warnings
     warnings.warn("AUTH_ENABLED=false — authentication is disabled. Set AUTH_ENABLED=true in production.", stacklevel=1)

@@ -63,7 +63,7 @@ services:
   # ── Redis (rate limiting, session cache) ──────────────────────
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     expose:

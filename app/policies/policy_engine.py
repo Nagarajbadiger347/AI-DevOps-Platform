@@ -68,6 +68,10 @@ class PolicyEngine:
 
         return True, "allowed"
 
+    def get_required_permission(self, action_type: str) -> str | None:
+        """Return the permission string required for an action type, or None if unrestricted."""
+        return self._rules.get("action_permissions", {}).get(action_type)
+
     def evaluate_batch(
         self,
         actions: list[dict],

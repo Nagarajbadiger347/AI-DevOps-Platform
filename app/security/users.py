@@ -35,24 +35,60 @@ _USERS_PATH = Path(
 _users: dict[str, dict] = {}
 
 
-# ── Password hashing (SHA-256 + HMAC with app secret, no bcrypt dep) ──────────
+# ── Password hashing (bcrypt with HMAC-SHA256 legacy fallback) ────────────────
+
+try:
+    import bcrypt as _bcrypt
+    _BCRYPT_AVAILABLE = True
+except ImportError:
+    _bcrypt = None  # type: ignore
+    _BCRYPT_AVAILABLE = False
+
 
 def _app_secret() -> bytes:
     secret = os.getenv("JWT_SECRET_KEY", "change-me-in-production-use-openssl-rand-hex-32")
     return secret.encode()
 
+
+def _is_legacy_hash(stored_hash: str) -> bool:
+    """Return True if the hash is in the old HMAC-SHA256 format (salt:hex)."""
+    # bcrypt hashes start with $2b$ or $2a$; legacy format is salt:hexdigest
+    return stored_hash.startswith("$2") is False and ":" in stored_hash
+
+
 def hash_password(password: str) -> str:
-    """HMAC-SHA256 password hash with a random salt."""
+    """Hash a password using bcrypt (preferred) or HMAC-SHA256 fallback."""
+    if _BCRYPT_AVAILABLE:
+        hashed = _bcrypt.hashpw(password.encode(), _bcrypt.gensalt())
+        return hashed.decode()
+    # Fallback: HMAC-SHA256 with salt
     salt = secrets.token_hex(16)
     h = hmac.new(_app_secret() + salt.encode(), password.encode(), hashlib.sha256).hexdigest()
     return f"{salt}:{h}"
 
-def verify_password(password: str, stored_hash: str) -> bool:
-    """Verify a password against a stored HMAC-SHA256 hash."""
+
+def _verify_legacy(password: str, stored_hash: str) -> bool:
+    """Verify a password against the old HMAC-SHA256 hash format."""
     try:
         salt, h = stored_hash.split(":", 1)
         expected = hmac.new(_app_secret() + salt.encode(), password.encode(), hashlib.sha256).hexdigest()
         return hmac.compare_digest(h, expected)
+    except Exception:
+        return False
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify a password.
+
+    Handles both bcrypt hashes and legacy HMAC-SHA256 hashes.
+    Returns True if the password matches.
+    """
+    try:
+        if _is_legacy_hash(stored_hash):
+            return _verify_legacy(password, stored_hash)
+        if _BCRYPT_AVAILABLE:
+            return _bcrypt.checkpw(password.encode(), stored_hash.encode())
+        return False
     except Exception:
         return False
 
@@ -121,12 +157,23 @@ def delete_user(username: str) -> dict:
 
 
 def authenticate(username: str, password: str) -> bool:
-    """Return True if username + password are valid."""
+    """Return True if username + password are valid.
+
+    If the stored hash uses the legacy HMAC-SHA256 format and bcrypt is
+    available, the password is re-hashed with bcrypt on successful login.
+    """
     username = username.strip().lower()
     user = _users.get(username)
     if not user:
         return False
-    return verify_password(password, user["password_hash"])
+    stored = user["password_hash"]
+    if not verify_password(password, stored):
+        return False
+    # Upgrade legacy hash to bcrypt on successful login
+    if _BCRYPT_AVAILABLE and _is_legacy_hash(stored):
+        user["password_hash"] = hash_password(password)
+        _save()
+    return True
 
 
 def user_exists(username: str) -> bool:

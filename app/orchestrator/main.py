@@ -80,12 +80,36 @@ def _rbac_guard(x_user: Optional[str], required_action: str):
                    f"Role: {result.get('role', 'none')}."
         )
 
+async def _approval_cleanup_loop() -> None:
+    """Background task: clean up expired approval requests every 5 minutes."""
+    import asyncio
+    while True:
+        try:
+            await asyncio.sleep(300)  # 5 minutes
+            from app.incident.approval import cleanup_expired
+            removed = cleanup_expired()
+            if removed:
+                import logging
+                logging.getLogger(__name__).info(
+                    "approval_cleanup_ran", extra={"removed": removed}
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "approval_cleanup_error", extra={"error": str(exc)}
+            )
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    import asyncio
     if _settings.ENABLE_MONITOR_LOOP:
-        import asyncio
         from app.monitoring.loop import monitoring_loop
         asyncio.create_task(monitoring_loop())
+    # Start approval cleanup background task
+    cleanup_task = asyncio.create_task(_approval_cleanup_loop())
     # Validate critical configuration
     import warnings as _warnings
     if not os.getenv("JWT_SECRET_KEY"):
@@ -94,6 +118,11 @@ async def _lifespan(_: FastAPI):
     if not any(llm_keys):
         _warnings.warn("No LLM API key configured (ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY). AI features will fail.")
     yield
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
 
 app = FastAPI(
     title="AI DevOps Intelligence Platform",
@@ -103,7 +132,11 @@ app = FastAPI(
 )
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    return FileResponse("favicon.ico")
+    import os
+    if os.path.exists("favicon.ico"):
+        return FileResponse("favicon.ico")
+    from fastapi.responses import Response
+    return Response(status_code=204)
 
 @app.get("/.well-known/appspecific/com.chrome.devtools.json", include_in_schema=False)
 async def chrome_devtools():
@@ -111,12 +144,14 @@ async def chrome_devtools():
     return {}
 
 _CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",") if o.strip()]
+# Wildcard origins + credentials is a security violation — strip wildcards when credentials enabled
+_CORS_ORIGINS = [o for o in _CORS_ORIGINS if o != "*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-User"],
 )
 
 # ── Simple in-memory rate limiter ─────────────────────────────
@@ -132,6 +167,11 @@ _RATE_WINDOW = 60  # seconds
 _METRICS: dict = _defaultdict(int)
 _METRICS_HIST: dict = _defaultdict(list)  # path → list of durations
 
+# ── Pending pipeline states (awaiting human approval) ─────────
+# keyed by correlation_id; allows /approvals/{id}/resume to
+# re-invoke only the execute→validate→memory portion of the graph.
+_PENDING_PIPELINE_STATES: dict = {}
+
 def _inc(key: str, amount: int = 1):
     _METRICS[key] += amount
 
@@ -140,7 +180,7 @@ async def _rate_limit_middleware(request: Request, call_next):
     path = request.url.path
     method = request.method
     # Only rate-limit AI-heavy endpoints
-    if path in ("/chat", "/incidents/run", "/warroom/create"):
+    if path in ("/chat", "/chat/v2", "/incidents/run", "/warroom/create"):
         client_ip = request.client.host if request.client else "unknown"
         now = _time.time()
         window_start = now - _RATE_WINDOW
@@ -215,2170 +255,2346 @@ class K8sConfig(BaseModel):
     namespace: str = "default"
 
 class IncidentRunRequest(BaseModel):
-    incident_id: str
-    description: str
-    severity: str = "high"          # critical | high | medium | low
-    aws: AWSConfig = None
-    k8s: K8sConfig = None
-    auto_remediate: bool = False    # if True, execute K8s control-plane actions automatically
-    hours: int = 2                  # lookback window for observability data
+    incident_id:    str
+    description:    str
+    severity:       str  = "high"     # critical | high | medium | low
+    aws:            AWSConfig = None
+    k8s:            K8sConfig = None
+    auto_remediate: bool = False      # if True, execute actions automatically
+    hours:          int  = 2          # lookback window for observability data
+    # v2 LangGraph extras (optional — backwards compatible)
+    user:           str  = "system"
+    role:           str  = "admin"
+    aws_cfg:        Optional[Dict[str, Any]] = None
+    k8s_cfg:        Optional[Dict[str, Any]] = None
+    slack_channel:  str  = "#incidents"
+    dry_run:        bool = False          # if True, simulate pipeline without executing actions
+    llm_provider:   str  = ""
+    metadata:       Optional[Dict[str, Any]] = None
 
-@app.get("/", response_class=HTMLResponse)
-def root():
-    return HTMLResponse(content="""<!DOCTYPE html>
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard(request: Request = None):
+    import os as _os
+    _aws_region = _os.getenv("AWS_REGION", "us-east-1")
+    _html = """<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>DevOps AI — Autonomous Operations Platform</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
-  <style>
-    *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-    :root{
-      --bg:#04060f;--bg2:#070b18;--bg3:#0a0f1e;
-      --surface:#0d1424;--surface2:#111a2e;--surface3:#162038;
-      --border:#1a2540;--border2:#223060;
-      --text:#e2e8f0;--text2:#8b9ec7;--muted:#3d5080;
-      --blue:#4f8ef7;--blue2:#2563eb;--blue3:#1d4ed8;
-      --cyan:#22d3ee;--cyan2:#0891b2;
-      --purple:#a78bfa;--purple2:#7c3aed;
-      --green:#34d399;--green2:#059669;
-      --red:#f87171;--amber:#fbbf24;
-      --glow-blue:rgba(79,142,247,0.15);
-      --glow-purple:rgba(167,139,250,0.12);
-      --glow-cyan:rgba(34,211,238,0.1);
-      --radius:10px;--radius-sm:6px;--radius-lg:16px;
-    }
-    html{scroll-behavior:smooth}
-    body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;font-size:13px;overflow:hidden}
-    ::-webkit-scrollbar{width:3px;height:3px}
-    ::-webkit-scrollbar-track{background:transparent}
-    ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>NexusOps — AI DevOps Platform</title>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#090d16;--bg2:#0f1623;--bg3:#0c1220;
+  --surface:#0f1623;--surface2:#141e2e;--surface3:#18243a;
+  --border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.14);
+  --text:#e2e8f4;--text2:#94a3b8;--muted:#3d5070;
+  --purple:#7c3aed;--purple-light:#a78bfa;--purple-glow:rgba(124,58,237,0.18);
+  --cyan:#06b6d4;--cyan2:#0e7490;
+  --green:#22c55e;--green2:#16a34a;
+  --red:#ef4444;--red2:#dc2626;
+  --amber:#f59e0b;--amber2:#d97706;
+  --blue:#3b82f6;--blue2:#1d4ed8;
+  --r:10px;--r-sm:6px;--r-lg:12px;
+  --sidebar:248px;--topbar:56px;
+  --shadow:0 1px 3px rgba(0,0,0,0.4);
+  --shadow-lg:0 8px 32px rgba(0,0,0,0.6);
+  --trans:.15s ease;
+}
+html{scroll-behavior:smooth}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:13.5px;overflow:hidden}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--surface3);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+code,pre,.mono{font-family:'SF Mono','Fira Code','Cascadia Code',ui-monospace,monospace}
 
-    /* ── ANIMATED BG ── */
-    body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse 80% 60% at 20% 0%,rgba(37,99,235,0.08) 0%,transparent 60%),radial-gradient(ellipse 60% 50% at 80% 100%,rgba(124,58,237,0.07) 0%,transparent 60%);pointer-events:none;z-index:0}
+/* ── LOGIN ── */
+#login-screen{position:fixed;inset:0;background:var(--bg);display:flex;align-items:stretch;z-index:999;overflow:hidden}
+.login-left{flex:1;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;padding:60px 64px;position:relative;overflow:hidden;background:linear-gradient(135deg,#0d0f1e 0%,#110d22 50%,#0a1020 100%)}
+.login-left::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 30% 40%,rgba(124,58,237,0.28) 0%,transparent 60%),radial-gradient(ellipse at 80% 80%,rgba(6,182,212,0.15) 0%,transparent 55%);pointer-events:none}
+.login-left-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none}
+.login-left-content{position:relative;z-index:1;max-width:480px}
+.login-product-logo{display:flex;align-items:center;gap:14px;margin-bottom:52px}
+.login-product-icon{width:48px;height:48px;border-radius:13px;background:linear-gradient(135deg,#7c3aed,#06b6d4);display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 0 32px rgba(124,58,237,0.5),0 0 0 1px rgba(255,255,255,0.12)}
+.login-product-name{font-size:1.4em;font-weight:800;letter-spacing:-.03em;background:linear-gradient(135deg,#c4b5fd 30%,#67e8f9);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.login-hero-heading{font-size:2.4em;font-weight:800;line-height:1.15;letter-spacing:-.04em;margin-bottom:18px;color:#f1f5f9}
+.login-hero-heading span{background:linear-gradient(135deg,#a78bfa,#38bdf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.login-hero-sub{font-size:.95em;color:var(--text2);line-height:1.7;margin-bottom:40px;max-width:380px}
+.login-features{display:flex;flex-direction:column;gap:14px}
+.login-feature{display:flex;align-items:flex-start;gap:12px}
+.login-feature-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;margin-top:1px}
+.login-feature-text strong{display:block;font-size:.88em;font-weight:600;color:var(--text);margin-bottom:2px}
+.login-feature-text span{font-size:.78em;color:var(--text2);line-height:1.5}
+.login-right{width:420px;display:flex;align-items:center;justify-content:center;padding:40px 48px;background:var(--bg2);border-left:1px solid var(--border);flex-shrink:0}
+.login-card{width:100%;max-width:340px}
+.login-card-heading{font-size:1.35em;font-weight:800;letter-spacing:-.02em;margin-bottom:6px;color:var(--text)}
+.login-card-sub{font-size:.82em;color:var(--text2);margin-bottom:32px}
+.form-group{margin-bottom:18px}
+.form-label{display:block;font-size:.71em;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px}
+.form-input-wrap{position:relative}
+.form-input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 14px;color:var(--text);font-size:.9em;font-family:inherit;outline:none;transition:border-color var(--trans),box-shadow var(--trans),background var(--trans)}
+.form-input:focus{border-color:var(--purple);box-shadow:0 0 0 3px rgba(124,58,237,0.15);background:var(--surface3)}
+.form-input.error-field{border-color:var(--red)!important;box-shadow:0 0 0 3px rgba(239,68,68,0.12)!important}
+.form-input::placeholder{color:var(--muted)}
+.form-input-icon{position:absolute;right:12px;top:50%;transform:translateY(-50%);color:var(--text2);cursor:pointer;user-select:none;font-size:14px;padding:3px 5px;border-radius:4px;transition:color var(--trans),background var(--trans)}
+.form-input-icon:hover{color:var(--text);background:rgba(255,255,255,0.06)}
+.login-btn{width:100%;padding:11px;border-radius:var(--r-sm);background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;font-size:.9em;font-weight:700;border:1px solid rgba(255,255,255,0.12);cursor:pointer;transition:filter var(--trans),transform var(--trans),box-shadow var(--trans);letter-spacing:.01em;box-shadow:0 4px 16px rgba(124,58,237,.35);margin-top:4px;display:flex;align-items:center;justify-content:center;gap:8px}
+.login-btn:hover{filter:brightness(1.1);transform:translateY(-1px);box-shadow:0 6px 24px rgba(124,58,237,.5)}
+.login-btn:active{transform:translateY(0);filter:brightness(.95)}
+.login-btn:disabled{opacity:.6;cursor:not-allowed;transform:none;filter:none}
+.login-hint{text-align:center;color:var(--muted);font-size:.72em;margin-top:20px;letter-spacing:.01em}
+#login-error{color:var(--red);font-size:.81em;text-align:left;margin-bottom:16px;display:none;padding:10px 12px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);border-radius:var(--r-sm)}
+@keyframes loginFadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+.login-right{animation:loginFadeUp .4s cubic-bezier(.22,.68,0,1.1)}
 
-    /* ── SIDEBAR ── */
-    .sidebar{width:224px;flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;height:100vh;position:sticky;top:0;z-index:10}
-    .sb-logo{padding:18px 16px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
-    .logo-mark{width:34px;height:34px;background:linear-gradient(135deg,#2563eb,#7c3aed);border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;box-shadow:0 0 20px rgba(79,142,247,0.4)}
-    .logo-text .name{font-size:14px;font-weight:800;letter-spacing:-.02em;background:linear-gradient(90deg,#4f8ef7,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-    .logo-text .tag{font-size:9.5px;color:var(--muted);font-weight:400;letter-spacing:.04em;margin-top:1px}
-    .sb-status{padding:10px 14px;border-bottom:1px solid var(--border)}
-    .status-row{display:flex;align-items:center;gap:6px;font-size:11px}
-    .pulse{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(52,211,153,.6);animation:pulse 2s ease infinite}
-    @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}50%{box-shadow:0 0 0 5px rgba(52,211,153,0)}}
-    .sb-section{padding:10px 8px 4px}
-    .sb-label{font-size:9px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);padding:0 8px 7px;display:block}
-    .nav-link{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:var(--radius-sm);font-size:12.5px;font-weight:500;color:var(--text2);cursor:pointer;border:none;background:transparent;width:100%;text-align:left;text-decoration:none;transition:all .15s;position:relative;outline:none}
-    .nav-link:hover{background:var(--surface2);color:var(--text)}
-    .nav-link.active{background:linear-gradient(90deg,rgba(37,99,235,0.18),rgba(79,142,247,0.06));color:var(--blue);border-right:2px solid var(--blue)}
-    .nav-link .ico{font-size:13px;width:18px;text-align:center;flex-shrink:0}
-    .nav-link .cnt{margin-left:auto;font-size:10px;background:var(--surface3);color:var(--text2);padding:1px 6px;border-radius:10px;font-weight:600}
-    .nav-link.active .cnt{background:rgba(79,142,247,0.2);color:var(--blue)}
-    .sb-divider{height:1px;background:var(--border);margin:6px 14px}
-    .sb-footer{margin-top:auto;padding:12px 14px;border-top:1px solid var(--border)}
-    .sb-user{display:flex;align-items:center;gap:9px}
-    .avatar{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,#2563eb,#7c3aed);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
-    .user-info .uname{font-size:12px;font-weight:600;color:var(--text)}
-    .user-info .urole{font-size:10px;color:var(--muted)}
-    .live-dot{margin-left:auto;display:flex;align-items:center;gap:4px;font-size:9.5px;color:var(--green)}
+/* ── APP LAYOUT ── */
+#app{display:none;height:100vh;overflow:hidden}
 
-    /* ── MAIN ── */
-    .main{flex:1;min-width:0;display:flex;flex-direction:column;height:100vh;overflow:hidden;position:relative;z-index:1}
+/* ── SIDEBAR ── */
+.sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sidebar);background:linear-gradient(180deg,#0b0f1c 0%,#0d1220 100%);border-right:1px solid rgba(124,58,237,0.18);display:flex;flex-direction:column;z-index:100;overflow-y:auto;overflow-x:hidden;box-shadow:4px 0 24px rgba(0,0,0,0.4)}
+.sidebar::before{content:'';position:absolute;top:0;left:0;right:0;height:200px;background:radial-gradient(ellipse at 50% 0%,rgba(124,58,237,0.15) 0%,transparent 70%);pointer-events:none}
+.sidebar-logo{display:flex;align-items:center;gap:10px;padding:18px 16px 16px;border-bottom:1px solid rgba(255,255,255,0.06)}
+.sidebar-logo-icon{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#7c3aed,#06b6d4);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;box-shadow:0 0 24px rgba(124,58,237,.5),0 0 0 1px rgba(255,255,255,.1)}
+.sidebar-logo-text{font-size:.97em;font-weight:800;letter-spacing:-.025em;background:linear-gradient(135deg,#c4b5fd,#67e8f9);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sidebar-logo-sub{font-size:.58em;color:var(--muted);font-weight:600;display:block;margin-top:1px;letter-spacing:.06em;text-transform:uppercase}
+.nav-section{padding:20px 16px 6px;font-size:.61em;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.12em}
+.nav-item{display:flex;align-items:center;gap:9px;padding:8px 10px 8px 14px;border-radius:var(--r-sm);cursor:pointer;transition:background var(--trans),color var(--trans);color:var(--text2);margin:1px 8px;position:relative;font-size:.855em;font-weight:500;user-select:none}
+.nav-item:hover{background:rgba(255,255,255,0.06);color:var(--text);transform:translateX(2px)}
+.nav-item.active{background:linear-gradient(90deg,rgba(124,58,237,0.22),rgba(124,58,237,0.08));color:#c4b5fd;font-weight:600;border:1px solid rgba(124,58,237,0.2)}
+.nav-item.active::before{content:'';position:absolute;left:-9px;top:50%;transform:translateY(-50%);width:3px;height:20px;background:linear-gradient(180deg,#a78bfa,#7c3aed);border-radius:0 3px 3px 0;box-shadow:0 0 8px rgba(124,58,237,0.6)}
+.nav-icon{width:16px;text-align:center;font-size:14px;flex-shrink:0}
+.nav-badge{margin-left:auto;background:var(--red);color:#fff;font-size:.61em;font-weight:700;padding:1px 6px;border-radius:10px;min-width:18px;text-align:center;line-height:1.5}
+.sidebar-footer{margin-top:auto;padding:12px;border-top:1px solid var(--border)}
+.user-tile{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--r-sm);background:rgba(255,255,255,0.02);border:1px solid var(--border)}
+.user-avatar{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,var(--purple),var(--cyan2));display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;flex-shrink:0;color:#fff}
+.user-info{flex:1;min-width:0}
+.user-name{font-size:.82em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.user-role{font-size:.67em;color:var(--muted);text-transform:capitalize;letter-spacing:.03em}
+.logout-btn{width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:6px;color:var(--muted);transition:all var(--trans);flex-shrink:0;cursor:pointer;border:1px solid transparent;background:none;font-size:12px}
+.logout-btn:hover{background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.2);color:var(--red)}
 
-    /* ── TOPBAR ── */
-    .topbar{display:flex;align-items:center;gap:12px;padding:0 20px;height:52px;border-bottom:1px solid var(--border);background:rgba(4,6,15,0.8);backdrop-filter:blur(12px);flex-shrink:0}
-    .topbar-title{font-size:14px;font-weight:700;letter-spacing:-.01em}
-    .topbar-ver{font-size:10px;color:var(--muted);background:var(--surface2);padding:2px 7px;border-radius:10px;border:1px solid var(--border)}
-    .topbar-spacer{flex:1}
-    .tb-chip{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:all .15s;color:var(--text2)}
-    .tb-chip:hover{border-color:var(--blue);color:var(--blue)}
-    .tb-chip.on{border-color:rgba(52,211,153,.4);color:var(--green);background:rgba(52,211,153,.06)}
-    .tb-chip .dot{width:5px;height:5px;border-radius:50%;background:currentColor}
+/* ── MAIN CONTENT ── */
+.main{margin-left:var(--sidebar);height:100vh;overflow-y:auto;display:flex;flex-direction:column}
+.topbar{height:var(--topbar);background:rgba(9,13,22,0.95);backdrop-filter:blur(20px) saturate(1.4);border-bottom:1px solid rgba(124,58,237,0.12);display:flex;align-items:center;padding:0 24px;gap:12px;position:sticky;top:0;z-index:50;flex-shrink:0;box-shadow:0 1px 0 rgba(124,58,237,0.08)}
+.topbar-title{font-size:1em;font-weight:700;flex:1;letter-spacing:-.02em;color:var(--text)}
+.topbar-actions{display:flex;gap:8px;align-items:center}
+.content{padding:24px;flex:1}
 
-    /* ── METRIC STRIP ── */
-    .metric-strip{display:flex;gap:12px;padding:14px 20px;border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto;background:var(--bg2)}
-    .metric-strip::-webkit-scrollbar{height:0}
-    .mc{flex:1;min-width:120px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;position:relative;overflow:hidden;cursor:default;transition:border-color .2s}
-    .mc:hover{border-color:var(--border2)}
-    .mc::before{content:'';position:absolute;inset:0;opacity:0;background:radial-gradient(ellipse at 50% 0%,var(--glow-blue),transparent 70%);transition:opacity .3s}
-    .mc:hover::before{opacity:1}
-    .mc-label{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;display:flex;align-items:center;gap:5px}
-    .mc-val{font-size:22px;font-weight:800;letter-spacing:-.02em;line-height:1}
-    .mc-sub{font-size:10px;color:var(--text2);margin-top:4px}
-    .mc-blue .mc-val{color:var(--blue)}
-    .mc-green .mc-val{color:var(--green)}
-    .mc-purple .mc-val{color:var(--purple)}
-    .mc-cyan .mc-val{color:var(--cyan)}
-    .mc-amber .mc-val{color:var(--amber)}
-    .mc-bar{position:absolute;bottom:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--blue2),var(--purple2))}
-    .mc-green .mc-bar{background:linear-gradient(90deg,var(--green2),var(--cyan2))}
-    .mc-purple .mc-bar{background:linear-gradient(90deg,var(--purple2),var(--blue2))}
-    .mc-cyan .mc-bar{background:linear-gradient(90deg,var(--cyan2),var(--blue2))}
-    .mc-amber .mc-bar{background:linear-gradient(90deg,#d97706,var(--amber))}
+/* ── BUTTONS ── */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:var(--r-sm);font-size:.84em;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all var(--trans);font-family:inherit;text-decoration:none;white-space:nowrap;line-height:1.2;letter-spacing:.01em}
+.btn-primary{background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;border-color:rgba(255,255,255,.1);box-shadow:0 2px 8px rgba(124,58,237,.3)}
+.btn-primary:hover:not(:disabled){filter:brightness(1.1);transform:translateY(-1px);box-shadow:0 4px 14px rgba(124,58,237,.45)}
+.btn-secondary{background:var(--surface2);color:var(--text);border-color:var(--border)}
+.btn-secondary:hover:not(:disabled){background:var(--surface3);border-color:var(--border2)}
+.btn-ghost{background:transparent;color:var(--text2);border-color:var(--border)}
+.btn-ghost:hover:not(:disabled){background:var(--surface2);color:var(--text)}
+.btn-success{background:rgba(34,197,94,0.1);color:var(--green);border-color:rgba(34,197,94,0.25)}
+.btn-success:hover:not(:disabled){background:rgba(34,197,94,0.18)}
+.btn-danger{background:rgba(239,68,68,0.08);color:var(--red);border-color:rgba(239,68,68,0.2)}
+.btn-danger:hover:not(:disabled){background:rgba(239,68,68,0.16)}
+.btn-sm{padding:5px 10px;font-size:.78em}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none!important;filter:none!important}
 
-    /* ── CONTENT WRAP ── */
-    #content-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+/* ── CARDS ── */
+.card{background:linear-gradient(145deg,#111827 0%,#0f1623 100%);border:1px solid var(--border);border-radius:var(--r);padding:20px;transition:all .2s ease;box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+.card:hover{border-color:rgba(124,58,237,0.2);box-shadow:0 4px 20px rgba(0,0,0,.4)}
+.card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,0.05)}
+.card-title{font-size:.875em;font-weight:700;display:flex;align-items:center;gap:8px;color:var(--text)}
+.card-icon{font-size:15px;opacity:.75}
 
-    /* ── VIEW: ENDPOINTS ── */
-    #view-endpoints{flex:1;overflow-y:auto;padding:20px}
-    .view-header{display:flex;align-items:center;gap:10px;margin-bottom:16px}
-    .view-header h2{font-size:15px;font-weight:700}
-    .view-header p{font-size:12px;color:var(--text2)}
-    .search-bar{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:7px 12px;flex:1;max-width:340px}
-    .search-bar input{background:transparent;border:none;outline:none;font-size:12.5px;color:var(--text);flex:1;font-family:inherit}
-    .search-bar input::placeholder{color:var(--muted)}
-    .ep-group{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:10px}
-    .ep-group-hdr{display:flex;align-items:center;gap:9px;padding:10px 14px;background:var(--surface2);border-bottom:1px solid var(--border)}
-    .ep-group-hdr .ico{font-size:14px}
-    .g-name{font-size:12.5px;font-weight:700;color:var(--text);flex:1}
-    .g-cnt{font-size:10px;color:var(--muted);background:var(--surface3);padding:1px 7px;border-radius:10px;border:1px solid var(--border)}
-    .ep-row{display:flex;align-items:center;gap:12px;padding:8px 14px;border-top:1px solid var(--border);cursor:pointer;transition:background .12s}
-    .ep-row:hover{background:var(--surface2)}
-    .ep-row.hidden{display:none}
-    .badge{font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;letter-spacing:.04em;text-transform:uppercase;flex-shrink:0;min-width:42px;text-align:center}
-    .GET{background:rgba(52,211,153,.12);color:var(--green);border:1px solid rgba(52,211,153,.25)}
-    .POST{background:rgba(79,142,247,.12);color:var(--blue);border:1px solid rgba(79,142,247,.25)}
-    .DELETE{background:rgba(248,113,113,.12);color:var(--red);border:1px solid rgba(248,113,113,.25)}
-    .PATCH,.PUT{background:rgba(251,191,36,.12);color:var(--amber);border:1px solid rgba(251,191,36,.25)}
-    .ep-path{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text2);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .12s}
-    .ep-row:hover .ep-path{color:var(--text)}
-    .ep-desc{font-size:11px;color:var(--muted);flex:1.5;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .ep-lock{font-size:10px;color:var(--amber);opacity:.7}
+/* ── GRID LAYOUTS ── */
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.grid-2-1{display:grid;grid-template-columns:1fr 360px;gap:16px}
+@media(max-width:1200px){.grid-4{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:900px){.grid-2-1{grid-template-columns:1fr}}
 
-    /* ── VIEW: SECRETS ── */
-    .secrets-panel{display:none;flex:1;overflow-y:auto;padding:20px}
-    .secrets-panel.active{display:block}
-    .sec-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:10px}
-    .sec-card-hdr{display:flex;align-items:center;gap:9px;padding:10px 14px;background:var(--surface2);border-bottom:1px solid var(--border)}
-    .sec-row{display:flex;align-items:center;gap:12px;padding:8px 14px;border-top:1px solid var(--border)}
-    .sec-key{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2);width:240px;flex-shrink:0}
-    .sec-input{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;font-size:11.5px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;transition:border-color .15s,box-shadow .15s}
-    .sec-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
-    .sec-input::placeholder{color:var(--muted)}
-    .sec-status{width:16px;flex-shrink:0;font-size:12px;text-align:center}
-    .sec-actions-bar{display:flex;align-items:center;gap:10px;padding:14px 20px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px}
-    .sec-user-wrap{display:flex;flex-direction:column;gap:3px}
-    .sec-user-lbl{font-size:9.5px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.1em}
-    .sec-user-input{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;width:180px;transition:border-color .15s}
-    .sec-user-input:focus{border-color:var(--blue)}
-    .save-btn{margin-left:auto;padding:7px 18px;background:linear-gradient(135deg,#2563eb,#1d4ed8);border:1px solid rgba(79,142,247,.4);border-radius:var(--radius-sm);font-size:12px;font-weight:700;color:#fff;cursor:pointer;transition:all .15s;font-family:inherit}
-    .save-btn:hover{background:linear-gradient(135deg,#3b82f6,#2563eb);box-shadow:0 0 16px rgba(79,142,247,.3)}
-    .save-btn:disabled{background:var(--surface2);border-color:var(--border);color:var(--muted);cursor:not-allowed;box-shadow:none}
-    .sec-msg{font-size:11.5px;font-weight:500;padding:4px 10px;border-radius:var(--radius-sm);display:none}
-    .sec-msg.ok{background:rgba(52,211,153,.12);color:var(--green);border:1px solid rgba(52,211,153,.3)}
-    .sec-msg.err{background:rgba(248,113,113,.12);color:var(--red);border:1px solid rgba(248,113,113,.3)}
-    .int-chip{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);transition:all .2s}
-    .int-chip.on{border-color:rgba(52,211,153,.4);color:var(--green);background:rgba(52,211,153,.08)}
-    .int-chip .dot{width:5px;height:5px;border-radius:50%;background:currentColor}
+/* ── STAT CARDS ── */
+.stat-card{background:linear-gradient(135deg,var(--surface2) 0%,var(--surface) 100%);border:1px solid var(--border);border-radius:var(--r);padding:22px 20px;transition:all .2s ease;cursor:default;position:relative;overflow:hidden}
+.stat-card::after{content:'';position:absolute;top:-30px;right:-30px;width:100px;height:100px;border-radius:50%;opacity:.07;pointer-events:none}
+.stat-card:nth-child(1)::after{background:var(--red)}
+.stat-card:nth-child(2)::after{background:var(--amber)}
+.stat-card:nth-child(3)::after{background:var(--blue)}
+.stat-card:nth-child(4)::after{background:var(--green)}
+.stat-card:hover{border-color:var(--border2);box-shadow:0 8px 32px rgba(0,0,0,.4);transform:translateY(-2px)}
+.stat-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px}
+.stat-icon-box{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.stat-value{font-size:2.3em;font-weight:800;line-height:1;letter-spacing:-.05em;margin-bottom:6px}
+.stat-label{font-size:.76em;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.stat-sub{font-size:.7em;margin-top:8px;display:flex;align-items:center;gap:5px}
 
-    /* ── VIEW: PIPELINE ── */
-    .pipeline-card{background:var(--surface);border:1px solid rgba(79,142,247,.2);border-radius:var(--radius);overflow:hidden;margin-bottom:12px;box-shadow:0 0 30px rgba(79,142,247,.04)}
-    .pipeline-hdr{display:flex;align-items:center;gap:8px;padding:10px 14px;background:linear-gradient(90deg,rgba(37,99,235,.1),rgba(124,58,237,.06));border-bottom:1px solid rgba(79,142,247,.15)}
-    .pipeline-badge{font-size:9px;font-weight:700;background:rgba(79,142,247,.15);color:var(--blue);border:1px solid rgba(79,142,247,.3);padding:2px 8px;border-radius:20px;letter-spacing:.06em;text-transform:uppercase}
-    .flow-row{display:flex;align-items:center;padding:14px 16px;gap:0;overflow-x:auto;border-bottom:1px solid var(--border);background:var(--surface2)}
-    .fstep{flex:1;min-width:90px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 8px;text-align:center;transition:all .2s}
-    .fstep:hover{border-color:var(--blue);box-shadow:0 0 12px rgba(79,142,247,.1)}
-    .fstep-ic{font-size:18px;display:block;margin-bottom:5px}
-    .fstep-lb{font-size:10.5px;font-weight:700;color:var(--text)}
-    .fstep-sb{font-size:9px;color:var(--muted);margin-top:2px}
-    .farr{padding:0 8px;color:var(--border2);font-size:16px;flex-shrink:0;user-select:none}
-    pre.sample{margin:0;padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2);line-height:1.7;overflow-x:auto;background:var(--bg2);border-top:1px solid var(--border);white-space:pre-wrap}
+/* ── BADGES ── */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:20px;font-size:.72em;font-weight:600;letter-spacing:.02em}
+.badge-purple{background:rgba(124,58,237,0.15);color:var(--purple-light)}
+.badge-cyan{background:rgba(6,182,212,0.12);color:var(--cyan)}
+.badge-green{background:rgba(34,197,94,0.12);color:var(--green)}
+.badge-red{background:rgba(239,68,68,0.12);color:var(--red)}
+.badge-amber{background:rgba(245,158,11,0.12);color:var(--amber)}
+.badge-gray{background:rgba(148,163,184,0.08);color:var(--text2)}
+.badge-blue{background:rgba(59,130,246,0.12);color:var(--blue)}
 
-    /* ── CHAT PANEL ── */
-    #view-chat{display:none;flex-direction:column;height:100vh;min-height:0}
-    .chat-topbar{padding:12px 20px;border-bottom:1px solid var(--border);background:var(--bg2);display:flex;align-items:center;gap:10px;flex-shrink:0}
-    .chat-topbar-title{font-size:14px;font-weight:700;background:linear-gradient(90deg,var(--blue),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-    .chat-topbar-sub{font-size:10.5px;color:var(--muted)}
-    .tb-spacer{flex:1}
-    .llm-select{background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius-sm);color:var(--text2);font-size:11.5px;padding:4px 8px;outline:none;cursor:pointer;font-family:inherit;transition:border-color .15s}
-    .llm-select:focus{border-color:var(--blue)}
-    .chat-warroom-btn{padding:6px 12px;background:linear-gradient(135deg,rgba(248,113,113,.15),rgba(220,38,38,.1));border:1px solid rgba(248,113,113,.3);border-radius:var(--radius-sm);font-size:11.5px;font-weight:700;color:var(--red);cursor:pointer;transition:all .15s;font-family:inherit}
-    .chat-warroom-btn:hover{background:linear-gradient(135deg,rgba(248,113,113,.25),rgba(220,38,38,.2));box-shadow:0 0 12px rgba(248,113,113,.15)}
-    .chat-messages{flex:1;overflow-y:auto;padding:24px 20px;display:flex;flex-direction:column;gap:16px}
-    .chat-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px}
-    .chat-empty-icon{font-size:44px;filter:drop-shadow(0 0 20px rgba(79,142,247,.4))}
-    .chat-empty-title{font-size:18px;font-weight:800;background:linear-gradient(90deg,var(--blue),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-    .chat-empty-sub{font-size:12.5px;color:var(--text2);max-width:420px;line-height:1.7}
-    .chat-suggestions{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:4px}
-    .chat-suggestion{background:var(--surface);border:1px solid var(--border2);border-radius:20px;padding:6px 14px;font-size:11.5px;color:var(--text2);cursor:pointer;transition:all .15s;font-family:inherit}
-    .chat-suggestion:hover{border-color:var(--blue);color:var(--blue);background:rgba(79,142,247,.06)}
-    .chat-row{display:flex;flex-direction:column;gap:4px}
-    .chat-row.user{align-items:flex-end}
-    .chat-row.ai{align-items:flex-start}
-    .chat-meta{font-size:10px;color:var(--muted);padding:0 4px}
-    .chat-bubble{max-width:78%;padding:11px 14px;border-radius:12px;line-height:1.65;font-size:13px;word-break:break-word}
-    .chat-bubble.user{background:linear-gradient(135deg,#1d4ed8,#2563eb);color:#fff;border-radius:12px 12px 3px 12px;box-shadow:0 4px 16px rgba(37,99,235,.25)}
-    .chat-bubble.ai{background:var(--surface2);border:1px solid var(--border2);border-radius:12px 12px 12px 3px;color:var(--text)}
-    .chat-bubble pre{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;overflow-x:auto;margin:8px 0;font-family:'JetBrains Mono',monospace;font-size:11px}
-    .chat-bubble code{background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11.5px}
-    .chat-bubble ul{margin:6px 0 6px 16px}
-    .chat-bubble li{margin-bottom:3px}
-    .chat-bubble h2,.chat-bubble h3,.chat-bubble h4{margin:10px 0 4px;font-weight:700;color:var(--text)}
-    .chat-bubble h2{font-size:14px}
-    .chat-bubble h3{font-size:13px}
-    .chat-bubble h4{font-size:12px;color:var(--text2)}
-    .chat-bubble strong{color:var(--text)}
-    .chat-bubble hr{border:none;border-top:1px solid var(--border);margin:8px 0}
-    .chat-bubble.typing{min-width:60px}
-    .typing-dots{display:inline-flex;gap:4px;align-items:center;height:18px}
-    .typing-dots span{width:7px;height:7px;border-radius:50%;background:var(--blue);animation:td .9s ease infinite}
-    .typing-dots span:nth-child(2){animation-delay:.2s}
-    .typing-dots span:nth-child(3){animation-delay:.4s}
-    @keyframes td{0%,80%,100%{transform:scale(.7);opacity:.4}40%{transform:scale(1);opacity:1}}
-    .chat-input-bar{display:flex;align-items:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--border);background:var(--bg2);flex-shrink:0}
-    #chat-input{flex:1;background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius);padding:10px 14px;font-size:13px;font-family:'Inter',sans-serif;color:var(--text);outline:none;resize:none;max-height:130px;min-height:42px;line-height:1.55;transition:border-color .15s,box-shadow .15s}
-    #chat-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
-    #chat-input::placeholder{color:var(--muted)}
-    .chat-send-btn{padding:10px 18px;background:linear-gradient(135deg,#2563eb,#1d4ed8);border:none;border-radius:var(--radius-sm);font-size:12.5px;font-weight:700;color:#fff;cursor:pointer;transition:all .15s;flex-shrink:0;font-family:inherit;box-shadow:0 0 16px rgba(37,99,235,.3)}
-    .chat-send-btn:hover{background:linear-gradient(135deg,#3b82f6,#2563eb);box-shadow:0 0 24px rgba(79,142,247,.4)}
-    .chat-send-btn:disabled{background:var(--surface2);box-shadow:none;cursor:not-allowed;color:var(--muted)}
+/* ── TABLES ── */
+.table-wrap{overflow-x:auto;border-radius:var(--r-sm);border:1px solid var(--border)}
+table{width:100%;border-collapse:collapse}
+thead{background:var(--surface2)}
+th{padding:10px 14px;text-align:left;font-size:.71em;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.07em;white-space:nowrap}
+td{padding:11px 14px;font-size:.855em;border-top:1px solid var(--border);vertical-align:middle}
+tr:hover td{background:rgba(255,255,255,0.02)}
 
-    /* ── FOOTER ── */
-    .footer{padding:9px 20px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:6px;font-size:10.5px;color:var(--muted);flex-shrink:0;background:var(--bg2)}
-    .footer a{color:var(--text2);text-decoration:none;font-weight:500}
-    .footer a:hover{color:var(--blue)}
+/* ── FORMS ── */
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+textarea.form-input{resize:vertical;min-height:90px;line-height:1.55}
+select.form-input{cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2394a3b8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+.form-toggle{display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm)}
+.toggle-track{width:38px;height:21px;background:var(--surface3);border-radius:12px;position:relative;transition:background .2s;flex-shrink:0;border:1px solid rgba(255,255,255,0.06)}
+.toggle-track.on{background:var(--purple);border-color:rgba(124,58,237,0.4)}
+.toggle-thumb{width:15px;height:15px;background:#fff;border-radius:50%;position:absolute;top:2px;left:2px;transition:left .2s;box-shadow:0 1px 4px rgba(0,0,0,0.4)}
+.toggle-track.on .toggle-thumb{left:19px}
+.toggle-label{font-size:.855em;color:var(--text2);flex:1}
 
-    /* ── ANIMATIONS ── */
-    @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-    .fade-in{animation:fadeIn .25s ease}
-    @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
-    @keyframes slideDown{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+/* ── PROGRESS/CONFIDENCE BAR ── */
+.conf-bar{height:5px;background:var(--surface3);border-radius:3px;overflow:hidden}
+.conf-fill{height:100%;border-radius:3px;transition:width .6s ease}
+.conf-fill.high{background:linear-gradient(90deg,var(--green),var(--cyan))}
+.conf-fill.med{background:linear-gradient(90deg,var(--amber),var(--amber2))}
+.conf-fill.low{background:linear-gradient(90deg,var(--red),var(--red2))}
 
-    /* ── TOAST ── */
-    #toast-wrap{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:9999;pointer-events:none}
-    .toast{display:flex;align-items:center;gap:9px;padding:10px 14px;background:var(--surface2);border:1px solid var(--border2);border-radius:var(--radius);font-size:12px;color:var(--text);box-shadow:0 8px 24px rgba(0,0,0,.4);animation:slideUp .25s ease;min-width:200px;pointer-events:auto}
-    .toast.ok{border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.08)}
-    .toast.err{border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.08)}
-    .toast.info{border-color:rgba(79,142,247,.4);background:rgba(79,142,247,.08)}
+/* ── STATUS DOT ── */
+.status-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex-shrink:0}
+.dot-green{background:var(--green);box-shadow:0 0 5px var(--green)}
+.dot-red{background:var(--red);box-shadow:0 0 5px var(--red)}
+.dot-amber{background:var(--amber);box-shadow:0 0 5px var(--amber)}
+.dot-gray{background:var(--muted)}
+.dot-pulse{animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 
-    /* ── RUN PIPELINE MODAL ── */
-    .modal-overlay{position:fixed;inset:0;background:rgba(4,6,15,.7);backdrop-filter:blur(6px);z-index:100;display:none;align-items:center;justify-content:center}
-    .modal-overlay.open{display:flex}
-    .modal{background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius-lg);padding:24px;width:480px;max-width:95vw;animation:slideUp .25s ease;box-shadow:0 24px 60px rgba(0,0,0,.5)}
-    .modal-title{font-size:16px;font-weight:800;margin-bottom:4px;background:linear-gradient(90deg,var(--blue),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-    .modal-sub{font-size:12px;color:var(--muted);margin-bottom:20px}
-    .modal-field{display:flex;flex-direction:column;gap:5px;margin-bottom:14px}
-    .modal-label{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
-    .modal-input{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 11px;font-size:12.5px;color:var(--text);outline:none;font-family:inherit;transition:border-color .15s}
-    .modal-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
-    .modal-input::placeholder{color:var(--muted)}
-    textarea.modal-input{resize:vertical;min-height:72px;line-height:1.5}
-    .modal-row{display:flex;gap:10px}
-    .modal-row .modal-field{flex:1}
-    .modal-actions{display:flex;gap:8px;margin-top:20px;justify-content:flex-end}
-    .btn-cancel{padding:7px 16px;background:transparent;border:1px solid var(--border2);border-radius:var(--radius-sm);font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;font-family:inherit;transition:all .15s}
-    .btn-cancel:hover{border-color:var(--muted);color:var(--text)}
-    .btn-run{padding:7px 20px;background:linear-gradient(135deg,#2563eb,#7c3aed);border:none;border-radius:var(--radius-sm);font-size:12px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit;transition:all .15s;box-shadow:0 0 16px rgba(79,142,247,.25)}
-    .btn-run:hover{box-shadow:0 0 24px rgba(79,142,247,.45)}
-    .btn-run:disabled{background:var(--surface2);box-shadow:none;color:var(--muted);cursor:not-allowed}
-    .sev-pills{display:flex;gap:6px;flex-wrap:wrap}
-    .sev-pill{padding:4px 12px;border-radius:20px;border:1px solid var(--border2);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;background:transparent;font-family:inherit;color:var(--text2)}
-    .sev-pill:hover{border-color:var(--blue);color:var(--blue)}
-    .sev-pill.active{background:rgba(79,142,247,.15);border-color:var(--blue);color:var(--blue)}
-    .sev-pill.critical.active{background:rgba(248,113,113,.15);border-color:var(--red);color:var(--red)}
-    .sev-pill.high.active{background:rgba(251,191,36,.15);border-color:var(--amber);color:var(--amber)}
-    .sev-pill.medium.active{background:rgba(79,142,247,.15);border-color:var(--blue);color:var(--blue)}
-    .sev-pill.low.active{background:rgba(52,211,153,.15);border-color:var(--green);color:var(--green)}
-    .modal-result{margin-top:14px;padding:12px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text2);max-height:160px;overflow-y:auto;display:none;white-space:pre-wrap}
+/* ── CHAT ── */
+.chat-messages{flex:1;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:0;min-height:0}
+.chat-row{display:flex;gap:12px;padding:10px 0;animation:msgIn .2s ease}
+.chat-row.user{flex-direction:row-reverse}
+@keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.chat-avatar{width:32px;height:32px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:.8em;font-weight:700;margin-top:2px}
+.chat-avatar.ai{background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff}
+.chat-avatar.user-av{background:var(--surface3,#334155);color:var(--text2);border:1px solid var(--border)}
+.chat-body{display:flex;flex-direction:column;max-width:72%;gap:4px}
+.chat-row.user .chat-body{align-items:flex-end}
+.chat-bubble{padding:12px 16px;border-radius:18px;line-height:1.65;font-size:.875em;word-break:break-word}
+.chat-bubble.user{background:linear-gradient(135deg,#7c3aed,#5b21b6);color:#fff;border-bottom-right-radius:4px;box-shadow:0 2px 14px rgba(124,58,237,.3)}
+.chat-bubble.assistant{background:var(--surface2);border:1px solid var(--border);border-bottom-left-radius:4px;color:var(--text)}
+/* markdown inside assistant bubble */
+.chat-bubble.assistant p{margin:.35em 0}
+.chat-bubble.assistant p:first-child{margin-top:0}
+.chat-bubble.assistant p:last-child{margin-bottom:0}
+.chat-bubble.assistant ul,.chat-bubble.assistant ol{margin:.4em 0;padding-left:1.4em}
+.chat-bubble.assistant li{margin:.2em 0}
+.chat-bubble.assistant h1,.chat-bubble.assistant h2,.chat-bubble.assistant h3{margin:.6em 0 .3em;font-weight:700;line-height:1.3}
+.chat-bubble.assistant h1{font-size:1.1em}.chat-bubble.assistant h2{font-size:1em}.chat-bubble.assistant h3{font-size:.95em}
+.chat-bubble.assistant hr{border:none;border-top:1px solid var(--border);margin:.6em 0}
+.chat-bubble.assistant blockquote{border-left:3px solid var(--purple);padding-left:10px;color:var(--text2);margin:.4em 0}
+.chat-bubble.assistant table{border-collapse:collapse;width:100%;margin:.5em 0;font-size:.9em}
+.chat-bubble.assistant th,.chat-bubble.assistant td{border:1px solid var(--border);padding:5px 10px;text-align:left}
+.chat-bubble.assistant th{background:var(--surface3,#1e293b);font-weight:600}
+.chat-bubble.assistant code:not(.code-block-code){background:rgba(124,58,237,.15);padding:1px 6px;border-radius:4px;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.85em;color:var(--purple-light,#a78bfa)}
+.resource-link{display:inline;cursor:pointer;border-radius:4px;padding:0 3px;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.85em;text-decoration:none;transition:background .15s}
+a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.15);text-decoration:underline}
+.ec2-link{color:#f59e0b}.ec2-link:hover{background:rgba(245,158,11,.15)}
+.rds-link{color:#34d399}.rds-link:hover{background:rgba(52,211,153,.15)}
+.lambda-link{color:#a78bfa}.lambda-link:hover{background:rgba(167,139,250,.15)}
+.sg-link{color:#fb923c}.sg-link:hover{background:rgba(251,146,60,.15)}
+.sha-link,.pr-link{color:#94a3b8;background:rgba(148,163,184,.1);padding:1px 5px;border-radius:4px}
+.arn-link{color:#64748b;font-size:.8em}
+.chat-code-block{position:relative;margin:.5em 0;border-radius:10px;overflow:hidden;border:1px solid var(--border)}
+.chat-code-header{display:flex;align-items:center;justify-content:space-between;padding:5px 12px;background:var(--surface3,#1e293b);font-size:.72em;color:var(--muted)}
+.chat-code-header button{background:none;border:1px solid var(--border);color:var(--text2);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:.9em;transition:all .15s}
+.chat-code-header button:hover{background:var(--purple);color:#fff;border-color:var(--purple)}
+.chat-code-block pre{margin:0;padding:12px 14px;background:#0f172a;overflow-x:auto;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.82em;line-height:1.6;color:#e2e8f0}
+.chat-meta{font-size:.67em;color:var(--muted);margin-top:3px;display:flex;align-items:center;gap:8px}
+.chat-row.user .chat-meta{justify-content:flex-end}
+.chat-copy-btn{background:none;border:none;color:var(--muted);cursor:pointer;padding:2px 4px;border-radius:4px;font-size:.9em;opacity:0;transition:opacity .15s}
+.chat-body:hover .chat-copy-btn{opacity:1}
+.chat-copy-btn:hover{color:var(--text2)}
+.chat-input-row{display:flex;gap:0;padding:12px 0 2px;border-top:1px solid var(--border);align-items:flex-end;background:var(--surface);border-radius:0 0 var(--r-md) var(--r-md)}
+.chat-input-wrap{flex:1;display:flex;align-items:flex-end;background:var(--surface2);border:1px solid var(--border);border-radius:14px;padding:8px 12px;transition:border-color .2s,box-shadow .2s;gap:8px}
+.chat-input-wrap:focus-within{border-color:var(--purple);box-shadow:0 0 0 3px rgba(124,58,237,0.12)}
+.chat-input{flex:1;background:none;border:none;color:var(--text);font-family:inherit;font-size:.9em;outline:none;resize:none;min-height:24px;max-height:160px;overflow-y:auto;line-height:1.5;padding:0}
+.chat-send-btn{background:var(--purple);border:none;color:#fff;width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;transition:background .15s,transform .1s}
+.chat-send-btn:hover{background:#6d28d9;transform:scale(1.08)}
+.chat-send-btn:active{transform:scale(.95)}
+.chat-chips{display:flex;gap:7px;flex-wrap:wrap;padding:0 0 12px}
+.chip{padding:6px 14px;border-radius:20px;font-size:.755em;background:var(--surface2);border:1px solid var(--border);color:var(--text2);cursor:pointer;transition:all .15s;white-space:nowrap}
+.chip:hover{border-color:var(--purple);color:var(--purple-light,#a78bfa);background:rgba(124,58,237,0.1)}
+.typing-row{display:flex;gap:12px;padding:10px 0;align-items:flex-start}
+.typing{display:none;align-items:center;gap:5px;padding:12px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:18px;border-bottom-left-radius:4px}
+.typing span{width:7px;height:7px;background:var(--purple,#7c3aed);border-radius:50%;animation:bounce .9s infinite;opacity:.7}
+.typing span:nth-child(2){animation-delay:.18s}
+.typing span:nth-child(3){animation-delay:.36s}
+@keyframes bounce{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-6px)}}
+.chat-welcome{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:20px;padding:20px}
+.chat-welcome-icon{width:56px;height:56px;background:linear-gradient(135deg,#7c3aed,#a855f7);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 24px rgba(124,58,237,.35)}
+.chat-welcome h2{font-size:1.1em;font-weight:700;color:var(--text);margin:0}
+.chat-welcome p{font-size:.82em;color:var(--muted);margin:0;text-align:center}
+.chat-suggestion-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;width:100%;max-width:460px}
+.chat-suggestion{padding:10px 14px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);color:var(--text2);font-size:.78em;cursor:pointer;transition:all .15s;text-align:left;line-height:1.4}
+.chat-suggestion:hover{border-color:var(--purple);color:var(--text);background:rgba(124,58,237,0.07)}
 
-    /* ── GITHUB REPOS DRAWER ── */
-    .gh-drawer{position:fixed;top:0;right:-420px;width:400px;height:100vh;background:var(--bg2);border-left:1px solid var(--border2);z-index:50;display:flex;flex-direction:column;transition:right .3s cubic-bezier(.4,0,.2,1);box-shadow:-8px 0 32px rgba(0,0,0,.4)}
-    .gh-drawer.open{right:0}
-    .gh-drawer-hdr{padding:16px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0}
-    .gh-drawer-title{font-size:14px;font-weight:700;flex:1}
-    .gh-drawer-close{background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:2px 6px;border-radius:4px;transition:color .15s}
-    .gh-drawer-close:hover{color:var(--text)}
-    .gh-drawer-body{flex:1;overflow-y:auto;padding:12px}
-    .repo-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px 13px;margin-bottom:8px;transition:border-color .15s;cursor:pointer}
-    .repo-card:hover{border-color:var(--blue)}
-    .repo-name{font-size:12.5px;font-weight:700;color:var(--blue);margin-bottom:3px}
-    .repo-desc{font-size:11px;color:var(--muted);margin-bottom:7px;line-height:1.4}
-    .repo-meta{display:flex;gap:10px;font-size:10.5px;color:var(--text2)}
-    .repo-meta span{display:flex;align-items:center;gap:3px}
-    .lang-dot{width:8px;height:8px;border-radius:50%;background:var(--blue);flex-shrink:0}
+.stat-card{position:relative;overflow:hidden}
+.stat-card::after{content:'';position:absolute;top:0;right:0;width:80px;height:80px;border-radius:50%;opacity:.06;transform:translate(20px,-20px)}
+.stat-icon-box{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px}
 
-    /* ── KEYBOARD SHORTCUT HINT ── */
-    .kbd{display:inline-flex;align-items:center;gap:3px;font-size:9.5px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-family:'JetBrains Mono',monospace}
+/* ── LOADING ── */
+.spinner{width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--purple);border-radius:50%;animation:spin .65s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.skeleton{background:linear-gradient(90deg,var(--surface2) 25%,var(--surface3) 50%,var(--surface2) 75%);background-size:400% 100%;animation:shimmer 1.5s infinite;border-radius:5px;height:13px}
+@keyframes shimmer{to{background-position:-400% 0}}
+.loading-state{display:flex;align-items:center;justify-content:center;gap:10px;padding:36px;color:var(--text2);font-size:.84em}
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;color:var(--text2);gap:10px}
+.empty-state .empty-icon{font-size:2.2em;opacity:.35}
+.empty-state p{font-size:.84em;opacity:.65}
 
-    /* ── API EXPLORER DRAWER ── */
-    .ep-drawer-backdrop{position:fixed;inset:0;background:rgba(4,6,15,.6);backdrop-filter:blur(4px);z-index:200;display:none;opacity:0;transition:opacity .25s}
-    .ep-drawer-backdrop.open{display:block;opacity:1}
-    .ep-drawer{position:fixed;top:0;right:-520px;width:480px;max-width:100vw;height:100vh;background:var(--bg2);border-left:1px solid var(--border2);z-index:201;display:flex;flex-direction:column;transition:right .3s cubic-bezier(.4,0,.2,1);box-shadow:-12px 0 48px rgba(0,0,0,.5)}
-    .ep-drawer.open{right:0}
-    .ep-drawer-hdr{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surface)}
-    .ep-drawer-method{font-size:10px;font-weight:800;padding:3px 9px;border-radius:5px;letter-spacing:.06em;flex-shrink:0}
-    .ep-drawer-path{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text);font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .ep-drawer-close{background:transparent;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:2px 6px;border-radius:4px;line-height:1;transition:color .15s;flex-shrink:0}
-    .ep-drawer-close:hover{color:var(--text)}
-    .ep-drawer-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0}
-    .ep-section{padding:16px 18px;border-bottom:1px solid var(--border)}
-    .ep-section-title{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px}
-    .ep-section-title::after{content:'';flex:1;height:1px;background:var(--border)}
-    .ep-desc-text{font-size:12.5px;color:var(--text2);line-height:1.6;margin-bottom:10px}
-    .ep-auth-badge{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.06em}
-    .ep-auth-none{background:rgba(52,211,153,.1);color:var(--green);border:1px solid rgba(52,211,153,.3)}
-    .ep-auth-viewer{background:rgba(34,211,238,.1);color:var(--cyan);border:1px solid rgba(34,211,238,.3)}
-    .ep-auth-developer{background:rgba(79,142,247,.1);color:var(--blue);border:1px solid rgba(79,142,247,.3)}
-    .ep-auth-admin{background:rgba(167,139,250,.1);color:var(--purple);border:1px solid rgba(167,139,250,.3)}
-    .ep-field{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
-    .ep-field-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;align-items:center;gap:5px}
-    .ep-field-label .req{color:var(--red);font-size:11px}
-    .ep-field-type{font-size:9px;color:var(--muted);background:var(--surface3);padding:1px 6px;border-radius:10px;font-weight:600;margin-left:auto}
-    .ep-input{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 11px;font-size:12.5px;color:var(--text);outline:none;font-family:inherit;transition:border-color .15s,box-shadow .15s;width:100%;box-sizing:border-box}
-    .ep-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
-    .ep-input::placeholder{color:var(--muted)}
-    .ep-select{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 11px;font-size:12.5px;color:var(--text);outline:none;font-family:inherit;transition:border-color .15s;width:100%;box-sizing:border-box;cursor:pointer}
-    .ep-select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
-    .ep-textarea{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 11px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;resize:vertical;min-height:72px;line-height:1.55;transition:border-color .15s;width:100%;box-sizing:border-box}
-    .ep-textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
-    .ep-toggle-wrap{display:flex;align-items:center;gap:8px}
-    .ep-toggle{width:36px;height:20px;background:var(--border2);border-radius:20px;cursor:pointer;position:relative;transition:background .2s;flex-shrink:0;border:none}
-    .ep-toggle.on{background:var(--blue2)}
-    .ep-toggle::after{content:'';position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:left .2s}
-    .ep-toggle.on::after{left:19px}
-    .ep-toggle-label{font-size:12px;color:var(--text2)}
-    .ep-resp-wrap{display:none;flex-direction:column;gap:8px}
-    .ep-resp-wrap.visible{display:flex}
-    .ep-status-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-    .ep-status-badge{font-weight:700;font-family:'JetBrains Mono',monospace;padding:2px 9px;border-radius:4px;font-size:11px}
-    .ep-status-2xx{background:rgba(52,211,153,.12);color:var(--green);border:1px solid rgba(52,211,153,.3)}
-    .ep-status-3xx{background:rgba(251,191,36,.12);color:var(--amber);border:1px solid rgba(251,191,36,.3)}
-    .ep-status-4xx,.ep-status-5xx{background:rgba(248,113,113,.12);color:var(--red);border:1px solid rgba(248,113,113,.3)}
-    .ep-timing{font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace}
-    .ep-resp-pre{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text2);max-height:340px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;line-height:1.6}
-    .ep-resp-pre.ok{border-color:rgba(52,211,153,.25);color:var(--text)}
-    .ep-resp-pre.err{border-color:rgba(248,113,113,.25)}
-    .ep-drawer-ftr{display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid var(--border);flex-shrink:0;background:var(--surface)}
-    .ep-exec-btn{padding:8px 22px;background:linear-gradient(135deg,#2563eb,#1d4ed8);border:none;border-radius:var(--radius-sm);font-size:12px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit;transition:all .15s;box-shadow:0 0 14px rgba(37,99,235,.25)}
-    .ep-exec-btn:hover{box-shadow:0 0 22px rgba(79,142,247,.45)}
-    .ep-exec-btn:disabled{background:var(--surface2);box-shadow:none;color:var(--muted);cursor:not-allowed}
-    .ep-outline-btn{padding:7px 14px;background:transparent;border:1px solid var(--border2);border-radius:var(--radius-sm);font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;font-family:inherit;transition:all .15s}
-    .ep-outline-btn:hover{border-color:var(--blue);color:var(--blue)}
-    /* legacy — keep for WS terminal */
-    .api-field-label{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px}
-    .api-body-editor{width:100%;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;resize:vertical;min-height:110px;line-height:1.6;transition:border-color .15s;box-sizing:border-box}
-    .api-body-editor:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,142,247,.1)}
-    .api-resp{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text2);max-height:280px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;line-height:1.6}
-    .api-resp.ok{border-color:rgba(52,211,153,.3);color:var(--text)}
-    .api-resp.err{border-color:rgba(248,113,113,.3);color:var(--red)}
-    .api-status-bar{display:flex;align-items:center;gap:8px;font-size:11px}
-    .api-status-code{font-weight:700;font-family:'JetBrains Mono',monospace;padding:2px 8px;border-radius:4px}
-    .api-status-code.ok{background:rgba(52,211,153,.12);color:var(--green)}
-    .api-status-code.err{background:rgba(248,113,113,.12);color:var(--red)}
+/* ── ALERTS ── */
+.alert-item{display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surface2);transition:background .15s}
+.alert-item:hover{background:var(--surface3)}
+.alert-source{font-size:.64em;font-weight:700;padding:2px 7px;border-radius:4px;text-transform:uppercase;letter-spacing:.06em;flex-shrink:0;margin-top:1px}
+.src-grafana{background:rgba(245,158,11,0.12);color:var(--amber)}
+.src-cloudwatch{background:rgba(239,68,68,0.12);color:var(--red)}
+.src-k8s{background:rgba(6,182,212,0.12);color:var(--cyan)}
+.src-opsgenie{background:rgba(124,58,237,0.12);color:var(--purple-light)}
 
-    /* ── WS TERMINAL ── */
-    .ws-terminal{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;font-family:'JetBrains Mono',monospace;font-size:11.5px;height:200px;overflow-y:auto;line-height:1.7}
-    .ws-line{margin:0;padding:0}
-    .ws-line.sent{color:var(--blue)}
-    .ws-line.recv{color:var(--green)}
-    .ws-line.sys{color:var(--muted)}
-    .ws-line.err{color:var(--red)}
-    .ws-input-row{display:flex;gap:8px;margin-top:8px}
-    .ws-input{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 10px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text);outline:none;transition:border-color .15s}
-    .ws-input:focus{border-color:var(--blue)}
-    .ws-send-btn{padding:6px 14px;background:var(--blue2);border:none;border-radius:var(--radius-sm);font-size:11.5px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit}
+/* ── RESULT CARD ── */
+.result-card{background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:20px;margin-top:16px;animation:fadeUp .3s ease}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.result-section{margin-bottom:16px}
+.result-section-label{font-size:.69em;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.09em;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.result-root-cause{font-size:.875em;line-height:1.6;color:var(--text);background:var(--surface);border-left:3px solid var(--purple);padding:12px 14px;border-radius:0 var(--r-sm) var(--r-sm) 0}
+.result-reasoning{font-size:.8em;line-height:1.6;color:var(--text2);background:var(--surface);border:1px solid var(--border);padding:10px 14px;border-radius:var(--r-sm);white-space:pre-wrap;display:none}
+.result-reasoning.open{display:block}
+.result-data-gap{font-size:.8em;color:var(--amber);background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.2);border-radius:6px;padding:8px 12px;margin-top:6px;line-height:1.5}
+/* Action steps list */
+.action-steps{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:8px}
+.action-step{display:flex;align-items:flex-start;gap:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-sm);padding:12px 14px;transition:border-color .15s}
+.action-step:hover{border-color:var(--border2)}
+.step-num{min-width:24px;height:24px;border-radius:50%;background:rgba(124,58,237,.18);color:var(--purple-light);font-size:.72em;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+.step-num.executed{background:rgba(16,185,129,.15);color:var(--green)}
+.step-num.blocked{background:rgba(245,158,11,.15);color:var(--amber)}
+.step-body{flex:1;min-width:0}
+.step-type{font-size:.68em;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text2);margin-bottom:3px}
+.step-desc{font-size:.84em;line-height:1.5;color:var(--text)}
+.step-target{font-size:.74em;color:var(--purple-light);margin-top:4px;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace}
+.step-cost{font-size:.7em;color:var(--text2);margin-top:3px}
+.step-reason{font-size:.74em;color:var(--amber);margin-top:4px}
+/* Data source badges */
+.data-source-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.data-src-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:20px;font-size:.7em;font-weight:600;border:1px solid}
+.data-src-ok{background:rgba(16,185,129,.1);color:var(--green);border-color:rgba(16,185,129,.25)}
+.data-src-miss{background:rgba(248,113,113,.08);color:#f87171;border-color:rgba(248,113,113,.2)}
+.action-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:.74em;background:var(--surface3);border:1px solid var(--border);margin:3px;color:var(--text2)}
 
-    /* ── RUN PIPELINE BUTTON ── */
-    .run-btn{display:flex;align-items:center;gap:6px;padding:5px 14px;background:linear-gradient(135deg,rgba(37,99,235,.2),rgba(124,58,237,.15));border:1px solid rgba(79,142,247,.35);border-radius:20px;font-size:11.5px;font-weight:700;color:var(--blue);cursor:pointer;transition:all .15s;font-family:inherit}
-    .run-btn:hover{background:linear-gradient(135deg,rgba(37,99,235,.35),rgba(124,58,237,.25));border-color:var(--blue);box-shadow:0 0 14px rgba(79,142,247,.2)}
+/* ── INTEGRATION CARDS ── */
+.integration-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:18px;transition:all .2s;display:flex;flex-direction:column;gap:12px}
+.integration-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 4px 16px rgba(0,0,0,.25)}
+.int-header{display:flex;align-items:center;gap:11px}
+.int-icon{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.int-name{font-size:.9em;font-weight:700;color:var(--text)}
+.int-status{font-size:.74em;color:var(--text2);display:flex;align-items:center;gap:6px}
 
-    /* ── ROLE BADGE ── */
-    .role-badge{display:inline-flex;align-items:center;gap:4px;font-size:9.5px;font-weight:700;padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.06em}
-    .role-admin{background:rgba(167,139,250,.15);color:var(--purple);border:1px solid rgba(167,139,250,.35)}
-    .role-developer{background:rgba(79,142,247,.15);color:var(--blue);border:1px solid rgba(79,142,247,.35)}
-    .role-viewer{background:rgba(52,211,153,.12);color:var(--green);border:1px solid rgba(52,211,153,.3)}
+/* ── MODAL ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(6px);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;display:none}
+.modal-overlay.open{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border2);border-radius:var(--r);padding:28px;width:100%;max-width:520px;max-height:80vh;overflow-y:auto;animation:fadeUp .25s ease;box-shadow:var(--shadow-lg)}
+.modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+.modal-title{font-size:1em;font-weight:700;letter-spacing:-.01em}
+.modal-close{background:none;border:none;color:var(--text2);cursor:pointer;font-size:18px;padding:4px;border-radius:5px;transition:all .15s;line-height:1}
+.modal-close:hover{color:var(--text);background:rgba(255,255,255,0.06)}
 
-    /* ── RBAC VISIBILITY ── */
-    /* viewer: hide write ops and admin panels */
-    body[data-role="viewer"] .rbac-dev,body[data-role="viewer"] .rbac-admin{display:none!important}
-    /* developer: hide admin-only */
-    body[data-role="developer"] .rbac-admin{display:none!important}
-    /* before login: hide role-gated items */
-    body:not([data-role]) .rbac-dev,body:not([data-role]) .rbac-admin{display:none!important}
-    /* generic hidden util */
-    .rbac-dev,.rbac-admin{transition:opacity .2s}
-  </style>
+/* ── TOAST ── */
+#toast-container{position:fixed;bottom:24px;right:24px;z-index:999;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.toast{padding:11px 16px;border-radius:var(--r-sm);font-size:.835em;font-weight:500;box-shadow:0 4px 16px rgba(0,0,0,.4);animation:slideIn .25s cubic-bezier(.22,.68,0,1.2);display:flex;align-items:center;gap:9px;max-width:320px;pointer-events:all}
+.toast-success{background:#0f2016;border:1px solid rgba(34,197,94,.25);color:var(--green)}
+.toast-error{background:#1e0a0a;border:1px solid rgba(239,68,68,.25);color:var(--red)}
+.toast-info{background:var(--surface2);border:1px solid var(--border2);color:var(--text)}
+@keyframes slideIn{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:translateX(0)}}
+
+/* ── MISC ── */
+.divider{height:1px;background:var(--border);margin:16px 0}
+.text-muted{color:var(--text2);font-size:.82em}
+.text-sm{font-size:.82em}
+.flex{display:flex}
+.flex-center{display:flex;align-items:center}
+.gap-8{gap:8px}
+.gap-12{gap:12px}
+.mb-4{margin-bottom:4px}
+.mb-8{margin-bottom:8px}
+.mb-12{margin-bottom:12px}
+.mb-16{margin-bottom:16px}
+.section-page{display:none}
+.section-page.active{display:block}
+.topbar-status{display:flex;align-items:center;gap:6px;font-size:.76em;font-weight:600;color:var(--green);padding:4px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.2);border-radius:20px;letter-spacing:.01em}
+.topbar-status.degraded{color:var(--amber);background:rgba(245,158,11,0.08);border-color:rgba(245,158,11,0.2)}
+.topbar-status.error{color:var(--red);background:rgba(239,68,68,0.08);border-color:rgba(239,68,68,0.2)}
+.section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+.section-title{font-size:1.05em;font-weight:700;letter-spacing:-.02em;color:var(--text)}
+.section-sub{font-size:.78em;color:var(--text2);margin-top:2px}
+.tab-pills{display:flex;gap:2px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:3px}
+.tab-pill{padding:5px 14px;border-radius:6px;font-size:.8em;font-weight:600;cursor:pointer;border:none;background:transparent;color:var(--text2);transition:all .15s;font-family:inherit}
+.tab-pill.active{background:var(--surface3);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.tab-pill:hover:not(.active){color:var(--text);background:rgba(255,255,255,0.03)}
+.info-row{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid var(--border);font-size:.855em}
+.info-row:last-child{border-bottom:none}
+.info-label{color:var(--text2);width:120px;flex-shrink:0;font-size:.9em}
+.info-value{color:var(--text);flex:1}
+</style>
 </head>
 <body>
 
-<nav class="sidebar">
-  <div class="sb-logo">
-    <div class="logo-mark">&#x26A1;</div>
-    <div class="logo-text">
-      <div class="name">DevOps AI</div>
-      <div class="tag">Autonomous Platform</div>
-    </div>
-  </div>
-  <div class="sb-status">
-    <div class="status-row"><div class="pulse"></div><span style="color:var(--green);font-weight:600">System Online</span></div>
-  </div>
-
-  <div class="sb-section">
-    <span class="sb-label">Navigation</span>
-    <button type="button" class="nav-link active" onclick="showView('endpoints','all',this)"><span class="ico">&#x26A1;</span>All Endpoints<span class="cnt" id="cnt-all">0</span></button>
-    <button type="button" class="nav-link" onclick="showView('endpoints','general',this)"><span class="ico">&#x1F527;</span>General &amp; AI<span class="cnt">13</span></button>
-    <button type="button" class="nav-link" onclick="showView('endpoints','k8s',this)"><span class="ico">&#x2638;</span>Kubernetes<span class="cnt">7</span></button>
-    <button type="button" class="nav-link" onclick="showView('endpoints','aws',this)"><span class="ico">&#x2601;</span>AWS<span class="cnt">23</span></button>
-    <button type="button" class="nav-link" onclick="showView('endpoints','pipeline',this)"><span class="ico">&#x1F916;</span>Pipeline<span class="cnt">1</span></button>
-    <button type="button" class="nav-link" onclick="showView('endpoints','deploy',this)"><span class="ico">&#x1F680;</span>Deploy &amp; Jira<span class="cnt">3</span></button>
-    <button type="button" class="nav-link rbac-admin" onclick="showView('endpoints','webhooks',this)"><span class="ico">&#x1F517;</span>Webhooks<span class="cnt">2</span></button>
-  </div>
-
-  <div class="sb-divider"></div>
-
-  <div class="sb-section">
-    <span class="sb-label">Tools</span>
-    <button type="button" class="nav-link rbac-admin" onclick="showView('secrets','',this)"><span class="ico">&#x1F511;</span>Secrets &amp; Config</button>
-    <button type="button" class="nav-link rbac-admin" onclick="showView('users','',this)"><span class="ico">&#x1F465;</span>Team &amp; Access</button>
-    <button type="button" class="nav-link" onclick="showView('chat','',this)"><span class="ico">&#x1F4AC;</span>AI Chat</button>
-  </div>
-
-  <div class="sb-section">
-    <span class="sb-label">Docs</span>
-    <a class="nav-link" href="/docs" target="_blank"><span class="ico">&#x1F4D6;</span>Swagger UI</a>
-    <a class="nav-link" href="/redoc" target="_blank"><span class="ico">&#x1F4C4;</span>ReDoc</a>
-    <a class="nav-link" href="/health/full" target="_blank"><span class="ico">&#x1F49A;</span>Health Check</a>
-  </div>
-
-  <div class="sb-footer">
-    <div class="sb-user">
-      <div class="avatar" id="sb-avatar">N</div>
-      <div class="user-info">
-        <div class="uname" id="sb-uname">Nagaraj</div>
-        <div class="urole"><span id="sb-role-badge" class="role-badge role-admin">admin</span></div>
+<!-- LOGIN -->
+<div id="login-screen">
+  <div class="login-left">
+    <div class="login-left-grid"></div>
+    <div class="login-left-content">
+      <div class="login-product-logo">
+        <div class="login-product-icon">&#9889;</div>
+        <div class="login-product-name">NexusOps</div>
       </div>
-      <div class="live-dot" style="cursor:pointer;position:relative" title="Switch user" onclick="toggleUserSwitch()">
-        <span style="font-size:11px;color:var(--muted)">&#x21C5;</span>
-      </div>
-    </div>
-    <div id="user-switch-panel" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-      <div style="font-size:9.5px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">Switch user</div>
-      <div style="display:flex;gap:6px">
-        <input id="sb-user-input" style="flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:5px 8px;font-size:11.5px;color:var(--text);outline:none;font-family:inherit" placeholder="username" value="nagaraj"/>
-        <button onclick="applyUser()" style="padding:5px 10px;background:var(--blue2);border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit">Go</button>
-      </div>
-    </div>
-  </div>
-</nav>
-
-<div class="main">
-
-  <!-- ── CHAT PANEL ── -->
-  <div id="view-chat" style="display:none;flex-direction:column;height:100vh">
-    <div class="chat-topbar">
-      <div style="width:32px;height:32px;background:linear-gradient(135deg,#2563eb,#7c3aed);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0">&#x1F916;</div>
-      <div>
-        <div class="chat-topbar-title">DevOps AI Assistant</div>
-        <div class="chat-topbar-sub">Live context &#x2022; AWS &#x2022; K8s &#x2022; GitHub &#x2022; Grafana</div>
-      </div>
-      <div class="tb-spacer"></div>
-      <div style="display:flex;align-items:center;gap:6px;margin-right:8px">
-        <span style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.08em">Model</span>
-        <select id="llm-selector" class="llm-select" title="Select LLM provider">
-          <option value="">&#x1F504; Auto</option>
-          <option value="anthropic">&#x2728; Claude</option>
-          <option value="groq">&#x26A1; Groq / Llama</option>
-          <option value="ollama">&#x1F3E0; Ollama (Local)</option>
-        </select>
-      </div>
-      <button class="chat-warroom-btn" id="chat-warroom-btn" onclick="createWarRoom()">&#x1F6A8; War Room</button>
-    </div>
-    <div id="chat-messages" class="chat-messages">
-      <div class="chat-empty" id="chat-empty">
-        <div class="chat-empty-icon">&#x1F916;</div>
-        <div class="chat-empty-title">DevOps AI Assistant</div>
-        <div class="chat-empty-sub">Ask questions or give commands. I can restart deployments, scale pods, create issues, page on-call, run pipelines &#x2014; and always use live data, never guesses.</div>
-        <div class="chat-suggestions">
-          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F4CA; Full infrastructure overview</button>
-          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F6A8; Any alerts firing right now?</button>
-          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x2638; Restart the payment-service deployment in production</button>
-          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F4C8; Scale the api-gateway to 5 replicas in default namespace</button>
-          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F50D; My service is down &#x2014; find root cause</button>
-          <button class="chat-suggestion" onclick="sendSuggestion(this)">&#x1F41B; Create a GitHub issue: high CPU usage on production pods</button>
-        </div>
-      </div>
-    </div>
-    <div class="chat-input-bar">
-      <textarea id="chat-input" placeholder="Describe your issue or ask anything about your infrastructure&#x2026;" rows="1" onkeydown="chatKeydown(event)" oninput="autoResize(this)"></textarea>
-      <button class="chat-send-btn" id="chat-send-btn" onclick="sendChat()">&#x27A4; Send</button>
-    </div>
-  </div>
-
-  <!-- ── MAIN CONTENT ── -->
-  <div id="content-wrap">
-    <div class="topbar">
-      <div class="topbar-title">AI Operations Platform</div>
-      <span class="topbar-ver">v2.0</span>
-      <div class="topbar-spacer"></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center" id="int-chips">
-        <span class="tb-chip int-chip" id="int-claude" title="LLM Provider"><span class="dot"></span>Claude AI</span>
-        <span class="tb-chip int-chip" id="int-aws" title="AWS"><span class="dot"></span>AWS</span>
-        <span class="tb-chip int-chip" id="int-k8s" title="Kubernetes"><span class="dot"></span>K8s</span>
-        <span class="tb-chip int-chip" id="int-github" title="Click to view repos" onclick="openGhDrawer()" style="cursor:pointer"><span class="dot"></span>GitHub</span>
-        <span class="tb-chip int-chip" id="int-grafana" title="Grafana"><span class="dot"></span>Grafana</span>
-        <span class="tb-chip int-chip" id="int-slack" title="Slack"><span class="dot"></span>Slack</span>
-        <span class="tb-chip int-chip" id="int-jira" title="Jira"><span class="dot"></span>Jira</span>
-        <span class="tb-chip int-chip" id="int-opsgenie" title="OpsGenie"><span class="dot"></span>OpsGenie</span>
-        <div style="width:1px;height:20px;background:var(--border);margin:0 4px"></div>
-        <button class="run-btn rbac-dev" onclick="document.getElementById('run-modal').classList.add('open')" title="Run AI Pipeline (R)">&#x25B6; Run Pipeline</button>
-      </div>
-    </div>
-
-    <div class="metric-strip" id="metric-strip">
-      <div class="mc mc-blue fade-in" onclick="showView('endpoints','all',document.querySelector('.nav-link'))" style="cursor:pointer" title="View all endpoints">
-        <div class="mc-label">&#x26A1; Total Endpoints</div>
-        <div class="mc-val" id="m-eps">&#x2014;</div>
-        <div class="mc-sub">REST API surface</div>
-        <div class="mc-bar"></div>
-      </div>
-      <div class="mc mc-green fade-in" title="Active LLM provider">
-        <div class="mc-label">&#x1F9E0; LLM Provider</div>
-        <div class="mc-val" id="m-llm" style="font-size:13px;padding-top:4px">&#x2014;</div>
-        <div class="mc-sub" id="m-llm-sub">Active model</div>
-        <div class="mc-bar"></div>
-      </div>
-      <div class="mc mc-purple fade-in" title="Incidents stored in vector memory">
-        <div class="mc-label">&#x1F4BE; Incident Memory</div>
-        <div class="mc-val" id="m-mem">&#x2014;</div>
-        <div class="mc-sub">Stored in ChromaDB</div>
-        <div class="mc-bar"></div>
-      </div>
-      <div class="mc mc-cyan fade-in" title="Configured integrations">
-        <div class="mc-label">&#x1F517; Integrations Live</div>
-        <div class="mc-val" id="m-ints">&#x2014;</div>
-        <div class="mc-sub" id="m-ints-sub">of 8 services</div>
-        <div class="mc-bar"></div>
-      </div>
-      <div class="mc mc-amber fade-in" title="Pipeline policy guardrails">
-        <div class="mc-label">&#x1F6E1; Policy Guardrails</div>
-        <div class="mc-val">4</div>
-        <div class="mc-sub">Blocked actions</div>
-        <div class="mc-bar"></div>
-      </div>
-      <div class="mc mc-amber fade-in" title="Your current access role">
-        <div class="mc-label">&#x1F512; Access Role</div>
-        <div class="mc-val" id="m-role" style="font-size:15px;padding-top:4px">&#x2014;</div>
-        <div class="mc-sub" id="m-role-perms">Checking...</div>
-        <div class="mc-bar"></div>
-      </div>
-      <div class="mc mc-green fade-in" title="AI actions executed this session">
-        <div class="mc-label">&#x1F916; AI Actions</div>
-        <div class="mc-val" id="m-actions" style="font-size:22px">0</div>
-        <div class="mc-sub">Executed this session</div>
-        <div class="mc-bar"></div>
-      </div>
-    </div>
-
-    <div id="view-endpoints">
-      <div class="view-header">
-        <div>
-          <h2>API Endpoints</h2>
-          <p>Complete REST API surface — click any endpoint to copy path</p>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <div class="search-bar"><span style="color:var(--muted);font-size:13px">&#x1F50D;</span><input type="text" id="ep-search" placeholder="Search endpoints&#x2026;" oninput="filterEps(this.value)"/></div>
-          <span class="kbd" title="Press / to focus search">/</span>
-        </div>
-      </div>
-
-      <div data-section="general">
-        <div class="ep-group">
-          <div class="ep-group-hdr"><span class="ico">&#x1F527;</span><span class="g-name">General &amp; AI</span><span class="g-cnt">13</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/</span><span class="ep-desc">Dashboard UI</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/health</span><span class="ep-desc">Basic health check</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/health/full</span><span class="ep-desc">Full integration health</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/health/integrations</span><span class="ep-desc">Integration diagnostics</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/chat</span><span class="ep-desc">Conversational AI (LLM + live context)</span></div>
-          <div class="ep-row" data-ep data-method="WS" onclick="epClick(this)"><span class="badge" style="background:rgba(167,139,250,.12);color:var(--purple);border:1px solid rgba(167,139,250,.25)">WS</span><span class="ep-path">/ws</span><span class="ep-desc">WebSocket real-time events</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/secrets/status</span><span class="ep-desc">Integration key status</span></div>
-          <div class="ep-row rbac-admin" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/secrets</span><span class="ep-desc">Save/update credentials</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row rbac-admin" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/security/roles</span><span class="ep-desc">List all RBAC roles</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row rbac-admin" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/security/roles/assign</span><span class="ep-desc">Assign role to user</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/warroom/create</span><span class="ep-desc">AI war room + Slack channel</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/grafana/alerts</span><span class="ep-desc">Firing Grafana alerts</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/grafana/dashboards</span><span class="ep-desc">Grafana datasources</span></div>
-        </div>
-      </div>
-
-      <div data-section="pipeline" class="rbac-dev">
-        <div class="ep-group">
-          <div class="ep-group-hdr"><span class="ico">&#x1F916;</span><span class="g-name">AI Response Engine</span><span class="g-cnt">4</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/incidents/run</span><span class="ep-desc">Run full autonomous pipeline</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/incidents/run/async</span><span class="ep-desc">Async pipeline — returns job ID immediately</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/v2/incident/run</span><span class="ep-desc">Multi-agent pipeline (extended)</span></div>
-        </div>
-      </div>
-
-      <div data-section="webhooks" class="rbac-admin">
-        <div class="ep-group">
-          <div class="ep-group-hdr"><span class="ico">&#x1F517;</span><span class="g-name">Webhooks (Event-Driven)</span><span class="g-cnt">2</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/webhooks/github</span><span class="ep-desc">GitHub push / PR events</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/webhooks/pagerduty</span><span class="ep-desc">PagerDuty incident trigger</span></div>
-        </div>
-      </div>
-
-      <div data-section="k8s">
-        <div class="ep-group">
-          <div class="ep-group-hdr"><span class="ico">&#x2638;</span><span class="g-name">Kubernetes</span><span class="g-cnt">7</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/health</span><span class="ep-desc">Cluster health overview</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/pods</span><span class="ep-desc">List pods with status</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/deployments</span><span class="ep-desc">Deployment readiness</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/k8s/logs</span><span class="ep-desc">Pod logs (query: namespace, pod)</span></div>
-          <div class="ep-row rbac-dev" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/restart</span><span class="ep-desc">Rolling restart deployment</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row rbac-dev" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/scale</span><span class="ep-desc">Scale deployment replicas</span><span class="ep-lock">&#x1F512;</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/k8s/diagnose</span><span class="ep-desc">AI K8s diagnosis</span></div>
-        </div>
-      </div>
-
-      <div data-section="aws">
-        <div class="ep-group">
-          <div class="ep-group-hdr"><span class="ico">&#x2601;</span><span class="g-name">AWS</span><span class="g-cnt">23</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ec2/instances</span><span class="ep-desc">EC2 instances</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ecs/services</span><span class="ep-desc">ECS services</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/lambda/functions</span><span class="ep-desc">Lambda functions</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudwatch/alarms</span><span class="ep-desc">CloudWatch alarms</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudwatch/logs</span><span class="ep-desc">Log groups &amp; streams</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/rds/instances</span><span class="ep-desc">RDS instances</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/s3/buckets</span><span class="ep-desc">S3 buckets</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/sqs/queues</span><span class="ep-desc">SQS queues</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/dynamodb/tables</span><span class="ep-desc">DynamoDB tables</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cloudtrail/events</span><span class="ep-desc">CloudTrail events</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/route53/health</span><span class="ep-desc">Route53 health checks</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/sns/topics</span><span class="ep-desc">SNS topics</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/diagnose</span><span class="ep-desc">AI AWS root cause analysis</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/predict-scaling</span><span class="ep-desc">AI scaling prediction</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ec2/console</span><span class="ep-desc">EC2 console output (query: instance_id)</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/ecs/stopped-tasks</span><span class="ep-desc">Stopped ECS tasks</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/lambda/errors</span><span class="ep-desc">Lambda error stats (query: function_name)</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/rds/events</span><span class="ep-desc">RDS events (query: db_instance_id)</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/cloudwatch/metrics</span><span class="ep-desc">CloudWatch metrics query</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/cost/summary</span><span class="ep-desc">Resource inventory &amp; cost overview</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/aws/assess-deployment</span><span class="ep-desc">Pre-deploy risk gate</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/context</span><span class="ep-desc">Full AWS context snapshot</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/aws/synthesize</span><span class="ep-desc">AI incident synthesis</span></div>
-        </div>
-      </div>
-
-      <div data-section="deploy">
-        <div class="ep-group">
-          <div class="ep-group-hdr"><span class="ico">&#x1F680;</span><span class="g-name">Deploy, GitHub &amp; Jira</span><span class="g-cnt">7</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/github/commits</span><span class="ep-desc">Recent commits</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/github/prs</span><span class="ep-desc">Recent pull requests</span></div>
-          <div class="ep-row" data-ep data-method="GET" onclick="epClick(this)"><span class="badge GET">GET</span><span class="ep-path">/github/profile</span><span class="ep-desc">GitHub account summary</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/github/pr/{n}/review</span><span class="ep-desc">AI PR code review</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/github/issue</span><span class="ep-desc">Create GitHub issue</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/jira/incident</span><span class="ep-desc">Create Jira ticket</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/deploy/assess</span><span class="ep-desc">Pre-deploy AI risk gate</span></div>
-          <div class="ep-row" data-ep data-method="POST" onclick="epClick(this)"><span class="badge POST">POST</span><span class="ep-path">/deploy/jira-to-pr</span><span class="ep-desc">Jira ticket &#x2192; GitHub PR plan</span></div>
-        </div>
-      </div>
-
-      <div data-section="pipeline">
-        <div class="ep-group" style="border-color:rgba(79,142,247,.25)">
-          <div class="pipeline-hdr"><span class="ico" style="font-size:16px">&#x1F916;</span><span class="g-name" style="color:#93c5fd">Autonomous Response Flow</span><span class="pipeline-badge">7-Stage</span></div>
-          <div class="flow-row">
-            <div class="fstep"><span class="fstep-ic">&#x1F4E1;</span><span class="fstep-lb">Collect</span><span class="fstep-sb">AWS/K8s/Git</span></div>
-            <span class="farr">&#x279C;</span>
-            <div class="fstep"><span class="fstep-ic">&#x1F9E0;</span><span class="fstep-lb">Plan</span><span class="fstep-sb">LLM actions</span></div>
-            <span class="farr">&#x279C;</span>
-            <div class="fstep"><span class="fstep-ic">&#x2696;</span><span class="fstep-lb">Decide</span><span class="fstep-sb">Risk gate</span></div>
-            <span class="farr">&#x279C;</span>
-            <div class="fstep"><span class="fstep-ic">&#x1F6E1;</span><span class="fstep-lb">Policy</span><span class="fstep-sb">RBAC check</span></div>
-            <span class="farr">&#x279C;</span>
-            <div class="fstep"><span class="fstep-ic">&#x26A1;</span><span class="fstep-lb">Execute</span><span class="fstep-sb">6 handlers</span></div>
-            <span class="farr">&#x279C;</span>
-            <div class="fstep"><span class="fstep-ic">&#x1F4CA;</span><span class="fstep-lb">Validate</span><span class="fstep-sb">Health check</span></div>
-            <span class="farr">&#x279C;</span>
-            <div class="fstep"><span class="fstep-ic">&#x1F4BE;</span><span class="fstep-lb">Memory</span><span class="fstep-sb">ChromaDB</span></div>
+      <h1 class="login-hero-heading">AI-powered ops for<br><span>modern infrastructure</span></h1>
+      <p class="login-hero-sub">Automated incident response, intelligent cost analysis, and real-time infrastructure monitoring — all in one platform.</p>
+      <div class="login-features">
+        <div class="login-feature">
+          <div class="login-feature-icon" style="background:rgba(124,58,237,0.15);color:#a78bfa">&#128680;</div>
+          <div class="login-feature-text">
+            <strong>Automated Incident Response</strong>
+            <span>AI triages alerts, identifies root causes, and executes remediation actions autonomously.</span>
           </div>
-          <pre class="sample">POST /incidents/run
-{
-  "incident_id": "INC-2024-001",
-  "description": "Payment service pods crash-looping in production",
-  "severity": "critical",
-  "auto_remediate": false,
-  "k8s": {"namespace": "production"}
-}</pre>
         </div>
-      </div>
-
-    </div><!-- /view-endpoints -->
-
-    <div id="view-secrets" class="secrets-panel">
-      <div class="sec-actions-bar">
-        <div class="sec-user-wrap">
-          <span class="sec-user-lbl">Authenticated as</span>
-          <input class="sec-user-input" id="sec-user" type="text" placeholder="username" readonly/>
+        <div class="login-feature">
+          <div class="login-feature-icon" style="background:rgba(6,182,212,0.12);color:#06b6d4">&#9729;</div>
+          <div class="login-feature-text">
+            <strong>Multi-cloud Infrastructure</strong>
+            <span>Unified visibility across AWS EC2, CloudWatch, Kubernetes, and third-party integrations.</span>
+          </div>
         </div>
-        <button id="save-btn" class="save-btn" onclick="saveSecrets()">&#x1F4BE; Save to .env</button>
-        <span id="sec-msg" class="sec-msg"></span>
-      </div>
-
-      <div class="sec-card">
-        <div class="sec-card-hdr"><span class="ico">&#x1F916;</span><span class="g-name">LLM Providers</span><span class="int-chip" id="int-claude-s"><span class="dot"></span>Claude AI</span></div>
-        <div class="sec-row"><span class="sec-key">ANTHROPIC_API_KEY</span><input class="sec-input" id="ANTHROPIC_API_KEY" type="password" placeholder="sk-ant-api03-&#x2026;"/><span class="sec-status" id="st-ANTHROPIC_API_KEY"></span></div>
-        <div class="sec-row"><span class="sec-key">GROQ_API_KEY</span><input class="sec-input" id="GROQ_API_KEY" type="password" placeholder="gsk_&#x2026;"/><span class="sec-status" id="st-GROQ_API_KEY"></span></div>
-      </div>
-
-      <div class="sec-card">
-        <div class="sec-card-hdr"><span class="ico">&#x2601;</span><span class="g-name">AWS</span><span class="int-chip" id="int-aws-s"><span class="dot"></span>AWS</span></div>
-        <div class="sec-row"><span class="sec-key">AWS_ACCESS_KEY_ID</span><input class="sec-input" id="AWS_ACCESS_KEY_ID" type="password" placeholder="AKIA&#x2026;"/><span class="sec-status" id="st-AWS_ACCESS_KEY_ID"></span></div>
-        <div class="sec-row"><span class="sec-key">AWS_SECRET_ACCESS_KEY</span><input class="sec-input" id="AWS_SECRET_ACCESS_KEY" type="password" placeholder="Secret key&#x2026;"/><span class="sec-status" id="st-AWS_SECRET_ACCESS_KEY"></span></div>
-        <div class="sec-row"><span class="sec-key">AWS_REGION</span><input class="sec-input" id="AWS_REGION" type="text" placeholder="us-east-1"/><span class="sec-status" id="st-AWS_REGION"></span></div>
-      </div>
-
-      <div class="sec-card">
-        <div class="sec-card-hdr"><span class="ico">&#x1F419;</span><span class="g-name">GitHub</span><span class="int-chip" id="int-github-s"><span class="dot"></span>GitHub</span></div>
-        <div class="sec-row"><span class="sec-key">GITHUB_TOKEN</span><input class="sec-input" id="GITHUB_TOKEN" type="password" placeholder="ghp_&#x2026;"/><span class="sec-status" id="st-GITHUB_TOKEN"></span></div>
-        <div class="sec-row"><span class="sec-key">GITHUB_REPO</span><input class="sec-input" id="GITHUB_REPO" type="text" placeholder="owner/repo-name"/><span class="sec-status" id="st-GITHUB_REPO"></span></div>
-      </div>
-
-      <div class="sec-card">
-        <div class="sec-card-hdr"><span class="ico">&#x1F4CA;</span><span class="g-name">Grafana</span><span class="int-chip" id="int-grafana-s"><span class="dot"></span>Grafana</span></div>
-        <div class="sec-row"><span class="sec-key">GRAFANA_URL</span><input class="sec-input" id="GRAFANA_URL" type="text" placeholder="http://localhost:3000"/><span class="sec-status" id="st-GRAFANA_URL"></span></div>
-        <div class="sec-row"><span class="sec-key">GRAFANA_TOKEN</span><input class="sec-input" id="GRAFANA_TOKEN" type="password" placeholder="Service account token"/><span class="sec-status" id="st-GRAFANA_TOKEN"></span></div>
-      </div>
-
-      <div class="sec-card">
-        <div class="sec-card-hdr"><span class="ico">&#x1F4AC;</span><span class="g-name">Slack</span><span class="int-chip" id="int-slack-s"><span class="dot"></span>Slack</span></div>
-        <div class="sec-row"><span class="sec-key">SLACK_BOT_TOKEN</span><input class="sec-input" id="SLACK_BOT_TOKEN" type="password" placeholder="xoxb-&#x2026;"/><span class="sec-status" id="st-SLACK_BOT_TOKEN"></span></div>
-        <div class="sec-row"><span class="sec-key">SLACK_CHANNEL</span><input class="sec-input" id="SLACK_CHANNEL" type="text" placeholder="#incidents"/><span class="sec-status" id="st-SLACK_CHANNEL"></span></div>
-      </div>
-
-      <div class="sec-card">
-        <div class="sec-card-hdr"><span class="ico">&#x1F4CB;</span><span class="g-name">Jira &amp; OpsGenie</span><span class="int-chip" id="int-jira-s"><span class="dot"></span>Jira</span></div>
-        <div class="sec-row"><span class="sec-key">JIRA_URL</span><input class="sec-input" id="JIRA_URL" type="text" placeholder="https://company.atlassian.net"/><span class="sec-status" id="st-JIRA_URL"></span></div>
-        <div class="sec-row"><span class="sec-key">JIRA_USER</span><input class="sec-input" id="JIRA_USER" type="text" placeholder="you@company.com"/><span class="sec-status" id="st-JIRA_USER"></span></div>
-        <div class="sec-row"><span class="sec-key">JIRA_TOKEN</span><input class="sec-input" id="JIRA_TOKEN" type="password" placeholder="Jira API token"/><span class="sec-status" id="st-JIRA_TOKEN"></span></div>
-        <div class="sec-row"><span class="sec-key">OPSGENIE_API_KEY</span><input class="sec-input" id="OPSGENIE_API_KEY" type="password" placeholder="OpsGenie key"/><span class="sec-status" id="st-OPSGENIE_API_KEY"></span></div>
-      </div>
-
-      <div class="sec-card">
-        <div class="sec-card-hdr"><span class="ico">&#x2638;</span><span class="g-name">Kubernetes &amp; GitLab</span></div>
-        <div class="sec-row"><span class="sec-key">GITLAB_URL</span><input class="sec-input" id="GITLAB_URL" type="text" placeholder="https://gitlab.com"/><span class="sec-status" id="st-GITLAB_URL"></span></div>
-        <div class="sec-row"><span class="sec-key">GITLAB_TOKEN</span><input class="sec-input" id="GITLAB_TOKEN" type="password" placeholder="GitLab token"/><span class="sec-status" id="st-GITLAB_TOKEN"></span></div>
-        <div class="sec-row"><span class="sec-key">GITLAB_PROJECT</span><input class="sec-input" id="GITLAB_PROJECT" type="text" placeholder="namespace/project"/><span class="sec-status" id="st-GITLAB_PROJECT"></span></div>
-      </div>
-
-      <!-- ── EMAIL / SMTP CONFIG ── -->
-      <div class="sec-card" style="border:1px solid rgba(79,142,247,.25);background:rgba(79,142,247,.04)">
-        <div class="sec-card-hdr">
-          <span class="ico">&#x2709;</span>
-          <span class="g-name">Email / SMTP</span>
-          <span class="int-chip" id="int-smtp-s"><span class="dot"></span>SMTP</span>
-        </div>
-        <div class="sec-row"><span class="sec-key">SMTP_USER</span><input class="sec-input" id="smtp_user_inp" type="email" placeholder="you@gmail.com"/></div>
-        <div class="sec-row"><span class="sec-key">SMTP_PASSWORD</span><input class="sec-input" id="smtp_pass_inp" type="password" placeholder="16-char Gmail App Password"/></div>
-        <div class="sec-row"><span class="sec-key">SMTP_FROM</span><input class="sec-input" id="smtp_from_inp" type="text" placeholder="DevOps AI &lt;you@gmail.com&gt;"/></div>
-        <div class="sec-row"><span class="sec-key">APP_URL</span><input class="sec-input" id="app_url_inp" type="text" placeholder="http://localhost:8000"/></div>
-        <div style="padding:10px 16px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button onclick="saveSMTP()" style="padding:6px 16px;background:var(--blue2);border:none;border-radius:5px;color:#fff;font-size:.82em;font-weight:700;cursor:pointer">Save &amp; Test Connection</button>
-          <button onclick="testEmail()" style="padding:6px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:.82em;cursor:pointer">Send Test Email to Myself</button>
-          <span id="smtp-msg" style="font-size:.8em;display:none"></span>
-        </div>
-        <div style="padding:0 16px 12px;font-size:.76em;color:var(--muted);line-height:1.6">
-          Gmail: enable 2FA &#x2192; <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--blue)">myaccount.google.com/apppasswords</a> &#x2192; create App Password for "Mail".
-        </div>
-      </div>
-
-    </div><!-- /view-secrets -->
-
-    <!-- ── TEAM & ACCESS PANEL ── -->
-    <div id="view-users" style="display:none;padding:24px;max-width:900px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
-        <div>
-          <h2 style="font-size:1.2em;font-weight:700;margin-bottom:4px">&#x1F465; Team &amp; Access</h2>
-          <p style="font-size:.82em;color:var(--muted)">Manage users, roles, and send invites. Admin only.</p>
-        </div>
-        <button onclick="showInviteModal()" style="padding:8px 18px;background:var(--blue2);border:none;border-radius:var(--radius-sm);color:#fff;font-weight:700;font-size:13px;cursor:pointer">+ Invite User</button>
-      </div>
-
-      <!-- Role legend -->
-      <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">
-        <div style="display:flex;align-items:center;gap:6px;font-size:12px;background:var(--surface2);padding:6px 12px;border-radius:20px"><span style="background:rgba(239,68,68,.2);color:#f87171;padding:2px 8px;border-radius:10px;font-size:.78em;font-weight:700">admin</span> Full access</div>
-        <div style="display:flex;align-items:center;gap:6px;font-size:12px;background:var(--surface2);padding:6px 12px;border-radius:20px"><span style="background:rgba(34,211,238,.15);color:#22d3ee;padding:2px 8px;border-radius:10px;font-size:.78em;font-weight:700">developer</span> Read &amp; write</div>
-        <div style="display:flex;align-items:center;gap:6px;font-size:12px;background:var(--surface2);padding:6px 12px;border-radius:20px"><span style="background:rgba(167,139,250,.15);color:#a78bfa;padding:2px 8px;border-radius:10px;font-size:.78em;font-weight:700">viewer</span> Read-only</div>
-      </div>
-
-      <!-- User table -->
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)">
-        <div style="padding:14px 18px;border-bottom:1px solid var(--border);font-size:11px;font-weight:700;opacity:.5;display:grid;grid-template-columns:1fr 160px 140px 100px;gap:10px;text-transform:uppercase;letter-spacing:.06em">
-          <span>User</span><span>Role</span><span>Created</span><span>Actions</span>
-        </div>
-        <div id="users-list">
-          <div style="padding:24px;text-align:center;opacity:.5;font-size:13px">Loading...</div>
-        </div>
-      </div>
-
-      <!-- Invite result -->
-      <div id="invite-result" style="display:none;margin-top:16px;padding:16px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface2);font-size:13px"></div>
-    </div>
-
-    <!-- Invite Modal -->
-    <div id="invite-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:999;align-items:center;justify-content:center">
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;width:100%;max-width:400px">
-        <h3 style="margin-bottom:6px;font-size:1.1em;font-weight:700">Invite New User</h3>
-        <p style="font-size:.82em;color:var(--muted);margin-bottom:20px">They will receive a one-time OTP by email to set their password.</p>
-        <div id="invite-err" style="color:#f87171;font-size:.82em;margin-bottom:10px;display:none"></div>
-        <label style="display:block;font-size:.82em;color:var(--muted);margin-bottom:4px">Username</label>
-        <input id="inv-username" type="text" placeholder="alice" style="width:100%;box-sizing:border-box;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9em;margin-bottom:12px;outline:none"/>
-        <label style="display:block;font-size:.82em;color:var(--muted);margin-bottom:4px">Email</label>
-        <input id="inv-email" type="email" placeholder="alice@company.com" style="width:100%;box-sizing:border-box;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9em;margin-bottom:12px;outline:none"/>
-        <label style="display:block;font-size:.82em;color:var(--muted);margin-bottom:4px">Role</label>
-        <select id="inv-role" style="width:100%;box-sizing:border-box;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9em;margin-bottom:20px;outline:none">
-          <option value="viewer">viewer</option>
-          <option value="developer" selected>developer</option>
-          <option value="admin">admin</option>
-        </select>
-        <div style="display:flex;gap:10px">
-          <button onclick="closeInviteModal()" style="flex:1;padding:10px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:.9em;cursor:pointer">Cancel</button>
-          <button id="inv-send-btn" onclick="sendInvite()" style="flex:2;padding:10px;border-radius:6px;border:none;background:var(--blue2);color:#fff;font-weight:700;font-size:.9em;cursor:pointer">Send Invite</button>
+        <div class="login-feature">
+          <div class="login-feature-icon" style="background:rgba(34,197,94,0.12);color:#22c55e">&#129302;</div>
+          <div class="login-feature-text">
+            <strong>Conversational AI Assistant</strong>
+            <span>Ask questions about your infrastructure in plain English and get actionable insights.</span>
+          </div>
         </div>
       </div>
     </div>
-
-    <div class="footer">
-      <span>&#x26A1; NexusOps</span>
-      <span style="opacity:.3">&#x2022;</span>
-      <a href="/docs" target="_blank">Swagger</a>
-      <span style="opacity:.3">&#x2022;</span>
-      <a href="/redoc" target="_blank">ReDoc</a>
-      <span style="opacity:.3">&#x2022;</span>
-      <a href="/health/full" target="_blank">Health</a>
-      <span style="opacity:.3">&#x2022;</span>
-      <span>v2.0.0 &#x2022; Multi-Agent AI &#x2022; Autonomous</span>
-    </div>
-  </div><!-- /content-wrap -->
-
-</div><!-- /main -->
-
-<!-- ── API EXPLORER DRAWER ── -->
-<div class="ep-drawer-backdrop" id="ep-backdrop" onclick="closeApiModal()"></div>
-<div class="ep-drawer" id="ep-drawer">
-  <div class="ep-drawer-hdr">
-    <span class="ep-drawer-method GET" id="ep-method-badge">GET</span>
-    <span class="ep-drawer-path" id="ep-path-label">/health</span>
-    <button class="ep-drawer-close" onclick="closeApiModal()">&times;</button>
   </div>
-  <div class="ep-drawer-body" id="ep-drawer-body">
-    <!-- populated by openApiModal() -->
-  </div>
-  <div class="ep-drawer-ftr">
-    <button class="ep-exec-btn" id="ep-exec-btn" onclick="sendApiRequest()">&#x25B6; Execute</button>
-    <button class="ep-outline-btn" id="ep-curl-btn" onclick="copyAsCurl()">Copy cURL</button>
-    <button class="ep-outline-btn" id="ep-copy-resp-btn" onclick="copyApiResp()" style="display:none">Copy Response</button>
-    <span id="api-status-wrap" style="margin-left:auto"></span>
+  <div class="login-right">
+    <div class="login-card">
+      <div class="login-card-heading">Welcome back</div>
+      <div class="login-card-sub">Sign in to your NexusOps workspace</div>
+      <div id="login-error"></div>
+      <div class="form-group">
+        <label class="form-label">Username</label>
+        <input type="text" id="login-user" class="form-input" value="admin" autocomplete="username" spellcheck="false" placeholder="your-username"/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <div class="form-input-wrap">
+          <input type="password" id="login-pass" class="form-input" style="padding-right:42px" placeholder="Enter your password" autocomplete="current-password"
+            onkeydown="if(event.key==='Enter')App.login()"/>
+          <span class="form-input-icon" id="pw-toggle" onclick="App.togglePw()" title="Show password">&#128065;</span>
+        </div>
+      </div>
+      <button class="login-btn" onclick="App.login()" id="login-btn">
+        <span id="login-btn-text">Sign In</span>
+        <span style="font-size:14px">&#8594;</span>
+      </button>
+      <p class="login-hint">Contact your administrator for access</p>
+    </div>
   </div>
 </div>
 
-<!-- ── TOAST CONTAINER ── -->
-<div id="toast-wrap"></div>
+<!-- APP -->
+<div id="app">
+  <!-- SIDEBAR -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+      <div>
+        <div class="sidebar-logo-text">NexusOps</div>
+        <span class="sidebar-logo-sub">AI DevOps Platform</span>
+      </div>
+    </div>
 
-<!-- ── RUN PIPELINE MODAL ── -->
-<div class="modal-overlay" id="run-modal" onclick="if(event.target===this)this.classList.remove('open')">
+    <div class="nav-section">Overview</div>
+    <div class="nav-item active" onclick="App.navigate('dashboard')" data-s="dashboard">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></div> Dashboard
+    </div>
+    <div class="nav-item" onclick="App.navigate('monitoring')" data-s="monitoring">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div> Monitoring
+    </div>
+
+    <div class="nav-section">Operations</div>
+    <div class="nav-item" onclick="App.navigate('incidents')" data-s="incidents">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div> Incidents
+      <span class="nav-badge" id="badge-incidents" style="display:none">0</span>
+    </div>
+    <div class="nav-item" onclick="App.navigate('warroom')" data-s="warroom">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div> War Room
+    </div>
+    <div class="nav-item" onclick="App.navigate('approvals')" data-s="approvals">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div> Approvals
+      <span class="nav-badge" id="badge-approvals" style="display:none">0</span>
+    </div>
+    <div class="nav-item" onclick="App.navigate('cost')" data-s="cost">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div> Cost Analysis
+    </div>
+
+    <div class="nav-section">Intelligence</div>
+    <div class="nav-item" onclick="App.navigate('chat')" data-s="chat">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg></div> AI Assistant
+    </div>
+    <div class="nav-item" onclick="App.navigate('infra')" data-s="infra">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div> Infrastructure
+    </div>
+    <div class="nav-item" onclick="App.navigate('integrations')" data-s="integrations">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></div> Integrations
+    </div>
+
+    <div class="nav-section">Admin</div>
+    <div class="nav-item" onclick="App.navigate('users')" data-s="users">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div> Users
+    </div>
+    <div class="nav-item" onclick="App.navigate('security')" data-s="security">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div> Security
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="user-tile">
+        <div class="user-avatar" id="user-avatar-initial">A</div>
+        <div class="user-info">
+          <div class="user-name" id="sidebar-username">admin</div>
+          <div class="user-role" id="sidebar-role">admin</div>
+        </div>
+        <button class="logout-btn" onclick="App.logout()" title="Sign out">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- MAIN -->
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-title" id="topbar-title">Dashboard</div>
+      <div class="topbar-actions">
+        <div class="topbar-status" id="topbar-status">
+          <span class="status-dot dot-green dot-pulse"></span>
+          All Systems Operational
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(124,58,237,0.08);border:1px solid rgba(124,58,237,0.2);border-radius:7px" title="Global AI model — used for chat, incident pipeline, and all AI features">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>
+          <select id="global-llm-select" onchange="App.setGlobalLLM(this.value)" style="background:transparent;border:none;color:#c4b5fd;font-size:.78em;font-weight:600;font-family:inherit;cursor:pointer;outline:none;padding-right:4px">
+            <option value="" style="background:#0f1623;color:#e2e8f4">Auto (best available)</option>
+            <option value="anthropic" style="background:#0f1623;color:#e2e8f4">Claude (Anthropic)</option>
+            <option value="openai" style="background:#0f1623;color:#e2e8f4">GPT (OpenAI)</option>
+            <option value="groq" style="background:#0f1623;color:#e2e8f4">Groq / Llama</option>
+            <option value="ollama" style="background:#0f1623;color:#e2e8f4">Ollama (local)</option>
+          </select>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="App.refreshCurrent()" title="Refresh current section">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Refresh
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="App.newIncident()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New Incident
+        </button>
+      </div>
+    </div>
+    <div class="content">
+
+      <!-- DASHBOARD -->
+      <div id="s-dashboard" class="section-page active">
+        <!-- Stat Cards Row -->
+        <div class="grid-4 mb-16">
+          <div class="stat-card" style="border-top:2px solid var(--red);box-shadow:0 0 0 1px rgba(239,68,68,0.1),0 4px 24px rgba(0,0,0,0.35)">
+            <div class="stat-header">
+              <div class="stat-icon-box" style="background:linear-gradient(135deg,rgba(239,68,68,.3),rgba(239,68,68,.12));color:#f87171;box-shadow:0 0 20px rgba(239,68,68,.2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+              <span class="badge badge-gray" id="ds-incidents-badge" style="display:none">live</span>
+            </div>
+            <div class="stat-value" style="color:var(--text)" id="ds-incidents"><div class="skeleton" style="width:48px;height:32px"></div></div>
+            <div class="stat-label">Active Incidents</div>
+            <div class="stat-sub" id="ds-incidents-sub"><span style="color:var(--muted)">Loading...</span></div>
+          </div>
+          <div class="stat-card" style="border-top:2px solid var(--amber);box-shadow:0 0 0 1px rgba(245,158,11,0.1),0 4px 24px rgba(0,0,0,0.35)">
+            <div class="stat-header">
+              <div class="stat-icon-box" style="background:linear-gradient(135deg,rgba(245,158,11,.3),rgba(245,158,11,.12));color:#fbbf24;box-shadow:0 0 20px rgba(245,158,11,.2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+            </div>
+            <div class="stat-value" style="color:var(--text)" id="ds-approvals"><div class="skeleton" style="width:48px;height:32px"></div></div>
+            <div class="stat-label">Pending Approvals</div>
+            <div class="stat-sub" id="ds-approvals-sub"><span style="color:var(--muted)">Loading...</span></div>
+          </div>
+          <div class="stat-card" style="border-top:2px solid var(--blue);box-shadow:0 0 0 1px rgba(59,130,246,0.1),0 4px 24px rgba(0,0,0,0.35)">
+            <div class="stat-header">
+              <div class="stat-icon-box" style="background:linear-gradient(135deg,rgba(59,130,246,.3),rgba(59,130,246,.12));color:#60a5fa;box-shadow:0 0 20px rgba(59,130,246,.2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></div>
+            </div>
+            <div class="stat-value" style="color:var(--text)" id="ds-alerts"><div class="skeleton" style="width:48px;height:32px"></div></div>
+            <div class="stat-label">AWS Alarms Firing</div>
+            <div class="stat-sub" id="ds-alerts-sub"><span style="color:var(--muted)">Loading...</span></div>
+          </div>
+          <div class="stat-card" style="border-top:2px solid var(--green);box-shadow:0 0 0 1px rgba(34,197,94,0.1),0 4px 24px rgba(0,0,0,0.35)">
+            <div class="stat-header">
+              <div class="stat-icon-box" style="background:linear-gradient(135deg,rgba(34,197,94,.3),rgba(34,197,94,.12));color:#4ade80;box-shadow:0 0 20px rgba(34,197,94,.2)" id="ds-k8s-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></div>
+            </div>
+            <div id="ds-k8s"><div class="skeleton" style="width:72px;height:28px"></div></div>
+            <div class="stat-label">K8s Cluster</div>
+            <div class="stat-sub" id="ds-k8s-sub"></div>
+          </div>
+        </div>
+        <!-- Second Row: Activity + Health + Quick Actions -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 320px;gap:16px">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Recent Activity
+              </div>
+              <button class="btn btn-ghost btn-sm" onclick="App._sectionLoaded.dashboard=0;App.loadDashboard()">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              </button>
+            </div>
+            <div id="dash-activity"><div class="skeleton mb-8"></div><div class="skeleton mb-8" style="width:82%"></div><div class="skeleton" style="width:68%"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                Integration Health
+              </div>
+            </div>
+            <div id="dash-health"><div class="skeleton mb-8"></div><div class="skeleton mb-8" style="width:78%"></div><div class="skeleton" style="width:60%"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                Quick Actions
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:5px">
+  <button onclick="App.navigate('incidents')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(239,68,68,.14)'" onmouseout="this.style.background='rgba(239,68,68,.07)'">
+    <span style="width:28px;height:28px;border-radius:7px;background:rgba(239,68,68,.15);color:#f87171;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    </span>
+    <span style="flex:1;font-size:.82em;font-weight:500">Run Incident Pipeline</span>
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
+
+  <button onclick="App.navigate('warroom')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(124,58,237,.07);border:1px solid rgba(124,58,237,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(124,58,237,.14)'" onmouseout="this.style.background='rgba(124,58,237,.07)'">
+    <span style="width:28px;height:28px;border-radius:7px;background:rgba(124,58,237,.15);color:#a78bfa;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+    </span>
+    <span style="flex:1;font-size:.82em;font-weight:500">Create War Room</span>
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
+
+  <button onclick="App.navigate('chat')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(6,182,212,.07);border:1px solid rgba(6,182,212,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(6,182,212,.14)'" onmouseout="this.style.background='rgba(6,182,212,.07)'">
+    <span style="width:28px;height:28px;border-radius:7px;background:rgba(6,182,212,.15);color:#22d3ee;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>
+    </span>
+    <span style="flex:1;font-size:.82em;font-weight:500">Ask AI Assistant</span>
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
+
+  <button onclick="App.navigate('approvals')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(34,197,94,.14)'" onmouseout="this.style.background='rgba(34,197,94,.07)'">
+    <span style="width:28px;height:28px;border-radius:7px;background:rgba(34,197,94,.15);color:#4ade80;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    </span>
+    <span style="flex:1;font-size:.82em;font-weight:500">Review Approvals</span>
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
+
+  <button onclick="App.navigate('infra')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(245,158,11,.14)'" onmouseout="this.style.background='rgba(245,158,11,.07)'">
+    <span style="width:28px;height:28px;border-radius:7px;background:rgba(245,158,11,.15);color:#fbbf24;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+    </span>
+    <span style="flex:1;font-size:.82em;font-weight:500">View Infrastructure</span>
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
+</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MONITORING -->
+      <div id="s-monitoring" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">Monitoring</div><div class="section-sub">Real-time alerts from all connected sources</div></div>
+          <button class="btn btn-secondary btn-sm" onclick="App.loadMonitoring()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              Alert Stream
+            </div>
+            <span class="badge badge-gray" id="alert-count-badge"></span>
+          </div>
+          <div id="monitoring-alerts"><div class="loading-state"><div class="spinner"></div> Loading alerts...</div></div>
+        </div>
+      </div>
+
+      <!-- INCIDENTS -->
+      <div id="s-incidents" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">Incidents</div><div class="section-sub">Run the AI pipeline to analyze and remediate incidents</div></div>
+        </div>
+        <div class="grid-2-1">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                Run Incident Pipeline
+              </div>
+            </div>
+            <div class="form-group mb-12">
+              <label class="form-label">Incident ID</label>
+              <input type="text" id="inc-id" class="form-input" placeholder="INC-2024-001 (auto-generated if empty)"/>
+            </div>
+            <div class="form-group mb-12">
+              <label class="form-label">Description <span style="color:var(--red)">*</span></label>
+              <textarea id="inc-desc" class="form-input" placeholder="Describe the incident — be specific: which service, what error, what symptoms..." rows="4"></textarea>
+            </div>
+            <div class="form-row mb-12">
+              <div class="form-group">
+                <label class="form-label">Severity</label>
+                <select id="inc-sev" class="form-input">
+                  <option value="critical">Critical</option>
+                  <option value="high" selected>High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Lookback (hours)</label>
+                <input type="number" id="inc-hours" class="form-input" value="2" min="1" max="24"/>
+              </div>
+            </div>
+            <div class="form-group mb-12">
+              <div style="display:flex;gap:16px;flex-wrap:wrap">
+                <div class="form-toggle" onclick="App.toggleAutoRemediate()">
+                  <div class="toggle-track" id="auto-rem-toggle"><div class="toggle-thumb"></div></div>
+                  <span class="toggle-label">Auto-Remediate</span>
+                </div>
+                <div class="form-toggle" onclick="App.toggleDryRun()">
+                  <div class="toggle-track" id="dry-run-toggle"><div class="toggle-thumb"></div></div>
+                  <span class="toggle-label">Dry Run <small style="color:var(--muted)">(preview only)</small></span>
+                </div>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:16px">
+              <button class="btn btn-primary" onclick="App.runIncident(false)" id="run-inc-btn" style="flex:1;justify-content:center;padding:10px">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                Run Pipeline
+              </button>
+              <button class="btn btn-ghost" onclick="App.runIncident(true)" id="dry-run-btn" style="padding:10px 14px" title="Preview what the pipeline would do without executing">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                Preview
+              </button>
+            </div>
+            <div id="inc-result"></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                Active Incidents
+              </div>
+              <button class="btn btn-ghost btn-sm" onclick="App.loadIncidents()">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              </button>
+            </div>
+            <div id="active-incidents"><div class="empty-state"><div class="empty-icon">&#9989;</div><p>No active incidents</p></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- WAR ROOM -->
+      <div id="s-warroom" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">War Room</div><div class="section-sub">Collaborative incident command center with AI assistance</div></div>
+        </div>
+        <div class="grid-2-1">
+          <div id="warroom-detail" style="display:none;flex-direction:column;gap:16px">
+            <div class="card" id="warroom-info"></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+              <div class="card" style="display:flex;flex-direction:column;height:520px">
+                <div class="card-header">
+                  <div class="card-title">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    AI Assistant
+                  </div>
+                  <button class="btn btn-ghost btn-sm" onclick="App.suggestNextSteps()">&#129302; Next Steps</button>
+                </div>
+                <div class="chat-messages" id="warroom-messages" style="flex:1;height:0"></div>
+                <div class="chat-input-row">
+                  <textarea class="chat-input" id="warroom-input" placeholder="Ask the AI anything about this incident..." rows="1"
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.askWarRoom()}"></textarea>
+                  <button class="btn btn-primary" onclick="App.askWarRoom()">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    Send
+                  </button>
+                </div>
+              </div>
+              <div class="card" style="display:flex;flex-direction:column;height:520px">
+                <div class="card-header">
+                  <div class="card-title">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Slack Channel
+                  </div>
+                  <button class="btn btn-ghost btn-sm" onclick="App.refreshSlackHistory()" id="slack-refresh-btn">&#8635; Refresh</button>
+                </div>
+                <div class="chat-messages" id="slack-messages" style="flex:1;height:0">
+                  <div class="empty-state"><p>Slack channel messages will appear here</p></div>
+                </div>
+                <div class="chat-input-row">
+                  <textarea class="chat-input" id="slack-input" placeholder="Send a message to Slack channel..." rows="1"
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.sendSlackMessage()}"></textarea>
+                  <button class="btn btn-primary" onclick="App.sendSlackMessage()">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    Send
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="warroom-list-panel" style="display:flex;flex-direction:column;gap:16px">
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  Create War Room
+                </div>
+              </div>
+              <div class="form-group mb-12">
+                <label class="form-label">Incident ID</label>
+                <input type="text" id="wr-inc-id" class="form-input" placeholder="INC-001"/>
+              </div>
+              <div class="form-group mb-12">
+                <label class="form-label">Description</label>
+                <input type="text" id="wr-desc" class="form-input" placeholder="Brief incident description"/>
+              </div>
+              <div class="form-group mb-16">
+                <label class="form-label">Severity</label>
+                <select id="wr-sev" class="form-input">
+                  <option value="critical">Critical</option>
+                  <option value="high" selected>High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+              </div>
+              <button class="btn btn-primary" onclick="App.createWarRoom()" style="width:100%;justify-content:center">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                Create War Room
+              </button>
+            </div>
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title">
+                  <span class="status-dot dot-red dot-pulse"></span>
+                  Active War Rooms
+                </div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadWarRooms()">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+              </div>
+              <div id="warroom-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- APPROVALS -->
+      <div id="s-approvals" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">Approvals</div><div class="section-sub">Review and approve AI-recommended remediation actions</div></div>
+          <button class="btn btn-secondary btn-sm" onclick="App.loadApprovals()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              Pending Approvals
+            </div>
+            <span class="badge badge-amber" id="approvals-count-badge" style="display:none"></span>
+          </div>
+          <div id="approvals-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+        </div>
+      </div>
+
+      <!-- COST ANALYSIS -->
+      <div id="s-cost" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">Cost Analysis</div><div class="section-sub">Live AWS spend data + action impact estimation</div></div>
+          <button class="btn btn-ghost btn-sm" onclick="App.loadCostOverview()">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Refresh
+          </button>
+        </div>
+        <!-- Live AWS spend summary -->
+        <div id="cost-summary-row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px"></div>
+        <!-- Service breakdown + trend -->
+        <div class="grid-2" style="margin-bottom:16px">
+          <div class="card">
+            <div class="card-header"><div class="card-title">&#128202; Top Services This Month</div></div>
+            <div id="cost-services"><div class="loading-state"><div class="spinner"></div></div></div>
+          </div>
+          <div class="card">
+            <div class="card-header"><div class="card-title">&#128200; 6-Month Spend Trend</div></div>
+            <div id="cost-trend"><div class="loading-state"><div class="spinner"></div></div></div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                Analyze Action Costs
+              </div>
+            </div>
+            <div class="form-group mb-12">
+              <label class="form-label">Actions JSON</label>
+              <textarea id="cost-actions" class="form-input" rows="7" style="font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.82em" placeholder='[{"type":"k8s_scale","namespace":"prod","deployment":"api","replicas":5}]'></textarea>
+            </div>
+            <button class="btn btn-primary" onclick="App.analyzeCost()" style="width:100%;justify-content:center">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              Analyze Cost Impact
+            </button>
+            <div id="cost-result"></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-6"/></svg>
+                Action Impact Result
+              </div>
+            </div>
+            <div id="cost-aws" style="padding:8px 0"><div class="empty-state"><p class="text-muted">Run an analysis to see impact</p></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI ASSISTANT -->
+      <div id="s-chat" class="section-page">
+        <div class="card" style="height:calc(100vh - var(--topbar) - 48px);display:flex;flex-direction:column">
+          <div class="card-header" style="flex-shrink:0">
+            <div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>
+              AI Assistant
+              <span class="text-sm" style="color:var(--muted);font-weight:400" id="chat-session-label"></span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn btn-ghost btn-sm" onclick="App.newChat()">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                New Chat
+              </button>
+            </div>
+          </div>
+          <div class="chat-chips" id="chat-chips" style="flex-shrink:0">
+            <div class="chip" onclick="App.chipChat('What is the current K8s cluster health?')">K8s health?</div>
+            <div class="chip" onclick="App.chipChat('Are there any AWS CloudWatch alarms firing?')">AWS alarms?</div>
+            <div class="chip" onclick="App.chipChat('Show me the last 5 GitHub commits')">Last commits?</div>
+            <div class="chip" onclick="App.chipChat('What is the current AWS monthly cost?')">Current costs?</div>
+            <div class="chip" onclick="App.chipChat('List all EC2 instances and their state')">EC2 instances?</div>
+            <div class="chip" onclick="App.chipChat('Are there any active incidents right now?')">Active incidents?</div>
+          </div>
+          <div class="chat-messages" id="chat-messages" style="flex:1;height:0;overflow-y:auto">
+            <div class="chat-welcome" id="chat-welcome">
+              <div class="chat-welcome-icon">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>
+              </div>
+              <h2>NexusOps AI</h2>
+              <p>Ask me anything about your infrastructure — I can check alerts,<br>EC2 instances, K8s pods, GitHub activity, costs, and more.</p>
+            </div>
+          </div>
+          <div id="typing-indicator" style="display:none;flex-shrink:0;padding:4px 24px 0">
+            <div class="typing-row">
+              <div class="chat-avatar ai">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>
+              </div>
+              <div class="typing"><span></span><span></span><span></span></div>
+            </div>
+          </div>
+          <div class="chat-input-row" style="flex-shrink:0;padding:10px 0 2px;border-top:1px solid var(--border)">
+            <div class="chat-input-wrap">
+              <textarea class="chat-input" id="chat-input" placeholder="Ask anything about your infrastructure..." rows="1"
+                onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.sendChat()}"
+                oninput="this.style.height='';this.style.height=Math.min(this.scrollHeight,160)+'px'"></textarea>
+              <button class="chat-send-btn" onclick="App.sendChat()" title="Send (Enter)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- INFRASTRUCTURE -->
+      <div id="s-infra" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">Infrastructure</div><div class="section-sub">AWS and Kubernetes resource overview</div></div>
+          <div class="tab-pills" id="infra-tabs">
+            <button class="tab-pill active" onclick="App.infraTab('aws',this)">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:5px;vertical-align:middle"><path d="M4.5 16.5c-1.5 1.26-2 5-1 5.5s2.5.31 2.5-1.5c0-3.84 2.5-6.5 4.5-6.5 1.14 0 2.5.5 2.5.5S15 16.5 18 14.5c1.28-.86 2-2.5 2-4 0-2.5-1.5-4-3.5-4-1.5 0-3 1-3 1S12.5 6.5 10 6.5C7 6.5 4.5 9.5 4.5 12.5c0 1 .5 2.5 0 4z"/></svg>
+              AWS
+            </button>
+            <button class="tab-pill" onclick="App.infraTab('k8s',this)">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:5px;vertical-align:middle"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+              Kubernetes
+            </button>
+          </div>
+        </div>
+        <div id="infra-aws">
+          <div class="grid-2">
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                  EC2 Instances
+                </div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadEC2()">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+              </div>
+              <div id="ec2-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+            </div>
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+                  CloudWatch Alarms
+                </div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadAlarms()">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+              </div>
+              <div id="alarms-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+            </div>
+          </div>
+        </div>
+        <div id="infra-k8s" style="display:none">
+          <div class="grid-2">
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                  Cluster Health
+                </div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadK8sHealth()">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+              </div>
+              <div id="k8s-health"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+            </div>
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                  Pods
+                </div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadPods()">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
+              </div>
+              <div id="pods-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- INTEGRATIONS -->
+      <div id="s-integrations" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">Integrations</div><div class="section-sub">Connected services and API key status</div></div>
+          <button class="btn btn-secondary btn-sm" onclick="App.loadIntegrations()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div class="grid-3" id="integrations-grid">
+          <div class="loading-state" style="grid-column:1/-1"><div class="spinner"></div> Checking integrations...</div>
+        </div>
+      </div>
+
+      <!-- USERS -->
+      <div id="s-users" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">Users</div><div class="section-sub">Manage platform access and roles</div></div>
+          <button class="btn btn-primary btn-sm" onclick="App.openInviteModal()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Invite User
+          </button>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              Team Members
+            </div>
+          </div>
+          <div id="users-table"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+        </div>
+      </div>
+
+      <!-- SECURITY -->
+      <div id="s-security" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">Security</div><div class="section-sub">API keys, audit log, and webhook configuration</div></div>
+        </div>
+        <div class="grid-2 mb-16">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                API Keys Status
+              </div>
+            </div>
+            <div id="secrets-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                Audit Log
+              </div>
+            </div>
+            <div id="audit-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              Webhook Endpoints
+            </div>
+          </div>
+          <div id="webhook-urls"></div>
+        </div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<!-- MODALS -->
+<div class="modal-overlay" id="approve-modal">
   <div class="modal">
-    <div class="modal-title">&#x1F916; Run AI Pipeline</div>
-    <div class="modal-sub">Trigger the full autonomous AI incident response engine</div>
-    <div class="modal-field">
-      <label class="modal-label">Incident ID</label>
-      <input class="modal-input" id="m-inc-id" placeholder="INC-2024-001" type="text"/>
-    </div>
-    <div class="modal-field">
-      <label class="modal-label">Description</label>
-      <textarea class="modal-input" id="m-inc-desc" placeholder="e.g. Payment service pods crash-looping in production namespace&#x2026;"></textarea>
-    </div>
-    <div class="modal-row">
-      <div class="modal-field">
-        <label class="modal-label">Severity</label>
-        <div class="sev-pills">
-          <button class="sev-pill critical" onclick="setSev(this,'critical')">&#x1F534; Critical</button>
-          <button class="sev-pill high active" onclick="setSev(this,'high')">&#x1F7E0; High</button>
-          <button class="sev-pill medium" onclick="setSev(this,'medium')">&#x1F7E1; Medium</button>
-          <button class="sev-pill low" onclick="setSev(this,'low')">&#x1F7E2; Low</button>
-        </div>
+    <div class="modal-header">
+      <div class="modal-title">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:6px"><polyline points="20 6 9 17 4 12"/></svg>
+        Review Approval Request
       </div>
+      <button class="modal-close" onclick="App.closeModal('approve-modal')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
-    <div class="modal-field" style="margin-top:8px">
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text2)">
-        <input type="checkbox" id="m-auto-rem" style="accent-color:var(--blue)"/>
-        Auto-remediate (execute K8s actions without approval)
-      </label>
-    </div>
-    <div id="m-result" class="modal-result"></div>
-    <div class="modal-actions">
-      <button class="btn-cancel" onclick="document.getElementById('run-modal').classList.remove('open')">Cancel</button>
-      <button class="btn-run" id="m-run-btn" onclick="runPipeline()">&#x25B6; Run Pipeline</button>
+    <div id="approve-modal-body"></div>
+    <div style="display:flex;gap:8px;margin-top:22px">
+      <button class="btn btn-success" onclick="App.submitApproval()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        Approve Selected
+      </button>
+      <button class="btn btn-danger" onclick="App.submitRejection()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        Reject
+      </button>
+      <button class="btn btn-ghost" onclick="App.closeModal('approve-modal')">Cancel</button>
     </div>
   </div>
 </div>
-
-<!-- ── GITHUB REPOS DRAWER ── -->
-<div class="gh-drawer" id="gh-drawer">
-  <div class="gh-drawer-hdr">
-    <span style="font-size:16px">&#x1F419;</span>
-    <div class="gh-drawer-title">GitHub Repositories</div>
-    <button class="gh-drawer-close" onclick="document.getElementById('gh-drawer').classList.remove('open')">&times;</button>
-  </div>
-  <div class="gh-drawer-body" id="gh-drawer-body">
-    <div style="text-align:center;padding:30px;color:var(--muted)">Loading&#x2026;</div>
+<div class="modal-overlay" id="invite-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:6px"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+        Invite New User
+      </div>
+      <button class="modal-close" onclick="App.closeModal('invite-modal')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="form-group mb-12">
+      <label class="form-label">Username</label>
+      <input type="text" id="invite-username" class="form-input" placeholder="jane.doe"/>
+    </div>
+    <div class="form-group mb-12">
+      <label class="form-label">Email</label>
+      <input type="email" id="invite-email" class="form-input" placeholder="jane@company.com"/>
+    </div>
+    <div class="form-group mb-20">
+      <label class="form-label">Role</label>
+      <select id="invite-role" class="form-input">
+        <option value="viewer">Viewer — Read-only access</option>
+        <option value="developer" selected>Developer — Manage incidents and infra</option>
+        <option value="admin">Admin — Full platform access</option>
+      </select>
+    </div>
+    <button class="btn btn-primary" onclick="App.submitInvite()" style="width:100%;justify-content:center;padding:10px">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      Send Invite
+    </button>
   </div>
 </div>
+<div id="toast-container"></div>
 
 <script>
-var ALL_KEYS=['ANTHROPIC_API_KEY','GROQ_API_KEY','AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_REGION','GITHUB_TOKEN','GITHUB_REPO','GITLAB_URL','GITLAB_TOKEN','GITLAB_PROJECT','SLACK_BOT_TOKEN','SLACK_CHANNEL','JIRA_URL','JIRA_USER','JIRA_TOKEN','OPSGENIE_API_KEY','GRAFANA_URL','GRAFANA_TOKEN'];
-var INT_MAP={'Claude AI':'int-claude','AWS':'int-aws','Grafana':'int-grafana','GitHub':'int-github','GitLab':'int-gitlab','Kubernetes':'int-k8s','Slack':'int-slack','Jira':'int-jira','OpsGenie':'int-opsgenie'};
-var SEC_MAP={'Claude AI':'int-claude-s','AWS':'int-aws-s','Grafana':'int-grafana-s','GitHub':'int-github-s','Slack':'int-slack-s','Jira':'int-jira-s'};
+const App = {
+  token: localStorage.getItem('nexusops_token'),
+  username: localStorage.getItem('nexusops_user') || '',
+  role: localStorage.getItem('nexusops_role') || '',
+  globalLLM: localStorage.getItem('nexusops_llm') || '',
+  currentSection: 'dashboard',
+  chatSessionId: null,
+  pendingAction: null,
+  pendingParams: null,
+  autoRemediate: false,
+  dryRun: false,
+  currentWarRoomId: null,
+  currentSlackChannel: '',
+  currentApprovalId: null,
+  refreshTimer: null,
+  _sectionLoaded: {},   // section -> timestamp of last load
+  _CACHE_TTL: 45000,    // 45s cache per section
+  _awsRegion: '{{ aws_region }}',
 
-function showView(view, section, btn) {
-  try { localStorage.setItem('devops_view', view); } catch(e){}
-  try {
-    document.querySelectorAll('.nav-link').forEach(function(l){ l.classList.remove('active'); });
-    if (btn) btn.classList.add('active');
-    var cw = document.getElementById('content-wrap');
-    var cp = document.getElementById('view-chat');
-    if (cp) cp.style.display = view === 'chat' ? 'flex' : 'none';
-    if (cw) cw.style.display = view === 'chat' ? 'none' : 'flex';
-    if (view !== 'chat') {
-      cw.style.flexDirection = 'column';
+  setGlobalLLM(val){
+    this.globalLLM=val;
+    localStorage.setItem('nexusops_llm',val);
+    const sel=document.getElementById('global-llm-select');
+    if(sel) sel.value=val;
+  },
+
+  // ── HTTP ──────────────────────────────────────────────────────────
+  async api(method, path, body=null) {
+    const headers = {};
+    if(this.token) headers['Authorization']='Bearer '+this.token;
+    if(body!==null) headers['Content-Type']='application/json';
+    try{
+      const r=await fetch(path,{method,headers,body:body!==null?JSON.stringify(body):undefined});
+      if(r.status===401){this.logout();return null;}
+      return r;
+    }catch(e){this.toast('Connection error: '+e.message,'error');return null;}
+  },
+
+  // ── TOASTS ────────────────────────────────────────────────────────
+  toast(msg,type='info'){
+    const el=document.createElement('div');
+    el.className='toast toast-'+type;
+    const icons={success:'&#9989;',error:'&#10060;',info:'&#8505;',warn:'&#9888;'};
+    el.innerHTML=(icons[type]||'')+' '+msg;
+    document.getElementById('toast-container').appendChild(el);
+    setTimeout(()=>{el.style.opacity='0';el.style.transform='translateX(20px)';setTimeout(()=>el.remove(),300)},3500);
+  },
+
+  // ── ROUTING (hash-based for back/forward support) ─────────────────
+  navigate(section, pushState=true, forceReload=false){
+    if(!['dashboard','monitoring','incidents','warroom','approvals','cost','chat','infra','integrations','users','security'].includes(section))section='dashboard';
+    // If user explicitly clicks the same section they're on, bust cache so it reloads
+    const sameSectionClick = pushState && section === this.currentSection;
+    if(sameSectionClick || forceReload) this._sectionLoaded[section]=0;
+    document.querySelectorAll('.section-page').forEach(s=>s.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+    const pg=document.getElementById('s-'+section);
+    if(pg)pg.classList.add('active');
+    const ni=document.querySelector('[data-s="'+section+'"]');
+    if(ni)ni.classList.add('active');
+    const titles={dashboard:'Dashboard',monitoring:'Monitoring',incidents:'Incidents',warroom:'War Room',approvals:'Approvals',cost:'Cost Analysis',chat:'AI Assistant',infra:'Infrastructure',integrations:'Integrations',users:'Users',security:'Security'};
+    document.getElementById('topbar-title').textContent=titles[section]||section;
+    this.currentSection=section;
+    if(pushState && window.location.hash!=='#'+section)history.pushState({section},'','#'+section);
+    const now=Date.now();
+    const stale=!this._sectionLoaded[section]||(now-this._sectionLoaded[section])>this._CACHE_TTL;
+    if(!stale)return;
+    this._sectionLoaded[section]=now;
+    if(section==='dashboard')this.loadDashboard();
+    else if(section==='monitoring')this.loadMonitoring();
+    else if(section==='approvals')this.loadApprovals();
+    else if(section==='infra'){this.loadEC2();this.loadAlarms();}
+    else if(section==='integrations')this.loadIntegrations();
+    else if(section==='users')this.loadUsers();
+    else if(section==='security'){this.loadSecrets();this.loadAudit();this.loadWebhookUrls();}
+    else if(section==='cost')this.loadCostOverview();
+    else if(section==='warroom')this.loadWarRooms();
+    else if(section==='incidents')this.loadIncidents();
+  },
+
+  refreshCurrent(){
+    this._sectionLoaded[this.currentSection]=0;
+    this.navigate(this.currentSection,false);
+  },
+
+  newIncident(){
+    // Navigate to incidents section (bust cache) and reset the form
+    this._sectionLoaded['incidents']=0;
+    this.navigate('incidents');
+    // Reset form fields
+    setTimeout(()=>{
+      const idEl=document.getElementById('inc-id');
+      const descEl=document.getElementById('inc-desc');
+      const resultEl=document.getElementById('inc-result');
+      if(idEl) idEl.value='';
+      if(descEl) descEl.value='';
+      if(resultEl) resultEl.innerHTML='';
+    },50);
+  },
+
+  // ── INIT ──────────────────────────────────────────────────────────
+  async init(){
+    // Back/forward button support
+    window.addEventListener('popstate',e=>{
+      const s=(e.state&&e.state.section)||window.location.hash.replace('#','');
+      if(s)this.navigate(s,false);
+    });
+    if(!this.token){this.showLogin();return;}
+    this.showApp();
+    const initialSection=window.location.hash.replace('#','')||'dashboard';
+    this.navigate(initialSection,true);
+    this.startAutoRefresh();
+  },
+
+  showLogin(){
+    document.getElementById('login-screen').style.display='flex';
+    document.getElementById('app').style.display='none';
+    setTimeout(()=>document.getElementById('login-pass').focus(),100);
+  },
+  showApp(){
+    document.getElementById('login-screen').style.display='none';
+    document.getElementById('app').style.display='flex';
+    document.getElementById('sidebar-username').textContent=this.username;
+    document.getElementById('sidebar-role').textContent=this.role;
+    document.getElementById('user-avatar-initial').textContent=(this.username||'A')[0].toUpperCase();
+    // Restore global LLM selector from localStorage
+    const llmSel=document.getElementById('global-llm-select');
+    if(llmSel) llmSel.value=this.globalLLM;
+    // Hide admin-only nav items for non-admins
+    if(this.role==='viewer'){
+      document.querySelectorAll('[data-role-min="developer"]').forEach(el=>el.style.display='none');
     }
-    var ep = document.getElementById('view-endpoints');
-    if (ep) ep.style.display = view === 'endpoints' ? '' : 'none';
-    var sp = document.getElementById('view-secrets');
-    if (sp) { if (view === 'secrets') { sp.classList.add('active'); } else { sp.classList.remove('active'); } }
-    var up = document.getElementById('view-users');
-    if (up) { up.style.display = view === 'users' ? 'block' : 'none'; if (view === 'users') loadUsers(); }
-    if (view === 'endpoints') filterSection(section || 'all');
-  } catch(e) { console.error('showView error:', e); }
-}
+  },
 
-function filterSection(name) {
-  document.querySelectorAll('[data-section]').forEach(function(g) {
-    g.style.display = (name === 'all' || g.dataset.section === name) ? '' : 'none';
-  });
-}
+  togglePw(){
+    const inp=document.getElementById('login-pass');
+    const icon=document.getElementById('pw-toggle');
+    if(inp.type==='password'){inp.type='text';icon.style.opacity='1';icon.title='Hide password';}
+    else{inp.type='password';icon.style.opacity='.5';icon.title='Show password';}
+  },
 
-function filterEps(q) {
-  q = q.toLowerCase().trim();
-  document.querySelectorAll('[data-ep]').forEach(function(ep) {
-    ep.classList.toggle('hidden', q !== '' && !ep.textContent.toLowerCase().includes(q));
-  });
-  document.querySelectorAll('[data-section]').forEach(function(grp) {
-    var vis = Array.from(grp.querySelectorAll('[data-ep]')).some(function(e){ return !e.classList.contains('hidden'); });
-    grp.style.display = (!q || vis) ? '' : 'none';
-  });
-}
+  async login(){
+    const btn=document.getElementById('login-btn');
+    const err=document.getElementById('login-error');
+    const u=document.getElementById('login-user').value.trim();
+    const p=document.getElementById('login-pass').value;
+    if(!u||!p){err.textContent='Username and password are required.';err.style.display='block';return;}
+    btn.disabled=true;document.getElementById('login-btn-text').textContent='Signing in...';err.style.display='none';document.getElementById('login-user').classList.remove('error-field');document.getElementById('login-pass').classList.remove('error-field');
+    try{
+      const r=await fetch('/auth/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'username='+encodeURIComponent(u)+'&password='+encodeURIComponent(p)});
+      const d=await r.json();
+      if(!r.ok){err.textContent=d.detail||'Invalid credentials. Please try again.';err.style.display='block';document.getElementById('login-pass').classList.add('error-field');document.getElementById('login-pass').focus();return;}
+      this.token=d.access_token;this.username=d.username||u;this.role=d.role||'viewer';
+      localStorage.setItem('nexusops_token',this.token);
+      localStorage.setItem('nexusops_user',this.username);
+      localStorage.setItem('nexusops_role',this.role);
+      this.showApp();this.navigate('dashboard');this.startAutoRefresh();
+    }catch(e){err.textContent='Connection failed — is the server running?';err.style.display='block';}
+    finally{btn.disabled=false;document.getElementById('login-btn-text').textContent='Sign In';}
+  },
 
-/* ── API EXPLORER ── */
-var _apiWs = null;
-var _apiLastResp = '';
-var _apiCurrentMethod = 'GET';
-var _apiCurrentPath = '';
+  logout(){
+    localStorage.removeItem('nexusops_token');localStorage.removeItem('nexusops_user');localStorage.removeItem('nexusops_role');
+    this.token=null;this._sectionLoaded={};clearInterval(this.refreshTimer);
+    history.replaceState(null,'',window.location.pathname);
+    this.showLogin();
+  },
 
-var _EP_DEFAULTS = {
-  '/incidents/run':       '{\\n  "incident_id": "INC-001",\\n  "description": "Payment service pods crash-looping",\\n  "severity": "high",\\n  "auto_remediate": false\\n}',
-  '/incidents/run/async': '{\\n  "incident_id": "INC-001",\\n  "description": "Payment service pods crash-looping",\\n  "severity": "high"\\n}',
-  '/warroom/create':      '{\\n  "incident_id": "INC-001",\\n  "description": "Database connection failures",\\n  "severity": "critical",\\n  "post_to_slack": false\\n}',
-  '/chat':                '{\\n  "message": "What is the current status of my infrastructure?",\\n  "history": [],\\n  "provider": ""\\n}',
-  '/k8s/restart':         '{\\n  "namespace": "default",\\n  "deployment": "my-deployment"\\n}',
-  '/k8s/scale':           '{\\n  "namespace": "default",\\n  "deployment": "my-deployment",\\n  "replicas": 3\\n}',
-  '/k8s/diagnose':        '{\\n  "resource_type": "k8s",\\n  "resource_id": "default"\\n}',
-  '/aws/diagnose':        '{\\n  "resource_type": "ec2",\\n  "resource_id": "i-0123456789abcdef0"\\n}',
-  '/github/issue':        '?title=Bug+found&body=Description+here',
-  '/jira/incident':       '?summary=Service+Down&description=Payment+service+unavailable',
-  '/security/roles/assign': '{\\n  "user": "alice",\\n  "role": "developer"\\n}',
-  '/webhooks/github':     '{\\n  "action": "push",\\n  "ref": "refs/heads/main",\\n  "commits": [{"message": "fix: payment timeout"}],\\n  "repository": {},\\n  "pull_request": {}\\n}',
-  '/ws':                  '{"id":"evt-1","type":"pod_crash","source":"k8s","payload":{"pod":"payment-api-xyz","namespace":"production"}}',
-};
+  startAutoRefresh(){
+    clearInterval(this.refreshTimer);
+    this.refreshTimer=setInterval(()=>{
+      this.loadBadges();
+      // Only silently refresh dashboard stats if user is on dashboard
+      if(this.currentSection==='dashboard'){
+        this._sectionLoaded['dashboard']=0;
+        this.loadDashboard();
+      }
+    },60000); // 60s — not 30s to reduce server load
+  },
 
-var _EP_META = {
-  '/health':          { desc:'Basic liveness check — returns status and incident memory count.', auth:'none', params:[] },
-  '/health/full':     { desc:'Full integration health with per-service latency probing.', auth:'none', params:[] },
-  '/health/live':     { desc:'Kubernetes liveness probe — always returns 200 if process is alive.', auth:'none', params:[] },
-  '/health/ready':    { desc:'Kubernetes readiness probe — verifies ChromaDB, modules, and LLM key.', auth:'none', params:[] },
-  '/metrics':         { desc:'Prometheus text-format metrics — hook this into your scrape config.', auth:'none', params:[] },
-  '/chat':            { desc:'Conversational AI with live infrastructure context (AWS, K8s, GitHub).', auth:'viewer', params:[
-    {name:'message',type:'string',required:true,placeholder:'What is the current status of api-gateway?'},
-    {name:'history',type:'array',required:false,default:'[]'},
-    {name:'provider',type:'select',options:['','anthropic','groq','ollama'],required:false}
-  ]},
-  '/warroom/create':  { desc:'Create an AI war room: runs multi-source analysis and posts to Slack.', auth:'developer', params:[
-    {name:'incident_id',type:'string',required:true,placeholder:'INC-2024-001'},
-    {name:'severity',type:'select',options:['critical','high','medium','low'],required:true},
-    {name:'description',type:'string',required:true,placeholder:'Payment service pods crash-looping in prod'},
-    {name:'post_to_slack',type:'boolean',default:false}
-  ]},
-  '/incidents/run':   { desc:'Run the full 7-stage autonomous incident response pipeline.', auth:'developer', params:[
-    {name:'incident_id',type:'string',required:true,placeholder:'INC-2024-001'},
-    {name:'description',type:'string',required:true,placeholder:'Describe the incident'},
-    {name:'severity',type:'select',options:['critical','high','medium','low'],required:true},
-    {name:'auto_remediate',type:'boolean',default:false}
-  ]},
-  '/k8s/pods':        { desc:'List all pods across namespaces with phase and readiness status.', auth:'viewer', params:[] },
-  '/k8s/deployments': { desc:'Deployment readiness — replica counts and rollout status.', auth:'viewer', params:[] },
-  '/k8s/logs':        { desc:'Fetch recent log lines from a pod container.', auth:'viewer', params:[
-    {name:'pod',type:'string',required:true,placeholder:'api-gateway-7d9f-xxx'},
-    {name:'namespace',type:'string',required:false,default:'default'},
-    {name:'lines',type:'number',required:false,default:100}
-  ]},
-  '/aws/cloudwatch/alarms': { desc:'CloudWatch alarms currently in ALARM state.', auth:'viewer', params:[] },
-  '/aws/logs/recent': { desc:'Recent CloudWatch log events from a log group.', auth:'viewer', params:[
-    {name:'group',type:'string',required:false,placeholder:'/aws/lambda/my-function'},
-    {name:'hours',type:'number',required:false,default:1}
-  ]},
-  '/grafana/alerts':  { desc:'Active Grafana alert rules that are firing.', auth:'viewer', params:[] },
-  '/github/prs':      { desc:'Open pull requests across the configured repository.', auth:'viewer', params:[] },
-  '/kb/query':        { desc:'Query the RAG knowledge base for runbook and incident history.', auth:'viewer', params:[
-    {name:'query',type:'string',required:true,placeholder:'How to handle OOMKilled pods?'},
-    {name:'top_k',type:'number',required:false,default:3}
-  ]},
-  '/correlate':       { desc:'AI correlation of multiple events to find causal patterns.', auth:'viewer', params:[
-    {name:'events',type:'array',required:true,placeholder:'["CPU spike at 14:00","deployment at 13:55"]'}
-  ]},
-  '/secrets':         { desc:'Save integration credentials to the server .env file.', auth:'admin', params:[] },
-  '/users':           { desc:'List all platform users and their roles.', auth:'admin', params:[] },
-};
+  async loadBadges(){
+    try{
+      const r=await this.api('GET','/approvals/pending');
+      if(r&&r.ok){const d=await r.json();const c=(d.approvals||[]).length;const b=document.getElementById('badge-approvals');if(c>0){b.textContent=c;b.style.display='';}else b.style.display='none';}
+    }catch(e){}
+  },
 
-function _getFieldId(name) { return 'ep-field-' + name.replace(/[^a-z0-9]/gi,'-'); }
+  // ── DASHBOARD ────────────────────────────────────────────────────
+  async loadDashboard(){
+    this.loadBadges();
+    // Run all dashboard API calls in parallel for speed
+    const [healthR, approvalsR, alarmsR, k8sR, auditR] = await Promise.allSettled([
+      this.api('GET','/health/full'),
+      this.api('GET','/approvals/pending'),
+      this.api('GET','/aws/cloudwatch/alarms'),
+      this.api('GET','/check/k8s'),
+      this.api('GET','/audit/log?limit=8')
+    ]);
 
-function _buildFormFields(params) {
-  if (!params || !params.length) return '<div style="font-size:12px;color:var(--muted);padding:4px 0">No parameters required for this endpoint.</div>';
-  return params.map(function(p) {
-    var fid = _getFieldId(p.name);
-    var typeTag = '<span class="ep-field-type">' + p.type + '</span>';
-    var reqTag  = p.required ? '<span class="req">*</span>' : '';
-    var label   = '<div class="ep-field-label">' + p.name + reqTag + typeTag + '</div>';
-    var input   = '';
-    if (p.type === 'select') {
-      input = '<select class="ep-select" id="' + fid + '">' +
-        p.options.map(function(o){ return '<option value="' + o + '">' + (o || '(default)') + '</option>'; }).join('') +
-        '</select>';
-    } else if (p.type === 'boolean') {
-      var checked = p.default ? 'on' : '';
-      input = '<div class="ep-toggle-wrap">' +
-        '<button type="button" class="ep-toggle ' + checked + '" id="' + fid + '" onclick="this.classList.toggle(&apos;on&apos;)" data-val="' + (p.default||false) + '"></button>' +
-        '<span class="ep-toggle-label" id="' + fid + '-lbl">' + (p.default ? 'true' : 'false') + '</span></div>';
-    } else if (p.type === 'array') {
-      input = '<textarea class="ep-textarea" id="' + fid + '" placeholder="' + (p.placeholder||'[]') + '" rows="3">' + (p.default||'') + '</textarea>';
-    } else {
-      var defVal = (p.default !== undefined && p.default !== false) ? String(p.default) : '';
-      input = '<input class="ep-input" id="' + fid + '" type="' + (p.type==='number'?'number':'text') + '" placeholder="' + (p.placeholder||defVal||'') + '" value="' + defVal + '"/>';
+    // Health / Integrations
+    if(healthR.status==='fulfilled'&&healthR.value?.ok){
+      const d=await healthR.value.json();
+      document.getElementById('ds-incidents').textContent=d.health?.issue_count??d.incident_count??'0';
+      const el=document.getElementById('dash-health');
+      const sources=(d.health?.sources||[]);
+      const issues=(d.health?.issues||[]);
+      const statusCls=d.status==='ok'?'badge-green':d.status==='degraded'?'badge-amber':'badge-red';
+      let html=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span class="badge ${statusCls}" style="font-size:.8em">${(d.status||'unknown').toUpperCase()}</span>${issues.length?`<span style="font-size:.78em;color:var(--red)">${issues.length} issue${issues.length>1?'s':''}</span>`:''}</div>`;
+      if(issues.length){html+=issues.map(i=>`<div style="padding:7px 10px;background:rgba(248,113,113,.07);border-left:2px solid var(--red);border-radius:0 6px 6px 0;font-size:.8em;margin-bottom:6px;color:var(--text2)">${i}</div>`).join('');}
+      if(sources.length){html+=`<div style="font-size:.72em;color:var(--muted);margin-top:8px">Sources: ${sources.join(', ')}</div>`;}
+      el.innerHTML=html||'<div class="empty-state"><p>Health data unavailable</p></div>';
+      // Update topbar status
+      const ts=document.getElementById('topbar-status');
+      if(d.status==='ok'){ts.className='topbar-status';ts.innerHTML='<span class="status-dot dot-green dot-pulse"></span> All Systems Operational';}
+      else if(d.status==='degraded'){ts.className='topbar-status degraded';ts.innerHTML='<span class="status-dot dot-amber"></span> Degraded';}
+      else{ts.className='topbar-status error';ts.innerHTML='<span class="status-dot dot-red"></span> Issues Detected';}
     }
-    return '<div class="ep-field">' + label + input + '</div>';
-  }).join('');
-}
 
-function _collectParams(params) {
-  var obj = {};
-  (params||[]).forEach(function(p) {
-    var fid = _getFieldId(p.name);
-    var el  = document.getElementById(fid);
-    if (!el) return;
-    var val;
-    if (p.type === 'boolean') {
-      val = el.classList.contains('on');
-    } else if (p.type === 'number') {
-      val = el.value.trim() !== '' ? Number(el.value) : (p.default !== undefined ? p.default : null);
-    } else if (p.type === 'array') {
-      try { val = JSON.parse(el.value.trim() || '[]'); } catch(_){ val = el.value.trim(); }
-    } else {
-      val = el.value.trim();
+    // Approvals
+    if(approvalsR.status==='fulfilled'&&approvalsR.value?.ok){
+      const d=await approvalsR.value.json();
+      const cnt=(d.approvals||[]).length;
+      document.getElementById('ds-approvals').textContent=cnt;
+      if(cnt>0){document.getElementById('ds-approvals-sub').innerHTML=`<span style="color:var(--amber)">&#9888; Needs review</span>`;}
+      else{document.getElementById('ds-approvals-sub').innerHTML=`<span style="color:var(--muted)">None pending</span>`;}
     }
-    if (val !== '' && val !== null) obj[p.name] = val;
-  });
-  return obj;
-}
 
-function epClick(row) {
-  var pathEl = row.querySelector('.ep-path');
-  if (!pathEl) return;
-  var method  = row.dataset.method || 'GET';
-  var pathStr = pathEl.textContent.trim();
-  openApiModal(method, pathStr);
-}
-
-function openApiModal(method, pathStr) {
-  _apiCurrentMethod = method;
-  _apiCurrentPath   = pathStr;
-  _apiLastResp      = '';
-
-  // Header
-  var badge = document.getElementById('ep-method-badge');
-  badge.textContent = method;
-  badge.className   = 'ep-drawer-method ' + method;
-  document.getElementById('ep-path-label').textContent = pathStr;
-
-  // Reset footer state
-  var execBtn = document.getElementById('ep-exec-btn');
-  execBtn.disabled  = false;
-  execBtn.textContent = '\\u25B6 Execute';
-  document.getElementById('ep-copy-resp-btn').style.display = 'none';
-  document.getElementById('api-status-wrap').innerHTML = '';
-
-  var meta   = _EP_META[pathStr] || {};
-  var desc   = meta.desc || '';
-  var auth   = meta.auth || 'viewer';
-  var params = meta.params || [];
-
-  var authClass = 'ep-auth-' + auth;
-  var authLabel = auth === 'none' ? '&#x1F513; Public' : '&#x1F512; ' + auth;
-
-  // Build drawer body
-  var html = '';
-
-  // Overview section
-  html += '<div class="ep-section">';
-  html += '<div class="ep-section-title">Overview</div>';
-  if (desc) html += '<div class="ep-desc-text">' + desc + '</div>';
-  html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
-  html += '<span class="badge ' + method + '" style="font-size:10px">' + method + '</span>';
-  html += '<span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--text2)">' + pathStr + '</span>';
-  html += '<span class="ep-auth-badge ' + authClass + '">' + authLabel + '</span>';
-  html += '</div>';
-  html += '</div>';
-
-  // Request section
-  if (method === 'WS') {
-    html += '<div class="ep-section" style="flex:1">';
-    html += '<div class="ep-section-title">WebSocket Terminal</div>';
-    html += '<div class="ws-terminal" id="ws-term"></div>';
-    html += '<div class="ws-input-row"><input class="ws-input" id="ws-msg" placeholder="JSON message to send..."/><button class="ws-send-btn" onclick="wsSend()">Send</button></div>';
-    html += '</div>';
-    execBtn.textContent = '\\u26A1 Connect';
-    execBtn.onclick = function(){ wsConnect(pathStr); };
-  } else {
-    html += '<div class="ep-section">';
-    html += '<div class="ep-section-title">Request</div>';
-    if (params.length > 0) {
-      html += _buildFormFields(params);
+    // AWS Alarms
+    if(alarmsR.status==='fulfilled'&&alarmsR.value?.ok){
+      const d=await alarmsR.value.json();
+      const alarms=(d.cloudwatch_alarms?.alarms||d.alarms||d.data||[]);
+      const firing=alarms.filter(a=>(a.state_value||a.StateValue||'')==='ALARM').length;
+      document.getElementById('ds-alerts').textContent=firing;
+      document.getElementById('ds-alerts-sub').innerHTML=firing>0?`<span style="color:var(--red)">&#128308; ${firing} firing</span>`:`<span style="color:var(--muted)">All clear</span>`;
     } else {
-      // Fallback: show path-override input for GET with path params, or raw textarea for POST
-      var hasPathParam = pathStr.includes('{');
-      if (hasPathParam) {
-        html += '<div class="ep-field"><div class="ep-field-label">Path</div>';
-        html += '<input class="ep-input" id="api-path-override" value="' + pathStr + '"/></div>';
-      } else if (method !== 'GET') {
-        var defaultBody = _EP_DEFAULTS[pathStr] || '{}';
-        if (defaultBody.startsWith('?')) {
-          html += '<div class="ep-field"><div class="ep-field-label">Path + Query</div>';
-          html += '<input class="ep-input" id="api-path-override" value="' + pathStr + defaultBody + '"/></div>';
-        } else {
-          html += '<div class="ep-field"><div class="ep-field-label">Request Body (JSON)</div>';
-          html += '<textarea class="ep-textarea" id="api-req-body" style="min-height:110px">' + defaultBody + '</textarea></div>';
-        }
+      document.getElementById('ds-alerts').textContent='—';
+      document.getElementById('ds-alerts-sub').innerHTML=`<span style="color:var(--muted)">Not connected</span>`;
+    }
+
+    // K8s — render as badge, never raw "error" text
+    if(k8sR.status==='fulfilled'&&k8sR.value?.ok){
+      const d=await k8sR.value.json();
+      const st=(d.k8s_check?.status||d.status||'unknown').toLowerCase();
+      const det=d.k8s_check?.details||d.message||'';
+      const k8sEl=document.getElementById('ds-k8s');
+      if(st==='healthy'||st==='ok'){
+        k8sEl.innerHTML=`<span class="badge badge-green" style="font-size:1em;padding:4px 12px">Healthy</span>`;
+      }else if(st==='error'||st==='not configured'||det.includes('not found')||det.includes('KUBECONFIG')){
+        k8sEl.innerHTML=`<span class="badge badge-gray" style="font-size:1em;padding:4px 12px">Not configured</span>`;
+        document.getElementById('ds-k8s-sub').innerHTML=`<span style="color:var(--muted)">Set KUBECONFIG to connect</span>`;
+      }else{
+        k8sEl.innerHTML=`<span class="badge badge-amber" style="font-size:1em;padding:4px 12px">${st}</span>`;
+      }
+    } else {
+      document.getElementById('ds-k8s').innerHTML=`<span class="badge badge-gray" style="font-size:1em;padding:4px 12px">Unavailable</span>`;
+    }
+
+    // Audit log / Recent Activity
+    if(auditR.status==='fulfilled'&&auditR.value?.ok){
+      const d=await auditR.value.json();const logs=d.entries||d.logs||[];
+      const el=document.getElementById('dash-activity');
+      if(!logs.length){
+        el.innerHTML='<div class="empty-state"><div class="empty-icon">&#128336;</div><p>No recent activity</p></div>';
       } else {
-        html += '<div style="font-size:12px;color:var(--muted)">No parameters required — click Execute to call this endpoint.</div>';
+        el.innerHTML=`<div style="display:flex;flex-direction:column">`+logs.map(l=>{
+          const t=(l.timestamp||l.ts||'').substring(11,19)||'--:--';
+          const action=l.action||l.event||'event';
+          const user=l.user||'system';
+          return`<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:.82em">
+            <span style="color:var(--muted);font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;flex-shrink:0;width:52px">${t}</span>
+            <span style="flex:1;font-weight:500">${action}</span>
+            <span style="color:var(--text2);font-size:.9em">${user}</span>
+          </div>`;
+        }).join('')+'</div>';
       }
-    }
-    html += '</div>';
-    // Response section (hidden until executed)
-    html += '<div class="ep-section ep-resp-wrap" id="ep-resp-wrap">';
-    html += '<div class="ep-section-title">Response</div>';
-    html += '<div class="ep-status-row" id="ep-status-row"></div>';
-    html += '<pre class="ep-resp-pre" id="ep-resp-pre" style="margin-top:8px"></pre>';
-    html += '</div>';
-    execBtn.onclick = sendApiRequest;
-  }
-
-  document.getElementById('ep-drawer-body').innerHTML = html;
-
-  // Wire up boolean toggle labels
-  (params||[]).forEach(function(p) {
-    if (p.type !== 'boolean') return;
-    var btn = document.getElementById(_getFieldId(p.name));
-    if (!btn) return;
-    var lbl = document.getElementById(_getFieldId(p.name) + '-lbl');
-    btn.addEventListener('click', function(){ if(lbl) lbl.textContent = btn.classList.contains('on') ? 'true' : 'false'; });
-  });
-
-  // Open drawer + backdrop
-  document.getElementById('ep-backdrop').classList.add('open');
-  document.getElementById('ep-drawer').classList.add('open');
-}
-
-function closeApiModal() {
-  document.getElementById('ep-backdrop').classList.remove('open');
-  document.getElementById('ep-drawer').classList.remove('open');
-  if (_apiWs) { try { _apiWs.close(); } catch(e){} _apiWs = null; }
-}
-
-function sendApiRequest() {
-  var method  = _apiCurrentMethod;
-  var path    = _apiCurrentPath;
-
-  // Path override
-  var pathOverride = document.getElementById('api-path-override');
-  if (pathOverride) path = pathOverride.value.trim();
-
-  var execBtn = document.getElementById('ep-exec-btn');
-  execBtn.disabled = true;
-  execBtn.textContent = '\\u23F3 Running...';
-
-  var opts = { method: method, headers: Object.assign({}, authHeaders()) };
-  delete opts.headers['Content-Type']; // set below only if needed
-
-  var meta   = _EP_META[path] || _EP_META[_apiCurrentPath] || {};
-  var params = meta.params || [];
-
-  if (method !== 'GET' && method !== 'DELETE') {
-    var bodyObj = null;
-    var rawBody = document.getElementById('api-req-body');
-    if (rawBody) {
-      try { bodyObj = JSON.parse(rawBody.value); }
-      catch(e) { _showDrawerResp('Invalid JSON: ' + e.message, 'err', null, 0); execBtn.disabled=false; execBtn.textContent='\\u25B6 Execute'; return; }
-    } else if (params.length > 0) {
-      bodyObj = _collectParams(params);
     } else {
-      bodyObj = {};
+      document.getElementById('dash-activity').innerHTML='<div class="empty-state"><div class="empty-icon">&#128336;</div><p>No recent activity</p></div>';
     }
-    opts.body = JSON.stringify(bodyObj);
-    opts.headers['Content-Type'] = 'application/json';
-  }
+  },
 
-  var t0 = Date.now();
-  fetch(path, opts)
-    .then(function(r) {
-      var status = r.status;
-      var ms     = Date.now() - t0;
-      return r.text().then(function(t){ return {status: status, body: t, ms: ms}; });
-    })
-    .then(function(res) {
-      var pretty = res.body;
-      try { pretty = JSON.stringify(JSON.parse(res.body), null, 2); } catch(e){}
-      _apiLastResp = pretty;
-      var cls = res.status >= 200 && res.status < 300 ? 'ok' : 'err';
-      _showDrawerResp(pretty, cls, res.status, res.ms);
-    })
-    .catch(function(e) { _showDrawerResp('Network error: ' + e, 'err', null, 0); })
-    .finally(function() { execBtn.disabled=false; execBtn.textContent='\\u25B6 Execute'; });
-}
+  // ── MONITORING ───────────────────────────────────────────────────
+  async loadMonitoring(){
+    const el=document.getElementById('monitoring-alerts');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div> Loading alerts...</div>';
+    const alerts=[];const unavailable=[];
+    try{const r=await this.api('GET','/grafana/alerts');if(r&&r.ok){const d=await r.json();if(d.success===false){unavailable.push('Grafana: '+(d.error||'unavailable'));}else{(d.alerts||d.data||[]).forEach(a=>alerts.push({source:'grafana',name:a.name||a.labels?.alertname||'Alert',state:a.state||a.status||'firing',msg:a.message||a.annotations?.summary||''}));}}else{unavailable.push('Grafana: not reachable');}}catch(e){unavailable.push('Grafana: '+e.message);}
+    try{const r=await this.api('GET','/aws/cloudwatch/alarms');if(r&&r.ok){const d=await r.json();if(d.cloudwatch_alarms?.success===false){unavailable.push('CloudWatch: '+(d.cloudwatch_alarms.error||'unavailable'));}else{(d.cloudwatch_alarms?.alarms||d.alarms||d.data||[]).forEach(a=>alerts.push({source:'cloudwatch',name:a.alarm_name||a.AlarmName||'Alarm',state:a.state_value||a.StateValue||'OK',msg:a.alarm_description||a.AlarmDescription||''}));}}else{unavailable.push('CloudWatch: not reachable');}}catch(e){unavailable.push('CloudWatch: '+e.message);}
+    try{const r=await this.api('GET','/check/k8s');if(r&&r.ok){const d=await r.json();const st=d.k8s_check?.status||d.status;const det=d.k8s_check?.details||d.message||'';if(st==='error'){unavailable.push('Kubernetes: '+(det||'not configured'));}else if(st&&st!=='healthy'){alerts.push({source:'k8s',name:'K8s Cluster',state:st,msg:det});}}else{unavailable.push('Kubernetes: not reachable');}}catch(e){unavailable.push('Kubernetes: '+e.message);}
+    let html='';
+    if(unavailable.length){html+='<div style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);font-size:.8em;color:var(--amber)"><b>&#9888; Some monitoring sources unavailable:</b><ul style="margin:4px 0 0 16px;padding:0">'+unavailable.map(u=>`<li>${u}</li>`).join('')+'</ul></div>';}
+    if(!alerts.length){html+='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No active alerts from available sources</p></div>';}
+    else{html+='<div style="display:flex;flex-direction:column;gap:8px">'+alerts.map(a=>{const srcCls={'grafana':'src-grafana','cloudwatch':'src-cloudwatch','k8s':'src-k8s','opsgenie':'src-opsgenie'}[a.source]||'src-opsgenie';const stateCls=a.state.toLowerCase().includes('alarm')||a.state.toLowerCase().includes('firing')?'badge-red':a.state.toLowerCase().includes('ok')?'badge-green':'badge-amber';return`<div class="alert-item"><span class="alert-source ${srcCls}">${a.source}</span><div style="flex:1"><div style="font-size:.88em;font-weight:500">${a.name}</div><div class="text-muted">${a.msg}</div></div><span class="badge ${stateCls}">${a.state}</span></div>`;}).join('')+'</div>';}
+    el.innerHTML=html;
+  },
 
-function _showDrawerResp(text, cls, status, ms) {
-  var wrap   = document.getElementById('ep-resp-wrap');
-  var pre    = document.getElementById('ep-resp-pre');
-  var srow   = document.getElementById('ep-status-row');
-  var sw     = document.getElementById('api-status-wrap');
-  var copyBtn = document.getElementById('ep-copy-resp-btn');
-  if (!wrap || !pre) return;
-  wrap.classList.add('visible');
-  pre.textContent = text;
-  pre.className   = 'ep-resp-pre ' + cls;
-  if (srow && status !== null) {
-    var sc = status >= 200 && status < 300 ? '2xx' : status >= 300 && status < 400 ? '3xx' : status >= 500 ? '5xx' : '4xx';
-    srow.innerHTML = '<span class="ep-status-badge ep-status-' + sc + '">' + status + '</span>' +
-      (ms > 0 ? '<span class="ep-timing">' + ms + ' ms</span>' : '');
-    if (sw) sw.innerHTML = '<span class="ep-status-badge ep-status-' + sc + '">' + status + '</span>';
-  }
-  if (copyBtn) copyBtn.style.display = '';
-  // Scroll response into view
-  wrap.scrollIntoView({behavior:'smooth', block:'nearest'});
-}
+  // ── INCIDENTS ────────────────────────────────────────────────────
+  toggleDryRun(){
+    this.dryRun=!this.dryRun;
+    const t=document.getElementById('dry-run-toggle');
+    t.classList.toggle('on',this.dryRun);
+    if(this.dryRun)this.toast('Dry Run ON — pipeline will preview actions only','info');
+  },
 
-function copyAsCurl() {
-  var method  = _apiCurrentMethod;
-  var path    = _apiCurrentPath;
-  var pathOv  = document.getElementById('api-path-override');
-  if (pathOv) path = pathOv.value.trim();
-  var base    = location.origin + path;
-  var headers = authHeaders();
-  var hParts  = Object.keys(headers).filter(function(k){ return k !== 'Content-Type'; }).map(function(k){
-    return "-H '" + k + ': ' + headers[k] + "'";
-  });
-
-  var meta   = _EP_META[path] || _EP_META[_apiCurrentPath] || {};
-  var params = meta.params || [];
-  var body   = '';
-  if (method !== 'GET' && method !== 'DELETE') {
-    var rawBody = document.getElementById('api-req-body');
-    if (rawBody) {
-      body = rawBody.value.trim();
-    } else if (params.length > 0) {
-      body = JSON.stringify(_collectParams(params));
+  toggleAutoRemediate(){
+    if(!this.autoRemediate){
+      if(!confirm('Enable Auto-Remediate?\\n\\nThis will allow the pipeline to automatically execute infrastructure actions (restarts, scaling) without waiting for approval.\\n\\nOnly enable this if you trust the AI to act autonomously on your infrastructure.')){return;}
     }
-  }
+    this.autoRemediate=!this.autoRemediate;
+    const t=document.getElementById('auto-rem-toggle');
+    t.classList.toggle('on',this.autoRemediate);
+  },
 
-  var cmd = "curl -X " + method + " '" + base + "'";
-  hParts.forEach(function(h){ cmd += ' ' + h; });
-  if (body) {
-    cmd += " -H 'Content-Type: application/json'";
-    cmd += " -d " + JSON.stringify(body);
-  }
-  navigator.clipboard.writeText(cmd);
-  toast('cURL command copied', 'ok', 1800);
-}
+  async runIncident(dryRun=false){
+    const isDry=dryRun||this.dryRun;
+    const btn=document.getElementById(isDry?'dry-run-btn':'run-inc-btn');
+    const desc=document.getElementById('inc-desc').value.trim();
+    if(!desc){this.toast('Description is required','error');return;}
+    const id=document.getElementById('inc-id').value.trim()||'INC-'+Date.now();
+    const sev=document.getElementById('inc-sev').value;
+    const hours=parseInt(document.getElementById('inc-hours').value)||2;
+    const origHtml=btn.innerHTML;
+    btn.disabled=true;btn.innerHTML='<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> '+(isDry?'Previewing...':'Running pipeline...');
+    const el=document.getElementById('inc-result');
+    el.innerHTML='<div class="result-card"><div class="loading-state"><div class="spinner"></div> '+(isDry?'Generating dry-run preview...':'Analyzing incident — collecting AWS, K8s and GitHub context...')+'</div></div>';
+    try{
+      const r=await this.api('POST','/incidents/run',{incident_id:id,description:desc,severity:sev,auto_remediate:this.autoRemediate,dry_run:isDry,hours,llm_provider:this.globalLLM,metadata:{user:this.username,role:this.role}});
+      if(!r){el.innerHTML='<div class="result-card"><div style="color:var(--red)">&#10005; Request failed</div></div>';return;}
+      const d=await r.json();
+      if(!r.ok){el.innerHTML='<div class="result-card"><div style="color:var(--red)">&#10005; '+(d.detail||'Pipeline error')+'</div></div>';return;}
+      this.renderIncidentResult(el,d,id,isDry);
+      this.toast((isDry?'Dry-run preview for ':'Pipeline completed — ')+id,'success');
+    }catch(e){el.innerHTML='<div class="result-card"><div style="color:var(--red)">&#10005; '+e.message+'</div></div>';}
+    finally{btn.disabled=false;btn.innerHTML=origHtml;}
+  },
 
-function copyApiResp() {
-  if (_apiLastResp) {
-    navigator.clipboard.writeText(_apiLastResp);
-    toast('Response copied', 'ok', 1600);
-  }
-}
+  renderIncidentResult(el,d,id,isDry=false){
+    const plan=d.plan||{};
+    const risk=(plan.risk||d.risk_level||'unknown').toLowerCase();
+    const riskCls=risk==='critical'?'badge-red':risk==='high'?'badge-red':risk==='medium'?'badge-amber':'badge-green';
+    const conf=Math.round((plan.confidence||0)*100);
+    const confCls=conf>=70?'high':conf>=40?'med':'low';
+    const rootCause=plan.root_cause||plan.summary||d.summary||'Analysis complete.';
+    const reasoning=plan.reasoning||'';
+    const dataGaps=plan.data_gaps||[];
+    const executedActions=d.executed_actions||[];
+    const blockedActions=d.blocked_actions||[];
+    const status=d.status||'completed';
+    const statusCls=status==='completed'?'badge-green':status==='awaiting_approval'?'badge-amber':status==='failed'?'badge-red':'badge-cyan';
+    const planActions=plan.actions||[];
 
-/* ── WS TERMINAL ── */
-function wsLog(msg, cls) {
-  var term = document.getElementById('ws-term');
-  if (!term) return;
-  var p = document.createElement('p');
-  p.className = 'ws-line ' + (cls||'sys');
-  p.textContent = msg;
-  term.appendChild(p);
-  term.scrollTop = term.scrollHeight;
-}
+    // Merge plan actions with execution results
+    const executedTypes=new Set(executedActions.map(a=>a.type));
+    const blockedMap={};
+    blockedActions.forEach(a=>{blockedMap[a.type]=(a.reason||'requires approval');});
 
-function wsConnect(pathStr) {
-  if (_apiWs) { _apiWs.close(); _apiWs = null; }
-  var btn = document.getElementById('api-send-btn');
-  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  var url = proto + '//' + location.host + pathStr;
-  wsLog('Connecting to ' + url + '...', 'sys');
-  try {
-    _apiWs = new WebSocket(url);
-    _apiWs.onopen = function() {
-      wsLog('\\u2705 Connected', 'sys');
-      btn.textContent = '\\u274C Disconnect';
-      btn.onclick = function(){ _apiWs.close(); };
+    // Data source availability
+    const awsCtx=d.aws_context||{};const k8sCtx=d.k8s_context||{};const ghCtx=d.github_context||{};
+    const awsOk=awsCtx._data_available===true;
+    const k8sOk=k8sCtx._data_available===true;
+    const ghOk=ghCtx._data_available===true;
+
+    // Action type icons + colors
+    const actionMeta={
+      investigate:  {icon:'&#128269;',label:'Investigate',  color:'#60a5fa'},
+      k8s_restart:  {icon:'&#8635;',  label:'K8s Restart',  color:'#22d3ee'},
+      k8s_scale:    {icon:'&#9650;',  label:'K8s Scale',    color:'#34d399'},
+      aws_restart:  {icon:'&#8635;',  label:'AWS Restart',  color:'#fb923c'},
+      aws_scale:    {icon:'&#9650;',  label:'AWS Scale',    color:'#fb923c'},
+      slack_notify: {icon:'&#128172;',label:'Slack Notify', color:'#818cf8'},
+      create_jira:  {icon:'&#128195;',label:'Create Jira',  color:'#60a5fa'},
+      create_pr:    {icon:'&#128257;',label:'Create PR',    color:'#a78bfa'},
+      opsgenie_alert:{icon:'&#128680;',label:'OpsGenie Alert',color:'#f87171'},
+      runbook:      {icon:'&#128196;',label:'Runbook',      color:'#94a3b8'},
     };
-    _apiWs.onmessage = function(e) {
-      var txt = e.data;
-      try { txt = JSON.stringify(JSON.parse(e.data), null, 2); } catch(_){}
-      wsLog('\\u2190 ' + txt, 'recv');
-    };
-    _apiWs.onerror = function() { wsLog('\\u274C Error', 'err'); };
-    _apiWs.onclose = function() {
-      wsLog('Disconnected', 'sys');
-      btn.textContent = '\\u26A1 Connect';
-      btn.onclick = function(){ wsConnect(pathStr); };
-      _apiWs = null;
-    };
-  } catch(e) { wsLog('Failed: ' + e, 'err'); }
-}
 
-function wsSend() {
-  var inp = document.getElementById('ws-msg');
-  if (!inp || !inp.value.trim()) return;
-  if (!_apiWs || _apiWs.readyState !== 1) { wsLog('Not connected — click Connect first', 'err'); return; }
-  _apiWs.send(inp.value.trim());
-  wsLog('\\u2192 ' + inp.value.trim(), 'sent');
-  inp.value = '';
-}
+    const stepsHtml=planActions.map((a,i)=>{
+      const meta=actionMeta[a.type]||{icon:'&#9654;',label:a.type,color:'var(--text2)'};
+      const isExec=executedTypes.has(a.type);
+      const blockReason=blockedMap[a.type];
+      const numCls=isExec?'executed':blockReason?'blocked':'';
+      const numContent=isExec?'&#10003;':blockReason?'!':''+( i+1);
+      const desc=a.description||a.message||a.body||'';
+      const target=a.target||a.deployment||(a.namespace&&a.deployment?a.namespace+'/'+a.deployment:'')||a.channel||a.summary||'';
+      const costDelta=a.estimated_cost_delta||0;
+      return `<li class="action-step">
+        <div class="step-num ${numCls}">${numContent}</div>
+        <div class="step-body">
+          <div class="step-type" style="color:${meta.color}">${meta.icon} ${meta.label}</div>
+          <div class="step-desc">${desc||'No description provided.'}</div>
+          ${target?`<div class="step-target">Target: ${target}</div>`:''}
+          ${costDelta?`<div class="step-cost">Estimated cost delta: $${costDelta}/mo</div>`:''}
+          ${blockReason?`<div class="step-reason">&#9888; Blocked: ${blockReason}</div>`:''}
+        </div>
+      </li>`;
+    }).join('');
 
-function loadMetrics() {
-  fetch('/health/integrations').then(function(r){ return r.json(); }).then(function(d) {
-    var el = document.getElementById('m-llm');
-    if (el) {
-      var provLabels = {anthropic:'Claude', groq:'Groq / Llama', ollama:'Ollama (Local)', none:'None'};
-      el.textContent = provLabels[d.llm_provider] || d.llm_provider || '—';
-      var sub = document.getElementById('m-llm-sub');
-      if (sub) sub.textContent = d.llm_provider === 'groq' ? 'llama-3.3-70b' : d.llm_provider === 'anthropic' ? 'claude-sonnet-4-6' : 'Active model';
+    const dataGapsHtml=dataGaps.length?`<div class="result-data-gap"><strong>&#9888; Missing data for higher confidence:</strong><ul style="margin:4px 0 0 16px;padding:0">${dataGaps.map(g=>`<li>${g}</li>`).join('')}</ul></div>`:'';
+
+    const rid='reasoning-'+Date.now();
+    el.innerHTML=`<div class="result-card">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <span style="font-weight:700;font-size:.92em">${id}</span>
+        <span class="badge ${statusCls}">${status.replace(/_/g,' ')}</span>
+        <span class="badge ${riskCls}">${risk} risk</span>
+        ${isDry?'<span class="badge badge-cyan">&#128065; DRY RUN</span>':''}
+        ${d.requires_human_approval?'<span class="badge badge-amber">&#9888; Awaiting Approval</span>':''}
+      </div>
+
+      <!-- Data sources -->
+      <div class="data-source-row">
+        <span class="data-src-badge ${awsOk?'data-src-ok':'data-src-miss'}">${awsOk?'&#10003;':'&#10005;'} AWS</span>
+        <span class="data-src-badge ${k8sOk?'data-src-ok':'data-src-miss'}">${k8sOk?'&#10003;':'&#10005;'} Kubernetes</span>
+        <span class="data-src-badge ${ghOk?'data-src-ok':'data-src-miss'}">${ghOk?'&#10003;':'&#10005;'} GitHub</span>
+      </div>
+
+      <!-- Root cause -->
+      <div class="result-section">
+        <div class="result-section-label">&#128269; Root Cause Analysis</div>
+        <div class="result-root-cause">${rootCause}</div>
+        ${dataGapsHtml}
+      </div>
+
+      <!-- Confidence -->
+      <div class="result-section">
+        <div class="result-section-label">Confidence &mdash; ${conf}%</div>
+        <div class="conf-bar"><div class="conf-fill ${confCls}" style="width:${conf}%"></div></div>
+      </div>
+
+      <!-- Remediation steps -->
+      ${planActions.length?`<div class="result-section">
+        <div class="result-section-label">&#9875; Remediation Steps (${planActions.length})</div>
+        <ol class="action-steps">${stepsHtml}</ol>
+      </div>`:'<div class="result-section"><div class="result-section-label">No actions recommended</div></div>'}
+
+      <!-- Errors -->
+      ${d.errors&&d.errors.length?`<div class="result-section"><div class="result-section-label" style="color:var(--red)">&#9888; Pipeline Errors</div><div style="font-size:.8em;color:var(--red);background:rgba(248,113,113,0.08);padding:8px;border-radius:6px">${d.errors.join('<br>')}</div></div>`:''}
+
+      <!-- Reasoning toggle -->
+      ${reasoning?`<div class="result-section">
+        <button class="btn btn-ghost btn-sm" style="font-size:.74em" onclick="document.getElementById('${rid}').classList.toggle('open');this.textContent=document.getElementById('${rid}').classList.contains('open')?'&#9650; Hide Reasoning':'&#9660; Show Reasoning'">&#9660; Show Reasoning</button>
+        <div id="${rid}" class="result-reasoning">${reasoning}</div>
+      </div>`:''}
+
+      <!-- Actions -->
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="App.createWarRoomFromIncident('${id}','${(plan.summary||'').replace(/'/g,'&apos;')}')">&#9876; Create War Room</button>
+        <button class="btn btn-ghost btn-sm" onclick="App.generatePostMortem('${id}')">&#128221; Post-Mortem</button>
+      </div>
+    </div>`;
+  },
+
+  async loadIncidents(){
+    const el=document.getElementById('active-incidents');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/memory/incidents?limit=5');
+      if(r&&r.ok){const d=await r.json();const items=d.incidents||d.results||[];
+        if(!items.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No incidents in memory</p></div>';return;}
+        el.innerHTML=items.map(i=>`<div style="padding:10px;border-bottom:1px solid var(--border);font-size:.83em"><div style="font-weight:600">${i.id||'unknown'}</div><div class="text-muted">${i.description||''}</div></div>`).join('');
+      }else el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No active incidents</p></div>';
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Could not load incidents</p></div>';}
+  },
+
+  createWarRoomFromIncident(id,desc){document.getElementById('wr-inc-id').value=id;document.getElementById('wr-desc').value=desc;this.navigate('warroom');},
+
+  async generatePostMortem(id){
+    if(!id){this.toast('No incident selected','error');return;}
+    this.toast('Generating post-mortem...','info');
+    const resp=await this.api('POST',`/incidents/${id}/post-mortem`,{incident_id:id,description:'',root_cause:''});
+    const r=resp&&resp.ok?await resp.json():null;
+    if(r&&r.markdown){
+      this.toast('Post-mortem generated!','success');
+      const el=document.getElementById('inc-result');
+      if(el)el.innerHTML=`<div class="result-card"><pre style="white-space:pre-wrap;font-size:.82em">${r.markdown.replace(/</g,'&lt;')}</pre></div>`;
+    }else{
+      this.toast('Post-mortem generation failed — check LLM configuration','error');
     }
-    var ints = document.getElementById('m-ints');
-    if (ints) {
-      var count = Object.values(d.integrations || {}).filter(function(v){ return v; }).length;
-      animateNum(ints, count);
-      var sub2 = document.getElementById('m-ints-sub');
-      if (sub2) sub2.textContent = 'of 8 services';
-    }
-    // Update integration chips
-    var imap = d.integrations || {};
-    var chipKeys = {
-      'ANTHROPIC_API_KEY': 'int-claude', 'GROQ_API_KEY': 'int-claude',
-      'AWS_ACCESS_KEY_ID': 'int-aws',
-      'GITHUB_TOKEN': 'int-github',
-      'GRAFANA_TOKEN': 'int-grafana',
-      'SLACK_BOT_TOKEN': 'int-slack',
-      'JIRA_TOKEN': 'int-jira',
-      'OPSGENIE_API_KEY': 'int-opsgenie',
-      'KUBECONFIG': 'int-k8s',
-    };
-    Object.keys(imap).forEach(function(k) {
-      var chipId = chipKeys[k];
-      if (chipId) {
-        var chip = document.getElementById(chipId);
-        if (chip && imap[k]) chip.classList.add('on');
-      }
-    });
-  }).catch(function(){});
+  },
 
-  fetch('/secrets/status').then(function(r){ return r.json(); }).then(function(data) {
-    Object.keys(data).forEach(function(group) {
-      var keys = data[group];
-      Object.keys(keys).forEach(function(k) {
-        var st = document.getElementById('st-'+k);
-        if (st) {
-          st.textContent = keys[k] ? '\\u2713' : '';
-          st.style.color = keys[k] ? 'var(--green)' : '';
-          st.title = keys[k] ? 'Configured' : 'Not set';
-        }
+  // ── WAR ROOM ─────────────────────────────────────────────────────
+  async createWarRoom(){
+    const id=document.getElementById('wr-inc-id').value.trim()||'INC-'+Date.now();
+    const desc=document.getElementById('wr-desc').value.trim();
+    const sev=document.getElementById('wr-sev').value;
+    if(!desc){this.toast('Description is required','error');return;}
+    try{
+      const r=await this.api('POST','/warroom/create',{incident_id:id,description:desc,severity:sev,post_to_slack:false});
+      if(r&&r.ok){const d=await r.json();this.toast('War room created!','success');this.loadWarRooms();
+        if(d.war_room_id||d.id) this.openWarRoom(d.war_room_id||d.id,id,desc,d.slack_channel||'');
+      }else this.toast('Failed to create war room','error');
+    }catch(e){this.toast('Error: '+e.message,'error');}
+  },
+
+  async loadWarRooms(){
+    const el=document.getElementById('warroom-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/warroom/active');
+      const d=r&&r.ok?await r.json():{war_rooms:[]};
+      const rooms=d.war_rooms||[];
+      if(!rooms.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9876;</div><p>No active war rooms</p></div>';return;}
+      el.innerHTML=rooms.map(wr=>`<div style="padding:12px;border-bottom:1px solid var(--border);cursor:pointer" onclick="App.openWarRoom('${wr.war_room_id||wr.id}','${wr.incident_id||''}','${(wr.incident_description||'').replace(/'/g,'&apos;')}','${wr.slack_channel||''}')">
+        <div style="display:flex;align-items:center;gap:8px;font-size:.88em"><span style="font-weight:600">${wr.incident_id||wr.war_room_id}</span><span class="status-dot dot-green dot-pulse"></span></div>
+        <div class="text-muted">${wr.incident_description||''}</div>
+      </div>`).join('');
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Could not load war rooms</p></div>';}
+  },
+
+  openWarRoom(warRoomId,incidentId,desc,slackChannel){
+    this.currentWarRoomId=warRoomId;
+    this.currentSlackChannel=slackChannel||'';
+    document.getElementById('warroom-list-panel').style.display='none';
+    document.getElementById('warroom-detail').style.display='flex';
+    const slackBadge=slackChannel?`<span class="badge badge-green" style="margin-left:8px">&#35;${slackChannel.replace('#','')}</span>`:'';
+    document.getElementById('warroom-info').innerHTML=`<div class="card-header"><div class="card-title"><span class="status-dot dot-green dot-pulse" style="margin-right:4px"></span> War Room: ${incidentId}${slackBadge}</div><button class="btn btn-ghost btn-sm" onclick="App.closeWarRoom()">&#8592; Back</button></div><p class="text-muted">${desc}</p>`;
+    document.getElementById('warroom-messages').innerHTML='<div class="empty-state"><p>Ask the AI about this incident</p></div>';
+    document.getElementById('slack-messages').innerHTML='<div class="empty-state"><p>Slack channel messages will appear here</p></div>';
+    if(slackChannel) this.refreshSlackHistory();
+  },
+
+  closeWarRoom(){
+    this.currentWarRoomId=null;
+    this.currentSlackChannel='';
+    if(this._slackPollTimer){clearInterval(this._slackPollTimer);this._slackPollTimer=null;}
+    document.getElementById('warroom-list-panel').style.display='flex';
+    document.getElementById('warroom-detail').style.display='none';
+  },
+
+  async refreshSlackHistory(){
+    const ch=this.currentSlackChannel;
+    if(!ch){document.getElementById('slack-messages').innerHTML='<div class="empty-state"><p>No Slack channel linked to this war room</p></div>';return;}
+    try{
+      const r=await this.api('GET',`/warroom/${this.currentWarRoomId}/slack-history?limit=30`);
+      if(!r||!r.ok){document.getElementById('slack-messages').innerHTML='<div class="empty-state"><p>Could not load Slack messages</p></div>';return;}
+      const d=await r.json();
+      const msgs=document.getElementById('slack-messages');
+      const messages=d.messages||[];
+      if(!messages.length){msgs.innerHTML='<div class="empty-state"><p>No messages yet in '+ch+'</p></div>';return;}
+      msgs.innerHTML='';
+      messages.forEach(m=>{
+        const el=document.createElement('div');
+        el.className='chat-bubble '+(m.username===this.username?'user':'assistant');
+        const safe=(m.text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        el.innerHTML='<div>'+safe+'</div><div class="chat-meta">'+m.username+' &bull; '+m.time+'</div>';
+        msgs.appendChild(el);
       });
-      var allSet = Object.values(keys).every(Boolean);
-      var someSet = Object.values(keys).some(Boolean);
-      var chipId = INT_MAP[group];
-      if (chipId) {
-        var chip = document.getElementById(chipId);
-        if (chip) { chip.className = 'tb-chip int-chip' + (someSet ? ' on' : ''); }
-      }
-      var schipId = SEC_MAP[group];
-      if (schipId) {
-        var schip = document.getElementById(schipId);
-        if (schip) { schip.className = 'int-chip' + (someSet ? ' on' : ''); }
-      }
-    });
-    // Count eps
-    var epEls = document.querySelectorAll('[data-ep]');
-    var cntEl = document.getElementById('cnt-all');
-    if (cntEl) cntEl.textContent = epEls.length;
-    var mEps = document.getElementById('m-eps');
-    if (mEps) animateNum(mEps, epEls.length);
-  }).catch(function(){});
+      msgs.scrollTop=msgs.scrollHeight;
+    }catch(e){console.error('Slack history error',e);}
+  },
 
-  // Memory count from health
-  fetch('/health').then(function(r){ return r.json(); }).then(function(d) {
-    var mMem = document.getElementById('m-mem');
-    if (mMem) {
-      if (d.incident_count !== undefined) animateNum(mMem, d.incident_count);
-      else mMem.textContent = '0';
-    }
-  }).catch(function(){});
-}
+  async sendSlackMessage(){
+    const input=document.getElementById('slack-input');
+    const text=input.value.trim();
+    if(!text||!this.currentSlackChannel) return;
+    input.value='';
+    try{
+      const r=await this.api('POST',`/warroom/${this.currentWarRoomId}/slack-send`,{message:text,sent_by:this.username});
+      if(r&&r.ok){
+        const el=document.createElement('div');
+        el.className='chat-bubble user';
+        const safe=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        el.innerHTML='<div>'+safe+'</div><div class="chat-meta">'+this.username+' &bull; '+new Date().toLocaleTimeString()+'</div>';
+        const msgs=document.getElementById('slack-messages');
+        if(msgs.querySelector('.empty-state')) msgs.innerHTML='';
+        msgs.appendChild(el);
+        msgs.scrollTop=msgs.scrollHeight;
+        setTimeout(()=>this.refreshSlackHistory(),2000);
+      } else this.toast('Failed to send Slack message','error');
+    }catch(e){this.toast('Slack error: '+e.message,'error');}
+  },
 
-function saveSecrets() {
-  var secrets = {};
-  ALL_KEYS.forEach(function(k) {
-    var el = document.getElementById(k);
-    if (el && el.value.trim()) secrets[k] = el.value.trim();
-  });
-  if (Object.keys(secrets).length === 0) { showMsg('No values entered', 'err'); return; }
-  var btn = document.getElementById('save-btn');
-  btn.disabled = true; btn.textContent = 'Saving...';
-  fetch('/secrets', {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify({secrets: secrets})
-  }).then(function(r){ return r.json().then(function(d){ return {ok: r.ok, data: d}; }); })
-  .then(function(res) {
-    if (res.ok) {
-      showMsg('Saved ' + res.data.updated.length + ' secret(s)', 'ok');
-      ALL_KEYS.forEach(function(k){ var el=document.getElementById(k); if(el) el.value=''; });
-      loadMetrics();
-    } else { showMsg(res.data.detail || 'Error', 'err'); }
-  }).catch(function(){ showMsg('Network error', 'err'); })
-  .finally(function(){ btn.disabled=false; btn.textContent='&#x1F4BE; Save to .env'; });
-}
-function showMsg(text, type) {
-  var m = document.getElementById('sec-msg');
-  m.textContent = text; m.className = 'sec-msg ' + type; m.style.display = '';
-  setTimeout(function(){ m.style.display='none'; }, 4000);
-}
+  async askWarRoom(){
+    const input=document.getElementById('warroom-input');
+    const q=input.value.trim();if(!q||!this.currentWarRoomId) return;
+    input.value='';
+    this.appendWarRoomMsg('user',q);
+    this.appendWarRoomMsg('typing','...');
+    try{
+      const r=await this.api('POST','/warroom/'+this.currentWarRoomId+'/ask',{question:q,asked_by:this.username});
+      const msgs=document.getElementById('warroom-messages');
+      msgs.querySelector('.typing-bubble')&&msgs.querySelector('.typing-bubble').remove();
+      if(r&&r.ok){const d=await r.json();this.appendWarRoomMsg('assistant',d.answer||d.response||'No response');}
+      else this.appendWarRoomMsg('assistant','Could not get response from war room AI.');
+    }catch(e){this.appendWarRoomMsg('assistant','Error: '+e.message);}
+  },
 
-function smtpMsg(text, ok) {
-  var m = document.getElementById('smtp-msg');
-  if (!m) return;
-  m.textContent = text;
-  m.style.color = ok ? 'var(--green)' : '#f87171';
-  m.style.display = 'inline';
-  setTimeout(function(){ m.style.display='none'; }, 6000);
-}
+  appendWarRoomMsg(role,text){
+    const msgs=document.getElementById('warroom-messages');
+    if(role==='typing'){const el=document.createElement('div');el.className='typing-bubble';el.style.cssText='font-size:.8em;color:var(--muted);padding:6px 0';el.textContent='AI is thinking...';msgs.appendChild(el);msgs.scrollTop=msgs.scrollHeight;return;}
+    if(msgs.querySelector('.empty-state')) msgs.innerHTML='';
+    const el=document.createElement('div');
+    el.className='chat-bubble '+role;
+    const safe=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const fmt=safe.replace(/\\n/g,'<br>').replace(/[*][*](.*?)[*][*]/g,'<strong>$1</strong>').replace(/`(.*?)`/g,'<code>$1</code>');
+    el.innerHTML='<div>'+fmt+'</div><div class="chat-meta">'+(role==='user'?this.username:'NexusOps AI')+' &bull; '+new Date().toLocaleTimeString()+'</div>';
+    msgs.appendChild(el);msgs.scrollTop=msgs.scrollHeight;
+  },
 
-function saveSMTP() {
-  var user = (document.getElementById('smtp_user_inp')||{}).value||'';
-  var pass = (document.getElementById('smtp_pass_inp')||{}).value||'';
-  var from = (document.getElementById('smtp_from_inp')||{}).value||'';
-  var url  = (document.getElementById('app_url_inp')||{}).value||'';
-  if (!user || !pass) { smtpMsg('Enter SMTP_USER and SMTP_PASSWORD', false); return; }
-  smtpMsg('Saving & testing...', true);
-  fetch('/auth/configure-smtp', {
-    method: 'POST', headers: authHeaders(),
-    body: JSON.stringify({smtp_user: user, smtp_password: pass, smtp_from: from||user,
-                          app_url: url||'http://localhost:8000', smtp_host:'smtp.gmail.com', smtp_port:587})
-  }).then(function(r){ return r.json(); }).then(function(d){
-    smtpMsg(d.message || (d.success ? 'Saved' : 'Error'), d.success);
-  }).catch(function(){ smtpMsg('Network error', false); });
-}
+  async suggestNextSteps(){
+    if(!this.currentWarRoomId){this.toast('No active war room','error');return;}
+    this.appendWarRoomMsg('user','What should we do next?');
+    this.appendWarRoomMsg('typing','...');
+    const r=await this.api('POST','/warroom/'+this.currentWarRoomId+'/ask',{question:'What should we do next? Give me 3-5 concrete next steps.',asked_by:this.username});
+    const msgs=document.getElementById('warroom-messages');
+    msgs.querySelector('.typing-bubble')&&msgs.querySelector('.typing-bubble').remove();
+    if(r&&r.ok){const d=await r.json();this.appendWarRoomMsg('assistant',d.answer||'No suggestions available.');}
+  },
 
-function testEmail() {
-  smtpMsg('Sending test email...', true);
-  fetch('/auth/test-email', {method:'POST', headers: authHeaders()})
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      if (d.success) smtpMsg(d.message, true);
-      else smtpMsg(d.detail || 'Failed', false);
-    }).catch(function(){ smtpMsg('Network error', false); });
-}
+  // ── APPROVALS ────────────────────────────────────────────────────
+  async loadApprovals(){
+    const el=document.getElementById('approvals-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/approvals/pending');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Could not load approvals</p></div>';return;}
+      const d=await r.json();const approvals=d.approvals||[];
+      if(!approvals.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No pending approvals</p></div>';return;}
+      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Incident</th><th>Risk</th><th>Cost Impact</th><th>Requested By</th><th>Expires</th><th>Actions</th></tr></thead><tbody>`+
+        approvals.map(a=>{
+          const risk=(a.risk_score||0);const riskCls=risk>=0.8?'badge-red':risk>=0.5?'badge-amber':'badge-green';
+          const riskLabel=risk>=0.8?'Critical':risk>=0.5?'High':'Low';
+          const cost=a.cost_report?'$'+(a.cost_report.total_estimated_monthly_delta||0).toFixed(0)+'/mo':'N/A';
+          const exp=a.expires_at?new Date(a.expires_at).toLocaleTimeString():'--';
+          return`<tr><td><span style="font-weight:600">${a.incident_id||a.correlation_id}</span></td><td><span class="badge ${riskCls}">${riskLabel}</span></td><td>${cost}</td><td>${a.requested_by||'system'}</td><td style="color:var(--amber)">${exp}</td><td><button class="btn btn-secondary btn-sm" onclick="App.openApproval('${a.correlation_id}')">Review</button></td></tr>`;
+        }).join('')+`</tbody></table></div>`;
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+  },
 
-/* ── MARKDOWN RENDERER ── */
-function _renderMarkdown(text) {
-  if (!text) return '';
-  return text
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/```[\\w]*(\\r?\\n)([\\s\\S]*?)```/g, function(_,nl,c){ return '<pre><code>'+c.trim()+'</code></pre>'; })
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')
-    .replace(/__(.+?)__/g, '<strong>$1</strong>')
-    .replace(/\\*([^*]+)\\*/g, '<em>$1</em>')
-    .replace(/^---+$/gm, '<hr>')
-    .replace(/^[ \\t]*[-*] (.+)$/gm, '<li>$1</li>')
-    .replace(/^[ \\t]*\\d+\\. (.+)$/gm, '<li>$1</li>')
-    .replace(/(<li>[\\s\\S]*?<\\/li>)+/g, function(m){ return '<ul>'+m+'</ul>'; })
-    .replace(/^### (.+)$/gm,'<h4>$1</h4>')
-    .replace(/^## (.+)$/gm,'<h3>$1</h3>')
-    .replace(/^# (.+)$/gm,'<h2>$1</h2>')
-    .replace(/\\n/g, '<br>');
-}
+  async openApproval(correlationId){
+    this.currentApprovalId=correlationId;
+    try{
+      const r=await this.api('GET','/approvals/pending');
+      if(!r||!r.ok) return;
+      const d=await r.json();
+      const ap=(d.approvals||[]).find(a=>a.correlation_id===correlationId);
+      if(!ap){this.toast('Approval not found','error');return;}
+      const actions=ap.actions||[];
+      document.getElementById('approve-modal-body').innerHTML=`
+        <p class="text-muted mb-12">Incident: <strong>${ap.incident_id}</strong> &bull; Risk: ${(ap.risk_score||0).toFixed(2)}</p>
+        <p class="text-muted mb-12">Plan: ${ap.plan_summary||'No summary'}</p>
+        <div class="mb-16"><div class="result-section-label mb-8">Select actions to approve:</div>
+        ${actions.map((a,i)=>`<label style="display:flex;align-items:center;gap:8px;padding:8px;border-radius:6px;cursor:pointer;border:1px solid var(--border);margin-bottom:6px;font-size:.85em"><input type="checkbox" value="${i}" checked style="accent-color:var(--purple)"/> <span class="action-chip">${a.type||'action'}</span> ${a.deployment||a.summary||''}</label>`).join('')}
+        </div>
+        <div><label class="form-label">Rejection reason (if rejecting)</label><input type="text" id="reject-reason" class="form-input" placeholder="Optional reason..."/></div>`;
+      document.getElementById('approve-modal').classList.add('open');
+    }catch(e){this.toast('Error: '+e.message,'error');}
+  },
 
-var _chatHistory = [];
+  async submitApproval(){
+    if(!this.currentApprovalId) return;
+    const checks=[...document.querySelectorAll('#approve-modal-body input[type=checkbox]')];
+    const indices=checks.filter(c=>c.checked).map(c=>parseInt(c.value));
+    try{
+      const r=await this.api('POST','/approvals/'+this.currentApprovalId+'/approve',{approved_action_indices:indices});
+      if(r&&r.ok){this.toast('Actions approved!','success');this.closeModal('approve-modal');this.loadApprovals();}
+      else this.toast('Approval failed','error');
+    }catch(e){this.toast('Error: '+e.message,'error');}
+  },
 
-function appendMsg(role, text, isHtml) {
-  var empty = document.getElementById('chat-empty');
-  if (empty) empty.remove();
-  var container = document.getElementById('chat-messages');
-  var row = document.createElement('div');
-  row.className = 'chat-row ' + role + ' fade-in';
-  var meta = document.createElement('div');
-  meta.className = 'chat-meta' + (role === 'user' ? ' right' : '');
-  meta.textContent = role === 'user' ? 'You' : 'AI DevOps';
-  var bubble = document.createElement('div');
-  bubble.className = 'chat-bubble ' + role;
-  if (isHtml) { bubble.innerHTML = text; } else { bubble.textContent = text; }
-  row.appendChild(meta);
-  row.appendChild(bubble);
-  container.appendChild(row);
-  container.scrollTop = container.scrollHeight;
-  return bubble;
-}
+  async submitRejection(){
+    if(!this.currentApprovalId) return;
+    const reason=document.getElementById('reject-reason').value||'Rejected by user';
+    try{
+      const r=await this.api('POST','/approvals/'+this.currentApprovalId+'/reject',{reason});
+      if(r&&r.ok){this.toast('Request rejected','info');this.closeModal('approve-modal');this.loadApprovals();}
+    }catch(e){this.toast('Error: '+e.message,'error');}
+  },
 
-function sendSuggestion(btn) {
-  document.getElementById('chat-input').value = btn.textContent.replace(/^\\S+\\s*/, '');
-  sendChat();
-}
+  closeModal(id){document.getElementById(id).classList.remove('open');},
 
-function chatKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
-}
-function autoResize(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 130) + 'px';
-}
-
-var _pendingAction = null;
-var _pendingParams = null;
-
-function sendChat(overrideMsg, confirmed, pendingAction, pendingParams) {
-  var input = document.getElementById('chat-input');
-  var msg = overrideMsg !== undefined ? overrideMsg : input.value.trim();
-  if (!msg) return;
-  var btn = document.getElementById('chat-send-btn');
-  if (!overrideMsg) { input.value = ''; input.style.height = 'auto'; }
-  btn.disabled = true;
-  appendMsg('user', msg);
-  _chatHistory.push({role: 'user', content: msg});
-  var typingBubble = appendMsg('ai', '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>', true);
-  typingBubble.classList.add('typing');
-  var selProvider = (document.getElementById('llm-selector') || {}).value || '';
-  var body = {
-    message: msg,
-    history: _chatHistory.slice(0, -1),
-    provider: selProvider,
-    confirmed: confirmed || false,
-    pending_action: pendingAction || null,
-    pending_params: pendingParams || null
-  };
-  fetch('/chat', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body)
-  })
-  .then(function(r) {
-    var status = r.status;
-    return r.text().then(function(t) { return {status: status, text: t}; });
-  })
-  .then(function(res) {
-    var d;
-    try { d = JSON.parse(res.text); }
-    catch(e) {
-      typingBubble.classList.remove('typing');
-      typingBubble.innerHTML = '<span style="color:var(--red)">Server error (' + res.status + '). Please try again or check server logs.</span>';
-      _chatHistory.push({role: 'assistant', content: 'Server error. Please try again.'});
-      document.getElementById('chat-send-btn').disabled = false;
-      document.getElementById('chat-input').focus();
-      return;
-    }
-    typingBubble.classList.remove('typing');
-    var reply = d.reply || d.detail || 'No response';
-    typingBubble.innerHTML = _renderMarkdown(reply);
-    _chatHistory.push({role: 'assistant', content: reply});
-
-    // ── Confirmation card ──────────────────────────────────
-    if (d.needs_confirm && d.pending_action) {
-      _pendingAction = d.pending_action;
-      _pendingParams = d.pending_params;
-      var confirmCard = document.createElement('div');
-      confirmCard.style.cssText = 'margin-top:10px;display:flex;gap:8px;flex-wrap:wrap';
-      var yesBtn = document.createElement('button');
-      yesBtn.innerHTML = '\\u2705 Yes, proceed';
-      yesBtn.style.cssText = 'padding:7px 16px;background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.4);color:var(--green);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit';
-      yesBtn.onclick = function() {
-        confirmCard.remove();
-        sendChat('Yes, confirmed', true, _pendingAction, _pendingParams);
-        _pendingAction = null; _pendingParams = null;
-      };
-      var noBtn = document.createElement('button');
-      noBtn.innerHTML = '\\u274c No, cancel';
-      noBtn.style.cssText = 'padding:7px 16px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--red);border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit';
-      noBtn.onclick = function() {
-        confirmCard.remove();
-        appendMsg('ai', 'Operation cancelled.');
-        _chatHistory.push({role: 'assistant', content: 'Operation cancelled.'});
-        _pendingAction = null; _pendingParams = null;
-        document.getElementById('chat-messages').scrollTop = 999999;
-      };
-      confirmCard.appendChild(yesBtn);
-      confirmCard.appendChild(noBtn);
-      typingBubble.parentElement.appendChild(confirmCard);
-    }
-
-    var footer = document.createElement('div');
-    footer.style.cssText = 'font-size:10px;color:var(--muted);margin-top:6px;padding:0 4px;display:flex;gap:10px;flex-wrap:wrap';
-    if (d.sources && d.sources.length) {
-      var src = document.createElement('span');
-      src.textContent = '\\u1F4E1 ' + d.sources.join(', ');
-      footer.appendChild(src);
-    }
-    if (d.llm_provider && d.llm_provider !== 'none') {
-      var prov = document.createElement('span');
-      var pLabel = {anthropic:'\\u2728 Claude',groq:'\\u26A1 Groq/Llama',openai:'GPT-4o',ollama:'\\u1F3E0 Ollama'}[d.llm_provider] || d.llm_provider;
-      prov.textContent = pLabel;
-      footer.appendChild(prov);
-    }
-    // Only show badge + toast for mutating actions, not read-only ones
-    var _mutatingActions = ['restart_deployment','scale_deployment','delete_pod','cordon_node','uncordon_node',
-      'start_ec2','stop_ec2','reboot_ec2','scale_ecs_service','redeploy_ecs_service','invoke_lambda',
-      'reboot_rds','set_alarm_state','create_github_issue','create_jira_ticket','run_pipeline','notify_oncall','debug_and_fix'];
-    if (d.action_taken && _mutatingActions.indexOf(d.action_taken) !== -1) {
-      var actionBadge = document.createElement('div');
-      actionBadge.style.cssText = 'margin-top:8px;padding:6px 10px;background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.3);border-radius:6px;font-size:11px;color:var(--green);display:flex;align-items:center;gap:6px';
-      actionBadge.innerHTML = '<span>&#x2705;</span><span><strong>' + d.action_taken.replace(/_/g,' ') + '</strong> executed successfully</span>';
-      typingBubble.parentElement.appendChild(actionBadge);
-      toast(d.action_taken.replace(/_/g,' ') + ' completed', 'ok', 3000);
-    }
-    if (d.action_taken) {
-      var mA = document.getElementById('m-actions');
-      if (mA && d.action_count !== undefined) animateNum(mA, d.action_count);
-    }
-    if (footer.children.length) typingBubble.parentElement.appendChild(footer);
-    document.getElementById('chat-messages').scrollTop = 999999;
-    btn.disabled = false;
-    document.getElementById('chat-input').focus();
-  })
-  .catch(function(e) {
-    typingBubble.classList.remove('typing');
-    typingBubble.textContent = 'Error: ' + e;
-    typingBubble.style.color = 'var(--red)';
-    btn.disabled = false;
-  });
-}
-
-function createWarRoom() {
-  var lastMsg = '';
-  for (var i = _chatHistory.length-1; i >= 0; i--) {
-    if (_chatHistory[i].role === 'user') { lastMsg = _chatHistory[i].content; break; }
-  }
-  var desc = lastMsg || document.getElementById('chat-input').value.trim() || 'Infrastructure incident';
-  var incId = 'INC-' + new Date().toISOString().replace(/[^0-9]/g,'').slice(0,12);
-  var btn = document.getElementById('chat-warroom-btn');
-  btn.disabled = true; btn.textContent = '\\u23F3 Creating...';
-  appendMsg('ai', '\\u1F6A8 Creating war room and running analysis across all integrations...');
-  fetch('/warroom/create', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({incident_id: incId, description: desc, severity: 'high', post_to_slack: true})
-  })
-  .then(function(r){ return r.json(); })
-  .then(function(d) {
-    btn.disabled = false; btn.textContent = '\\u1F6A8 War Room';
-    var msg = '\\u2705 War room created: ' + incId;
-    var a = d.analysis || {};
-    if (a.summary) msg += '\\n\\n\\u1F4CB ' + a.summary;
-    if (a.root_cause) msg += '\\n\\n\\u1F50D Root cause: ' + a.root_cause;
-    if (d.slack && d.slack.channel_url) msg += '\\n\\n\\u1F517 Slack: ' + d.slack.channel_url;
-    appendMsg('ai', msg);
-    _chatHistory.push({role: 'assistant', content: msg});
-    document.getElementById('chat-messages').scrollTop = 999999;
-  })
-  .catch(function(e) {
-    btn.disabled = false; btn.textContent = '\\u1F6A8 War Room';
-    appendMsg('ai', 'Error: ' + e);
-  });
-}
-
-loadMetrics();
-
-// Restore last active view so page reloads/restarts keep you where you were
-(function() {
-  try {
-    var saved = localStorage.getItem('devops_view');
-    if (saved && saved !== 'dashboard') {
-      // Find the matching nav link and activate it
-      var navLink = document.querySelector('.nav-link[onclick*="' + saved + '"]');
-      showView(saved, null, navLink || null);
-      if (navLink) {
-        document.querySelectorAll('.nav-link').forEach(function(l){ l.classList.remove('active'); });
-        navLink.classList.add('active');
-      }
-    }
-  } catch(e) {}
-})();
-
-// On load: check JWT and show login or restore session
-(function() {
-  var token = localStorage.getItem('devops_jwt');
-  if (!token) {
-    showLoginPage();
-    return;
-  }
-  fetch('/auth/me', {headers: {'Authorization': 'Bearer ' + token}})
-    .then(function(r){ return r.json().then(function(d){ return {ok: r.ok, data: d}; }); })
-    .then(function(res) {
-      if (!res.ok) { showLoginPage(); return; }
-      _currentUser = res.data.username || res.data.user || _currentUser;
-      _currentRole = res.data.role || 'viewer';
-      applyRoleUI(res.data);
-    })
-    .catch(function(){ showLoginPage(); });
-})();
-
-/* ── RBAC ROLE LOADER ── */
-var _currentUser = localStorage.getItem('devops_user') || '';
-var _currentRole = localStorage.getItem('devops_role') || 'viewer';
-
-function authHeaders(extra) {
-  var h = Object.assign({'Content-Type': 'application/json'}, extra || {});
-  var token = localStorage.getItem('devops_jwt');
-  if (token) {
-    h['Authorization'] = 'Bearer ' + token;
-  } else if (_currentUser) {
-    h['X-User'] = _currentUser;
-  }
-  return h;
-}
-
-function doLogin(username, password, onSuccess, onError) {
-  var body = 'username=' + encodeURIComponent(username) + '&password=' + encodeURIComponent(password);
-  fetch('/auth/token', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body})
-    .then(function(r){ return r.json().then(function(d){ return {ok:r.ok, data:d}; }); })
-    .then(function(res) {
-      if (!res.ok) { onError(res.data.detail || 'Invalid credentials'); return; }
-      _currentUser = res.data.username;
-      _currentRole = res.data.role;
-      localStorage.setItem('devops_jwt',  res.data.access_token);
-      localStorage.setItem('devops_user', res.data.username);
-      localStorage.setItem('devops_role', res.data.role);
-      onSuccess(res.data);
-    })
-    .catch(function(e){ onError('Network error: ' + e); });
-}
-
-function doLogout() {
-  localStorage.removeItem('devops_jwt');
-  localStorage.removeItem('devops_user');
-  localStorage.removeItem('devops_role');
-  _currentUser = ''; _currentRole = 'viewer';
-  document.body.removeAttribute('data-role');
-  showLoginPage();
-}
-
-function loadRole(user) {
-  // Legacy no-op - identity comes from JWT
-}
-
-function applyRoleUI(d) {
-  var role = d.role || 'viewer';
-  var perms = d.permissions || [];
-  var resolvedUser = d.username || d.user || _currentUser;
-  // Set body data-role for CSS visibility rules
-  document.body.dataset.role = role;
-  // Update sidebar footer
-  var badge = document.getElementById('sb-role-badge');
-  if (badge) {
-    badge.textContent = role;
-    badge.className = 'role-badge role-' + role;
-  }
-  var uname = document.getElementById('sb-uname');
-  if (uname) uname.textContent = resolvedUser;
-  var avatar = document.getElementById('sb-avatar');
-  if (avatar) avatar.textContent = resolvedUser[0].toUpperCase();
-  // Update role metric card
-  var mRole = document.getElementById('m-role');
-  if (mRole) mRole.textContent = role.charAt(0).toUpperCase() + role.slice(1);
-  var mRolePerms = document.getElementById('m-role-perms');
-  var roleDesc = {admin: 'Full platform access', developer: 'Read, write & deploy', viewer: 'View-only access'};
-  if (mRolePerms) mRolePerms.textContent = roleDesc[role] || 'Limited access';
-  // Sync user field in secrets panel
-  var secUser = document.getElementById('sec-user');
-  if (secUser) secUser.value = resolvedUser;
-  toast('Signed in as ' + resolvedUser + ' (' + role + ')', 'info', 2000);
-}
-
-function showLoginPage() {
-  var existing = document.getElementById('login-page');
-  if (existing) { existing.style.display = 'flex'; setTimeout(function(){ var u=document.getElementById('login-username'); if(u)u.focus(); },80); return; }
-  var page = document.createElement('div');
-  page.id = 'login-page';
-  page.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;overflow:hidden;font-family:Inter,sans-serif';
-  page.innerHTML =
-    /* ── animated gradient background ── */
-    '<style>' +
-    '@keyframes lp-bg{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}' +
-    '@keyframes lp-float{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-18px) scale(1.04)}}' +
-    '@keyframes lp-in{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}' +
-    '#login-page{background:#04060f}' +
-    '#lp-bg{position:absolute;inset:0;background:linear-gradient(135deg,#04060f 0%,#0d1424 40%,#0a0f1e 70%,#04060f 100%);background-size:400% 400%;animation:lp-bg 12s ease infinite}' +
-    '#lp-orb1{position:absolute;width:500px;height:500px;border-radius:50%;background:radial-gradient(circle,rgba(124,58,237,.18) 0%,transparent 70%);top:-120px;right:-100px;animation:lp-float 8s ease-in-out infinite}' +
-    '#lp-orb2{position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,rgba(37,99,235,.15) 0%,transparent 70%);bottom:-100px;left:-80px;animation:lp-float 10s ease-in-out infinite reverse}' +
-    '#lp-card{position:relative;z-index:2;width:100%;max-width:400px;margin:0 20px;animation:lp-in .5s ease both}' +
-    '#lp-card input{transition:border-color .15s,box-shadow .15s}' +
-    '#lp-card input:focus{border-color:#4f8ef7!important;box-shadow:0 0 0 3px rgba(79,142,247,.15)!important;outline:none}' +
-    '#login-btn{transition:all .15s;letter-spacing:.02em}' +
-    '#login-btn:hover:not(:disabled){background:linear-gradient(135deg,#3b82f6,#2563eb)!important;box-shadow:0 4px 20px rgba(79,142,247,.4)!important;transform:translateY(-1px)}' +
-    '#login-btn:active:not(:disabled){transform:translateY(0)}' +
-    '#login-btn:disabled{opacity:.6;cursor:not-allowed}' +
-    '</style>' +
-    '<div id="lp-bg"></div>' +
-    '<div id="lp-orb1"></div>' +
-    '<div id="lp-orb2"></div>' +
-    '<div id="lp-card">' +
-      /* logo + title */
-      '<div style="text-align:center;margin-bottom:28px">' +
-        '<div style="display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;background:linear-gradient(135deg,#7c3aed,#2563eb);border-radius:14px;margin-bottom:14px;box-shadow:0 8px 32px rgba(124,58,237,.4)">' +
-          '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>' +
-        '</div>' +
-        '<h1 style="font-size:1.5em;font-weight:800;color:#e2e8f0;letter-spacing:-.02em;margin:0 0 4px">NexusOps</h1>' +
-        '<p style="font-size:.83em;color:#4f6a9a;margin:0">AI-Powered DevOps Platform</p>' +
-      '</div>' +
-      /* card */
-      '<div style="background:rgba(13,20,36,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(79,142,247,.18);border-radius:16px;padding:32px;box-shadow:0 24px 64px rgba(0,0,0,.6)">' +
-        '<div id="login-err" style="display:none;color:#fca5a5;font-size:.82em;margin-bottom:16px;padding:10px 14px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);border-radius:8px;line-height:1.4"></div>' +
-        '<div style="margin-bottom:16px">' +
-          '<label style="display:block;font-size:.78em;font-weight:600;color:#4f8ef7;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Username</label>' +
-          '<input id="login-username" type="text" placeholder="Enter your username" autocomplete="username" style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:8px;border:1px solid rgba(79,142,247,.2);background:rgba(4,6,15,.6);color:#e2e8f0;font-size:.9em;font-family:inherit"/>' +
-        '</div>' +
-        '<div style="margin-bottom:24px">' +
-          '<label style="display:block;font-size:.78em;font-weight:600;color:#4f8ef7;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Password</label>' +
-          '<input id="login-password" type="password" placeholder="Enter your password" autocomplete="current-password" style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:8px;border:1px solid rgba(79,142,247,.2);background:rgba(4,6,15,.6);color:#e2e8f0;font-size:.9em;font-family:inherit"/>' +
-        '</div>' +
-        '<button id="login-btn" onclick="submitLoginPage()" style="width:100%;padding:12px;border-radius:8px;border:none;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font-weight:700;font-size:.95em;cursor:pointer;font-family:inherit">Sign In</button>' +
-        '<p style="text-align:center;font-size:.75em;color:#3d5080;margin-top:16px;margin-bottom:0">Press <kbd style="background:rgba(79,142,247,.12);border:1px solid rgba(79,142,247,.2);padding:1px 5px;border-radius:3px;font-family:monospace">Ctrl+K</kbd> to open AI Chat anytime</p>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(page);
-  var uInput = document.getElementById('login-username');
-  var pInput = document.getElementById('login-password');
-  if (uInput) setTimeout(function(){ uInput.focus(); }, 100);
-  if (pInput) pInput.addEventListener('keydown', function(e){ if (e.key === 'Enter') submitLoginPage(); });
-  if (uInput) uInput.addEventListener('keydown', function(e){ if (e.key === 'Enter') { var p=document.getElementById('login-password'); if(p)p.focus(); } });
-}
-
-function submitLoginPage() {
-  var username = (document.getElementById('login-username') || {}).value || '';
-  var password = (document.getElementById('login-password') || {}).value || '';
-  var errEl = document.getElementById('login-err');
-  var btn = document.getElementById('login-btn');
-  if (!username.trim()) { if(errEl){errEl.textContent='Enter username';errEl.style.display='block';} return; }
-  if (btn) { btn.disabled = true; btn.textContent = 'Signing in...'; }
-  doLogin(username.trim(), password, function(data) {
-    if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
-    var page = document.getElementById('login-page');
-    if (page) page.style.display = 'none';
-    applyRoleUI(data);
-    loadMetrics();
-  }, function(err) {
-    if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
-    if (errEl) { errEl.textContent = err; errEl.style.display = 'block'; }
-  });
-}
-
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function toggleUserSwitch() {
-  var p = document.getElementById('user-switch-panel');
-  if (p) p.style.display = p.style.display === 'none' ? '' : 'none';
-}
-
-function applyUser() {
-  var inp = document.getElementById('sb-user-input');
-  var u = inp ? inp.value.trim() : '';
-  if (!u) return;
-  var panel = document.getElementById('user-switch-panel');
-  if (panel) panel.style.display = 'none';
-  loadRole(u);
-}
-
-/* ── TOAST ── */
-function toast(msg, type, dur) {
-  type = type || 'info'; dur = dur || 2800;
-  var w = document.getElementById('toast-wrap');
-  var t = document.createElement('div');
-  t.className = 'toast ' + type;
-  var icons = {ok:'\\u2713', err:'\\u26A0', info:'\\u2139'};
-  t.innerHTML = '<span style="font-size:14px">' + (icons[type]||'\\u2139') + '</span><span>' + msg + '</span>';
-  w.appendChild(t);
-  setTimeout(function(){ t.style.opacity='0'; t.style.transform='translateY(10px)'; t.style.transition='all .3s'; setTimeout(function(){ t.remove(); }, 300); }, dur);
-}
-
-/* ── ANIMATED COUNTER ── */
-function animateNum(el, target) {
-  var start = 0, dur = 600, startTime = null;
-  function step(ts) {
-    if (!startTime) startTime = ts;
-    var p = Math.min((ts - startTime) / dur, 1);
-    el.textContent = Math.floor(p * target);
-    if (p < 1) requestAnimationFrame(step);
-    else el.textContent = target;
-  }
-  requestAnimationFrame(step);
-}
-
-/* ── SEVERITY PICKER ── */
-var _selSev = 'high';
-function setSev(btn, val) {
-  _selSev = val;
-  document.querySelectorAll('.sev-pill').forEach(function(b){ b.classList.remove('active'); });
-  btn.classList.add('active');
-}
-
-/* ── RUN PIPELINE ── */
-function runPipeline() {
-  var incId = document.getElementById('m-inc-id').value.trim() ||
-              'INC-' + new Date().toISOString().replace(/[^0-9]/g,'').slice(0,12);
-  var desc  = document.getElementById('m-inc-desc').value.trim();
-  if (!desc) { toast('Please enter a description', 'err'); return; }
-  var auto  = document.getElementById('m-auto-rem').checked;
-  var btn   = document.getElementById('m-run-btn');
-  var res   = document.getElementById('m-result');
-  btn.disabled = true; btn.textContent = '\\u23F3 Running...';
-  res.style.display = 'block';
-  res.textContent = 'Sending to pipeline...';
-  fetch('/incidents/run', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({incident_id: incId, description: desc, severity: _selSev, auto_remediate: auto})
-  })
-  .then(function(r){ return r.json(); })
-  .then(function(d) {
-    btn.disabled = false; btn.textContent = '\\u25B6 Run Pipeline';
-    var status = d.status || d.detail || 'unknown';
-    res.textContent = JSON.stringify(d, null, 2);
-    toast('Pipeline ' + status + ' — ' + incId, status === 'completed' ? 'ok' : 'info', 4000);
-    loadMetrics();
-  })
-  .catch(function(e) {
-    btn.disabled = false; btn.textContent = '\\u25B6 Run Pipeline';
-    res.textContent = 'Error: ' + e;
-    toast('Pipeline error: ' + e, 'err');
-  });
-}
-
-/* ── GITHUB REPOS DRAWER ── */
-function openGhDrawer() {
-  var drawer = document.getElementById('gh-drawer');
-  drawer.classList.add('open');
-  var body = document.getElementById('gh-drawer-body');
-  body.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">Loading repos&#x2026;</div>';
-  fetch('/github/repos')
-    .then(function(r){ return r.json(); })
-    .then(function(d) {
-      if (!d.success) {
-        body.innerHTML = '<div style="padding:20px;color:var(--muted);font-size:12px">&#x26A0; ' + (d.error || 'Not configured') + '</div>';
+  // ── COST ─────────────────────────────────────────────────────────
+  async loadCostOverview(){
+    const sumRow=document.getElementById('cost-summary-row');
+    const svcEl=document.getElementById('cost-services');
+    const trendEl=document.getElementById('cost-trend');
+    sumRow.innerHTML='<div class="loading-state" style="grid-column:1/-1"><div class="spinner"></div> Fetching live AWS cost data...</div>';
+    svcEl.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    trendEl.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/cost/dashboard');
+      if(!r||!r.ok){
+        sumRow.innerHTML='<div style="grid-column:1/-1;padding:12px;color:var(--muted)">&#9888; AWS Cost Explorer not available — check credentials and that Cost Explorer is enabled in your AWS account.</div>';
+        svcEl.innerHTML='<div class="empty-state"><p>Unavailable</p></div>';
+        trendEl.innerHTML='<div class="empty-state"><p>Unavailable</p></div>';
         return;
       }
-      var langColors = {JavaScript:'#f1e05a',TypeScript:'#2b7489',Python:'#3572A5',Go:'#00ADD8',Rust:'#dea584',Java:'#b07219',Ruby:'#701516',CSS:'#563d7c',HTML:'#e34c26',Shell:'#89e051'};
-      var html = '<div style="font-size:11px;color:var(--muted);padding:4px 2px 10px;font-weight:600">' + d.owner + ' &#x2022; ' + d.count + ' repos</div>';
-      (d.repos || []).forEach(function(r) {
-        var lc = langColors[r.language] || '#8b9ec7';
-        html += '<div class="repo-card" onclick="window.open(\\'' + r.url + '\\',\\'_blank\\')">';
-        html += '<div class="repo-name">' + r.name + (r.private ? ' &#x1F512;' : '') + '</div>';
-        if (r.description) html += '<div class="repo-desc">' + r.description + '</div>';
-        html += '<div class="repo-meta">';
-        if (r.language) html += '<span><span class="lang-dot" style="background:' + lc + '"></span>' + r.language + '</span>';
-        html += '<span>&#x2B50; ' + r.stars + '</span>';
-        html += '<span>&#x1F374; ' + r.forks + '</span>';
-        if (r.open_issues > 0) html += '<span style="color:var(--amber)">&#x26A0; ' + r.open_issues + '</span>';
-        html += '</div></div>';
-      });
-      body.innerHTML = html;
-    })
-    .catch(function(){ body.innerHTML = '<div style="padding:20px;color:var(--muted);font-size:12px">Failed to load repos</div>'; });
-}
-
-/* ── TEAM & ACCESS ── */
-var _ROLES = ['viewer','developer','admin'];
-
-function loadUsers() {
-  var list = document.getElementById('users-list');
-  if (!list) return;
-  list.innerHTML = '<div style="padding:20px;text-align:center;opacity:.5;font-size:13px">Loading...</div>';
-  fetch('/users', {headers: authHeaders()})
-    .then(function(r){ return r.json(); })
-    .then(function(d) {
-      var users = d.users || [];
-      if (!users.length) { list.innerHTML = '<div style="padding:20px;text-align:center;opacity:.5;font-size:13px">No users</div>'; return; }
-      list.innerHTML = users.map(function(u) {
-        var isMe = u.username === _currentUser;
-        var roleOpts = _ROLES.map(function(r){ return '<option value="'+r+'"'+(u.role===r?' selected':'')+'>'+r+'</option>'; }).join('');
-        var created = u.created_at ? u.created_at.slice(0,10) : '\\u2014';
-        return '<div style="padding:13px 18px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr 160px 140px 100px;gap:10px;align-items:center;font-size:13px">' +
-          '<div style="display:flex;align-items:center;gap:10px">' +
-            '<div style="width:32px;height:32px;background:linear-gradient(135deg,#7c3aed,#2563eb);border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">'+u.username[0].toUpperCase()+'</div>' +
-            '<div><div style="font-weight:600">'+escHtml(u.username)+(isMe?' <span style="font-size:.75em;opacity:.5">(you)</span>':'')+'</div>' +
-            '<div style="font-size:.75em;color:var(--muted)">by '+escHtml(u.created_by||'system')+'</div></div>' +
-          '</div>' +
-          '<div><select data-un="'+escHtml(u.username)+'" onchange="changeRole(this.dataset.un,this.value)" style="background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:.82em;padding:4px 6px;width:100%;cursor:pointer">'+roleOpts+'</select></div>' +
-          '<div style="color:var(--muted);font-size:.82em">'+created+'</div>' +
-          '<div style="display:flex;gap:6px">' +
-            '<button data-un="'+escHtml(u.username)+'" onclick="resetPw(this.dataset.un)" style="padding:4px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;font-size:.78em;cursor:pointer;color:var(--text)" title="Reset password">&#x1F511;</button>' +
-            (isMe ? '' : '<button data-un="'+escHtml(u.username)+'" onclick="removeUser(this.dataset.un)" style="padding:4px 8px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);border-radius:4px;font-size:.78em;cursor:pointer;color:#f87171" title="Remove">&#x1F5D1;</button>') +
-          '</div>' +
-        '</div>';
-      }).join('');
-    })
-    .catch(function(e){ list.innerHTML = '<div style="padding:20px;color:#f87171;font-size:13px">Error: '+e+'</div>'; });
-}
-
-function changeRole(username, role) {
-  fetch('/users/'+encodeURIComponent(username)+'/role', {
-    method: 'PUT', headers: authHeaders(),
-    body: JSON.stringify({user: username, role: role})
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if (d.success) toast('Role updated for '+username, 'ok');
-    else toast(d.detail || d.reason || 'Failed', 'err');
-    loadUsers();
-  });
-}
-
-function removeUser(username) {
-  if (!confirm('Delete user "'+username+'"? This cannot be undone.')) return;
-  fetch('/users/'+encodeURIComponent(username), {method:'DELETE', headers: authHeaders()})
-    .then(function(r){ return r.json(); }).then(function(d){
-      if (d.success) { toast('User removed', 'ok'); loadUsers(); }
-      else toast(d.detail || 'Failed', 'err');
-    });
-}
-
-function resetPw(username) {
-  var pw = prompt('Set new password for "'+username+'" (min 8 chars):');
-  if (!pw) return;
-  if (pw.length < 8) { toast('Password too short', 'err'); return; }
-  fetch('/users/'+encodeURIComponent(username)+'/password', {
-    method:'PUT', headers: authHeaders(),
-    body: JSON.stringify({new_password: pw})
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if (d.success) toast('Password reset', 'ok');
-    else toast(d.detail || d.error || 'Failed', 'err');
-  });
-}
-
-function showInviteModal() {
-  var m = document.getElementById('invite-modal');
-  if (m) { m.style.display = 'flex'; var u=document.getElementById('inv-username'); if(u) u.focus(); }
-}
-function closeInviteModal() {
-  var m = document.getElementById('invite-modal');
-  if (m) m.style.display = 'none';
-  var e = document.getElementById('invite-err'); if(e) e.style.display='none';
-}
-
-function sendInvite() {
-  var username = document.getElementById('inv-username').value.trim();
-  var email    = document.getElementById('inv-email').value.trim();
-  var role     = document.getElementById('inv-role').value;
-  var errEl    = document.getElementById('invite-err');
-  errEl.style.display = 'none';
-  if (!username) { errEl.textContent='Enter a username'; errEl.style.display='block'; return; }
-  if (!email || !email.includes('@')) { errEl.textContent='Enter a valid email'; errEl.style.display='block'; return; }
-  var btn = document.getElementById('inv-send-btn');
-  btn.disabled = true; btn.textContent = 'Sending...';
-  fetch('/users/invite', {method:'POST', headers: authHeaders(), body: JSON.stringify({username:username,email:email,role:role})})
-    .then(function(r){ return r.json(); })
-    .then(function(d) {
-      btn.disabled=false; btn.textContent='Send Invite';
-      closeInviteModal();
-      var res = document.getElementById('invite-result');
-      if (d.success) {
-        var html = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">' +
-          '<span style="color:var(--green);font-size:1.1em">&#x2705;</span>' +
-          '<div><div style="font-weight:600;color:var(--green)">User created successfully</div>' +
-          '<div style="font-size:.8em;color:var(--muted)">Share the OTP and setup link with '+escHtml(username)+'</div></div>' +
-          '</div>';
-        if (d.otp) {
-          html += '<div style="margin-bottom:10px">' +
-            '<div style="font-size:.75em;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">One-Time Password (OTP)</div>' +
-            '<div style="background:var(--bg);border:1px solid var(--border2);padding:12px 16px;border-radius:8px;display:flex;align-items:center;justify-content:space-between">' +
-              '<span style="font-family:JetBrains Mono,monospace;font-size:1.4em;font-weight:700;letter-spacing:.25em;color:var(--blue)">'+escHtml(d.otp)+'</span>' +
-              '<button onclick="navigator.clipboard.writeText(this.dataset.v)" data-v="'+escHtml(d.otp)+'" style="padding:4px 10px;font-size:.75em;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer">Copy</button>' +
-            '</div></div>';
-        }
-        if (d.setup_link) {
-          html += '<div>' +
-            '<div style="font-size:.75em;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">Setup Link</div>' +
-            '<div style="background:var(--bg);border:1px solid var(--border);padding:10px 12px;border-radius:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
-              '<a href="'+escHtml(d.setup_link)+'" target="_blank" style="color:var(--blue);font-size:.8em;word-break:break-all;flex:1">'+escHtml(d.setup_link)+'</a>' +
-              '<button onclick="navigator.clipboard.writeText(this.dataset.v)" data-v="'+escHtml(d.setup_link)+'" style="padding:4px 10px;font-size:.75em;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer;flex-shrink:0">Copy</button>' +
-            '</div></div>';
-        }
-        if (d.email_sent === false) {
-          html += '<div style="margin-top:10px;padding:8px 12px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);border-radius:6px;font-size:.78em;color:var(--amber)">&#x26A0; Email not sent — SMTP not configured. Share OTP manually.</div>';
-        }
-        res.innerHTML = html;
-        loadUsers();
-      } else {
-        res.innerHTML = '<div style="color:#f87171;display:flex;gap:8px;align-items:flex-start"><span>&#x274C;</span><span>'+escHtml(d.detail||'Failed to create invite')+'</span></div>';
+      const d=await r.json();
+      if(!d.available){
+        sumRow.innerHTML=`<div style="grid-column:1/-1;padding:12px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.2);border-radius:8px;font-size:.83em;color:var(--amber)">&#9888; Cost Explorer unavailable: ${d.error||'AWS credentials missing or Cost Explorer not enabled'}.<br><span style="color:var(--muted)">Enable at: AWS Console → Billing → Cost Explorer → Enable</span></div>`;
+        svcEl.innerHTML='<div class="empty-state"><p>Unavailable</p></div>';
+        trendEl.innerHTML='<div class="empty-state"><p>Unavailable</p></div>';
+        return;
       }
-      res.style.display = 'block';
-    })
-    .catch(function(e){ btn.disabled=false; btn.textContent='Send Invite'; toast('Network error','err'); });
-}
+      // Summary cards
+      const mtd=d.current_monthly_spend||0;const last=d.last_month_spend||0;const forecast=d.forecast_month_end||0;
+      const mtdVsLast=last>0?((mtd/last*30/new Date().getDate()-1)*100):0;
+      const trend=mtdVsLast>5?'&#8599;':mtdVsLast<-5?'&#8600;':'&#8594;';
+      const trendColor=mtdVsLast>5?'var(--red)':mtdVsLast<-5?'var(--green)':'var(--text2)';
+      sumRow.innerHTML=[
+        {label:'Month-to-Date',val:'$'+mtd.toFixed(2),sub:'Current billing period',color:'var(--purple)'},
+        {label:'Last Month Total',val:'$'+last.toFixed(2),sub:'Previous full month',color:'var(--cyan)'},
+        {label:'Forecast (Month-End)',val:forecast?'$'+forecast.toFixed(2):'—',sub:'Projected total',color:'var(--amber)'},
+        {label:'MoM Trend',val:`<span style="color:${trendColor}">${trend} ${Math.abs(mtdVsLast).toFixed(1)}%</span>`,sub:'vs last month pace',color:'var(--text2)'},
+      ].map(c=>`<div class="card" style="padding:14px">
+        <div class="text-muted" style="font-size:.75em;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${c.label}</div>
+        <div style="font-size:1.7em;font-weight:800;color:${c.color};line-height:1.1">${c.val}</div>
+        <div class="text-muted" style="font-size:.76em;margin-top:4px">${c.sub}</div>
+      </div>`).join('');
+      // Service breakdown
+      const svcs=d.service_breakdown||[];
+      if(!svcs.length){svcEl.innerHTML='<div class="empty-state"><p>No service data</p></div>';}
+      else{
+        const max=svcs[0].amount_usd||1;
+        svcEl.innerHTML='<div style="display:flex;flex-direction:column;gap:8px;padding:4px 0">'+
+          svcs.map(s=>{const pct=Math.round(s.amount_usd/mtd*100)||0;const barW=Math.round(s.amount_usd/max*100);
+            return`<div style="display:flex;align-items:center;gap:10px;font-size:.83em">
+              <div style="width:110px;flex-shrink:0;color:var(--text2)">${s.service}</div>
+              <div style="flex:1;background:var(--surface3);border-radius:4px;height:8px;overflow:hidden"><div style="width:${barW}%;height:100%;background:var(--purple);border-radius:4px"></div></div>
+              <div style="width:70px;text-align:right;font-weight:600">$${s.amount_usd.toFixed(2)}</div>
+              <div style="width:36px;text-align:right;color:var(--muted);font-size:.9em">${pct}%</div>
+            </div>`;
+          }).join('')+'</div>';
+      }
+      // Monthly trend
+      const trend6=d.monthly_trend||[];
+      if(!trend6.length){trendEl.innerHTML='<div class="empty-state"><p>No trend data</p></div>';}
+      else{
+        const tMax=Math.max(...trend6.map(m=>m.amount_usd),0.01);
+        trendEl.innerHTML='<div style="display:flex;align-items:flex-end;gap:6px;padding:12px 0 4px;height:120px">'+
+          trend6.map(m=>{const h=Math.max(Math.round(m.amount_usd/tMax*80),4);
+            return`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+              <div style="font-size:.68em;color:var(--muted)">$${m.amount_usd>=1000?(m.amount_usd/1000).toFixed(1)+'k':m.amount_usd.toFixed(0)}</div>
+              <div style="width:100%;background:var(--cyan);border-radius:3px 3px 0 0;height:${h}px;opacity:0.8"></div>
+              <div style="font-size:.67em;color:var(--muted)">${m.month.slice(5)}</div>
+            </div>`;
+          }).join('')+'</div>';
+      }
+    }catch(e){
+      sumRow.innerHTML=`<div style="grid-column:1/-1;color:var(--red)">Error: ${e.message}</div>`;
+      svcEl.innerHTML='';trendEl.innerHTML='';
+    }
+  },
 
-/* ── KEYBOARD SHORTCUTS ── */
-document.addEventListener('keydown', function(e) {
-  // Ignore if typing in an input
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  if (e.key === 'r' || e.key === 'R') {
-    document.getElementById('run-modal').classList.add('open');
-  }
-  if (e.key === '/' ) {
-    e.preventDefault();
-    var s = document.getElementById('ep-search');
-    if (s) { s.focus(); showView('endpoints','all',document.querySelector('.nav-link')); }
-  }
-  if (e.key === 'Escape') {
-    document.getElementById('run-modal').classList.remove('open');
-    document.getElementById('gh-drawer').classList.remove('open');
-    closeApiModal();
-    var backdrop = document.getElementById('ep-backdrop');
-    if (backdrop && backdrop.classList.contains('open')) closeApiModal();
-  }
-  if (e.key === 'c' || e.key === 'C') {
-    showView('chat','',document.querySelector('.nav-link[onclick*=chat]'));
-  }
-});
+  async analyzeCost(){
+    const raw=document.getElementById('cost-actions').value.trim();
+    let actions;try{actions=JSON.parse(raw);}catch(e){this.toast('Invalid JSON in actions field','error');return;}
+    const el=document.getElementById('cost-result');
+    const impactEl=document.getElementById('cost-aws');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    impactEl.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('POST','/cost/analyze',{actions});
+      if(r&&r.ok){
+        const d=await r.json();const rep=d.report||{};
+        const delta=rep.total_estimated_monthly_delta||0;const approved=rep.approved!==false;
+        el.innerHTML=`<div class="result-card" style="margin-top:12px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+            <span class="badge ${approved?'badge-green':'badge-red'}">${approved?'&#9989; Within budget':'&#10060; Exceeds budget'}</span>
+            <span style="font-size:1.15em;font-weight:800;color:${delta>0?'var(--red)':delta<0?'var(--green)':'var(--text2)'}">
+              ${delta===0?'No cost change':'$'+Math.abs(delta).toFixed(2)+'/mo '+(delta>0?'increase':'savings')}
+            </span>
+          </div>
+          ${(rep.per_action_costs||[]).length?`<div style="display:flex;flex-direction:column;gap:6px;font-size:.83em">
+            ${(rep.per_action_costs||[]).map(a=>`<div style="padding:8px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="font-weight:600;color:var(--text)">${a.action_type}</span>
+                <span style="font-weight:700;color:${a.monthly_delta_usd>0?'var(--red)':a.monthly_delta_usd<0?'var(--green)':'var(--muted)'}">$${(a.monthly_delta_usd>=0?'+':'')}${a.monthly_delta_usd.toFixed(2)}/mo</span>
+              </div>
+              <div class="text-muted" style="margin-top:3px">${a.description}</div>
+              ${a.notes?`<div style="color:var(--muted);margin-top:2px;font-size:.9em">${a.notes}</div>`:''}
+            </div>`).join('')}
+          </div>`:''}
+          ${rep.warnings&&rep.warnings.length?`<div style="margin-top:10px;padding:8px 10px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.2);border-radius:6px;font-size:.8em;color:var(--amber)">
+            ${rep.warnings.map(w=>'&#9888; '+w).join('<br>')}
+          </div>`:''}
+        </div>`;
+        // Show MTD spend from real AWS in impact panel
+        const mtd=rep.current_monthly_spend||0;
+        impactEl.innerHTML=mtd?`<div style="text-align:center;padding:16px">
+          <div style="font-size:2em;font-weight:800;background:linear-gradient(135deg,var(--purple),var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent">$${mtd.toFixed(2)}</div>
+          <div class="text-muted" style="font-size:.82em">Month-to-Date AWS Spend</div>
+          ${rep.forecast_month_end?`<div style="margin-top:8px;font-size:.85em;color:var(--amber)">&#127362; Forecast month-end: <b>$${rep.forecast_month_end.toFixed(2)}</b></div>`:''}
+          <div style="margin-top:10px;font-size:.8em;color:var(--green)">&#9989; Live from AWS Cost Explorer</div>
+        </div>`:`<div class="empty-state"><p class="text-muted">AWS Cost Explorer not available</p></div>`;
+      }else{
+        el.innerHTML='<div class="result-card"><p class="text-muted">Cost analysis unavailable — check AWS credentials</p></div>';
+        impactEl.innerHTML='';
+      }
+    }catch(e){el.innerHTML=`<div class="result-card"><p style="color:var(--red)">Error: ${e.message}</p></div>`;}
+  },
 
-// Keyboard shortcut: Ctrl+K or Cmd+K opens AI Chat panel
-document.addEventListener('keydown', function(e) {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-    e.preventDefault();
-    var chatLink = document.querySelector('.nav-link[onclick*="chat"]');
-    if (chatLink) chatLink.click();
-    var chatInput = document.getElementById('chat-input');
-    if (chatInput) { setTimeout(function(){ chatInput.focus(); }, 100); }
-  }
-});
+  // ── CHAT ─────────────────────────────────────────────────────────
+  newChat(){
+    this.chatSessionId='sess-'+Date.now();
+    const msgs=document.getElementById('chat-messages');
+    msgs.innerHTML='';
+    const w=document.createElement('div');w.className='chat-welcome';w.id='chat-welcome';
+    w.innerHTML='<div class="chat-welcome-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg></div><h2>NexusOps AI</h2><p>Ask me anything about your infrastructure.</p>';
+    msgs.appendChild(w);
+    document.getElementById('chat-session-label').textContent='';
+    document.getElementById('chat-chips').style.display='flex';
+    this.pendingAction=null;this.pendingParams=null;
+  },
+
+  chipChat(msg){document.getElementById('chat-chips').style.display='none';this.sendChatMsg(msg);},
+
+  async sendChat(){
+    const input=document.getElementById('chat-input');
+    const msg=input.value.trim();if(!msg) return;
+    input.value='';input.style.height='';
+    this.sendChatMsg(msg);
+  },
+
+  _awsRegion:'us-west-2',
+
+  _linkifyResources(s){
+    const region=this._awsRegion||'us-east-1';
+    // EC2 instance IDs → AWS console
+    s=s.replace(/\b(i-[0-9a-f]{8,17})\b/g,function(_,id){
+      const url='https://console.aws.amazon.com/ec2/v2/home?region='+region+'#Instances:instanceId='+id;
+      return '<a href="'+url+'" target="_blank" rel="noopener" class="resource-link ec2-link" title="Open in AWS Console">'+id+' &#x2197;</a>';
+    });
+    // Security groups
+    s=s.replace(/\b(sg-[0-9a-f]{8,17})\b/g,function(_,id){
+      const url='https://console.aws.amazon.com/ec2/v2/home?region='+region+'#SecurityGroup:groupId='+id;
+      return '<a href="'+url+'" target="_blank" rel="noopener" class="resource-link sg-link" title="Open in AWS Console">'+id+' &#x2197;</a>';
+    });
+    // CloudWatch alarms
+    s=s.replace(/\b(arn:aws:[a-z0-9:/.+-]+)\b/g,function(_,arn){
+      return '<span class="resource-link arn-link" title="ARN: '+arn+'">'+arn.split(':').pop()+' <small title="'+arn+'">&#x24B2;</small></span>';
+    });
+    // RDS instance IDs (db-xxx)
+    s=s.replace(/\b(db-[A-Z0-9]{26})\b/g,function(_,id){
+      const url='https://console.aws.amazon.com/rds/home?region='+region+'#database:id='+id;
+      return '<a href="'+url+'" target="_blank" rel="noopener" class="resource-link rds-link" title="Open in AWS Console">'+id+' &#x2197;</a>';
+    });
+    // GitHub commit SHAs (7-40 hex chars that look like commits in context)
+    s=s.replace(/\b([0-9a-f]{7,40})\b(?=.*(?:commit|sha|merge|push))/gi,function(_,sha){
+      return '<span class="resource-link sha-link" title="Git SHA: '+sha+'">'+sha.slice(0,7)+'</span>';
+    });
+    // GitHub PR links (e.g. #123 or PR #123)
+    s=s.replace(/\\b(?:PR[ ]*)?#(\\d+)\\b/g,function(_,num){
+      return '<span class="resource-link pr-link" title="PR/Issue #'+num+'">#'+num+' &#x2197;</span>';
+    });
+    // Lambda function names after "function" keyword
+    s=s.replace(/\\bfunction[s]?[ ]+[*][*]([^*]+)[*][*]/g,function(_,name){
+      const url='https://console.aws.amazon.com/lambda/home?region='+region+'#/functions/'+name;
+      return 'function <a href="'+url+'" target="_blank" rel="noopener" class="resource-link lambda-link" title="Open in AWS Console"><strong>'+name+'</strong> &#x2197;</a>';
+    });
+    return s;
+  },
+
+  _md(text){
+    var s=text,_i,_j;while((_i=s.indexOf('[TOOL_CALL:'))>=0){_j=s.indexOf(']',_i);if(_j<0)break;s=s.slice(0,_i)+s.slice(_j+1);}s=s.trim();
+    s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    s=s.replace(/```([a-z]*)[ \t]*([^]*?)```/g,function(_,lang,code){
+      var id='cb'+Math.random().toString(36).slice(2,7);
+      return '<div class="chat-code-block"><div class="chat-code-header"><span>'+(lang||'code')+'</span>'
+        +'<button data-t="'+id+'" onclick="navigator.clipboard.writeText(document.getElementById(this.dataset.t).textContent)">Copy</button></div>'
+        +'<pre><code class="code-block-code" id="'+id+'">'+code.trim()+'</code></pre></div>';
+    });
+    s=s.replace(/`([^`]+)`/g,'<code>$1</code>');
+    s=s.replace(/[*][*][*]([^]*?)[*][*][*]/g,'<strong><em>$1</em></strong>');
+    s=s.replace(/[*][*]([^]*?)[*][*]/g,'<strong>$1</strong>');
+    s=s.replace(/[*]([^]+?)[*]/g,'<em>$1</em>');
+    s=s.replace(/^[#]{3} (.+)$/gm,'<h3>$1</h3>');
+    s=s.replace(/^[#]{2} (.+)$/gm,'<h2>$1</h2>');
+    s=s.replace(/^[#] (.+)$/gm,'<h1>$1</h1>');
+    s=s.replace(/^[-]{3,}$/gm,'<hr>');
+    s=s.replace(/^&gt; (.+)$/gm,'<blockquote>$1</blockquote>');
+    s=s.replace(/^[-*] (.+)$/gm,'<li>$1</li>');
+    s=s.replace(/(<li>[^]*?<[/]li>)/g,'<ul>$1</ul>');
+    s=s.replace(/^[0-9]+[.] (.+)$/gm,'<oli>$1</oli>');
+    s=s.replace(/(<oli>[^]*?<[/]oli>)/g,function(m){return '<ol>'+m.replace(/oli>/g,'li>')+'</ol>';});
+    s=s.split('\\n\\n').map(function(p){return p.startsWith('<')?p:'<p>'+p.replace(/\\n/g,'<br>')+'</p>';}).join('');
+    s=this._linkifyResources(s);
+    return s;
+  },
+
+  appendChatMsg(role,text,provider){
+    document.getElementById('chat-chips').style.display='none';
+    const wEl=document.getElementById('chat-welcome');if(wEl)wEl.remove();
+    const msgs=document.getElementById('chat-messages');
+    const row=document.createElement('div');
+    row.className='chat-row '+(role==='user'?'user':'');
+    const providerNames={'anthropic':'Claude','openai':'GPT-4','groq':'Groq/Llama','ollama':'Ollama'};
+    const providerLabel=role==='assistant'&&provider?(providerNames[provider]||provider):'';
+    const initials=role==='user'?(this.username||'U').slice(0,2).toUpperCase():'AI';
+    const avatarCls=role==='user'?'user-av':'ai';
+    const avatarInner=role==='user'?initials
+      :'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>';
+    const metaName=role==='user'?(this.username||'You'):'NexusOps AI'+(providerLabel?' &bull; '+providerLabel:'');
+    const bubbleContent=role==='user'
+      ?text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      :this._md(text);
+    const msgId='m'+Math.random().toString(36).slice(2,8);
+    row.innerHTML=
+      '<div class="chat-avatar '+avatarCls+'">'+avatarInner+'</div>'
+      +'<div class="chat-body">'
+        +'<div class="chat-bubble '+(role==='user'?'user':'assistant')+'" id="'+msgId+'">'+bubbleContent+'</div>'
+        +'<div class="chat-meta">'
+          +metaName+' &bull; '+new Date().toLocaleTimeString()
+          +(role==='assistant'?'<button class="chat-copy-btn" data-t="'+msgId+'" onclick="navigator.clipboard.writeText(document.getElementById(this.dataset.t).innerText)" title="Copy">&#128203;</button>':'')
+        +'</div>'
+      +'</div>';
+    msgs.appendChild(row);msgs.scrollTop=msgs.scrollHeight;
+  },
+
+  async sendChatMsg(msg){
+    if(!this.chatSessionId) this.chatSessionId='sess-'+Date.now();
+    this.appendChatMsg('user',msg);
+    const ti=document.getElementById('typing-indicator');ti.style.display='flex';
+    document.getElementById('chat-session-label').textContent='Session '+this.chatSessionId.slice(-8);
+    const body={message:msg,session_id:this.chatSessionId,provider:this.globalLLM};
+    if(this.pendingAction){body.pending_action=this.pendingAction;body.pending_params=this.pendingParams;}
+    if(['yes','yeah','yep','sure','ok','proceed','go ahead','confirm','do it'].includes(msg.toLowerCase().trim())&&this.pendingAction) body.confirmed=true;
+    try{
+      const r=await this.api('POST','/chat',body);
+      ti.style.display='none';
+      if(!r){this.appendChatMsg('assistant','Connection failed');return;}
+      const d=await r.json();
+      if(!r.ok){this.appendChatMsg('assistant','Error: '+(d.detail||'Unknown error'));return;}
+      const reply=d.reply||d.answer||d.response||'No response.';
+      const providerUsed=d.llm_provider||'';
+      this.appendChatMsg('assistant',reply,providerUsed);
+      this.chatSessionId=d.session_id||this.chatSessionId;
+      this.pendingAction=d.needs_confirm?d.pending_action:null;
+      this.pendingParams=d.needs_confirm?d.pending_params:null;
+    }catch(e){ti.style.display='none';this.appendChatMsg('assistant','Error: '+e.message);}
+  },
+
+  // ── INFRASTRUCTURE ───────────────────────────────────────────────
+  infraTab(tab,btn){
+    document.getElementById('infra-aws').style.display=tab==='aws'?'block':'none';
+    document.getElementById('infra-k8s').style.display=tab==='k8s'?'block':'none';
+    document.querySelectorAll('#infra-tabs .tab-pill').forEach(b=>{b.classList.remove('active');});
+    btn.classList.add('active');
+    if(tab==='k8s'){this.loadK8sHealth();this.loadPods();}
+  },
+
+  async loadEC2(){
+    const el=document.getElementById('ec2-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/aws/ec2/instances');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>AWS not configured</p></div>';return;}
+      const d=await r.json();const ec2d=d.ec2_instances||d;const instances=ec2d.instances||d.instances||d.data||[];
+      if(!instances.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9729;</div><p>No EC2 instances</p></div>';return;}
+      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>ID</th><th>Name</th><th>State</th><th>Type</th><th>IP</th><th>Actions</th></tr></thead><tbody>`+
+        instances.map(i=>{const stateStr=i.state||i.State?.Name||'unknown';const stateCls=stateStr==='running'?'badge-green':stateStr==='stopped'?'badge-gray':'badge-amber';
+          const name=i.name||i.Name||i.instance_id||i.id||'--';
+          const iid=i.id||i.instance_id||'';
+          const running=stateStr==='running';const stopped=stateStr==='stopped';
+          return`<tr><td><code style="font-size:.8em">${iid||'--'}</code></td><td>${name}</td><td><span class="badge ${stateCls}">${stateStr}</span></td><td>${i.type||i.instance_type||'--'}</td><td>${i.public_ip||i.private_ip||'--'}</td><td style="white-space:nowrap">
+            ${stopped?`<button class="btn btn-ghost btn-sm" style="color:var(--green);font-size:.75em;padding:3px 7px" onclick="App.ec2Action('${iid}','start')">&#9654; Start</button>`:''}
+            ${running?`<button class="btn btn-ghost btn-sm" style="color:var(--amber);font-size:.75em;padding:3px 7px" onclick="App.ec2Action('${iid}','stop')">&#9646;&#9646; Stop</button>`:''}
+            ${running?`<button class="btn btn-ghost btn-sm" style="color:var(--cyan);font-size:.75em;padding:3px 7px" onclick="App.ec2Action('${iid}','reboot')">&#8635; Reboot</button>`:''}
+          </td></tr>`;
+        }).join('')+`</tbody></table></div>`;
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+  },
+
+  async ec2Action(instanceId,action){
+    if(!confirm(`Are you sure you want to ${action} instance ${instanceId}?`))return;
+    this.toast(`Sending ${action} to ${instanceId}...`,'info');
+    try{
+      const r=await this.api('POST',`/aws/ec2/${instanceId}/${action}`);
+      if(r&&r.ok){this.toast(`Instance ${instanceId} ${action} initiated`,'success');setTimeout(()=>this.loadEC2(),3000);}
+      else{const d=r?await r.json():{};this.toast(d.detail||`Failed to ${action} instance`,'error');}
+    }catch(e){this.toast('Error: '+e.message,'error');}
+  },
+
+  async loadAlarms(){
+    const el=document.getElementById('alarms-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/aws/cloudwatch/alarms');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>CloudWatch not configured</p></div>';return;}
+      const d=await r.json();const cwd=d.cloudwatch_alarms||d;const alarms=cwd.alarms||d.alarms||d.data||[];
+      if(!alarms.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No alarms</p></div>';return;}
+      el.innerHTML=alarms.slice(0,10).map(a=>{const state=a.state_value||a.StateValue||'OK';const cls=state==='ALARM'?'badge-red':state==='OK'?'badge-green':'badge-amber';
+        return`<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:.83em"><span class="badge ${cls}">${state}</span><span style="flex:1">${a.alarm_name||a.AlarmName||'Alarm'}</span></div>`;
+      }).join('');
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+  },
+
+  async loadK8sHealth(){
+    const el=document.getElementById('k8s-health');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/check/k8s');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>K8s not configured</p></div>';return;}
+      const d=await r.json();
+      const status=d.status||'unknown';const cls=status==='healthy'?'dot-green':status==='degraded'?'dot-amber':'dot-red';
+      el.innerHTML=`<div style="padding:12px 0">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><span class="status-dot ${cls}"></span><span style="font-size:1.1em;font-weight:700;text-transform:capitalize">${status}</span></div>
+        ${d.nodes?`<div class="flex-center gap-8 mb-8 text-sm"><span class="text-muted">Nodes:</span><span class="badge badge-green">${d.nodes.ready||0} ready</span><span class="badge badge-red">${d.nodes.not_ready||0} not ready</span></div>`:''}
+        ${d.pods?`<div class="flex-center gap-8 text-sm"><span class="text-muted">Pods:</span><span class="badge badge-green">${d.pods.running||0} running</span><span class="badge badge-red">${d.pods.failed||0} failed</span></div>`:''}
+        ${d.message?`<div class="text-muted" style="margin-top:10px;font-size:.8em">${d.message}</div>`:''}
+      </div>`;
+    }catch(e){el.innerHTML='<div class="empty-state"><p>K8s: '+e.message+'</p></div>';}
+  },
+
+  async loadPods(){
+    const el=document.getElementById('pods-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/k8s/pods');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>K8s not configured</p></div>';return;}
+      const d=await r.json();const k8sd=d.k8s_pods||d;if(k8sd.status==='error'){el.innerHTML=`<div class="empty-state"><p>K8s: ${k8sd.details||'not configured'}</p></div>`;return;}const pods=k8sd.pods||d.pods||d.data||[];
+      if(!pods.length){el.innerHTML='<div class="empty-state"><p>No pods found</p></div>';return;}
+      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Name</th><th>Namespace</th><th>Status</th><th>Actions</th></tr></thead><tbody>`+
+        pods.slice(0,15).map(p=>{const status=p.status||p.phase||'unknown';const cls=status==='Running'?'badge-green':status==='Pending'?'badge-amber':status==='Succeeded'?'badge-cyan':'badge-red';
+          const dep=p.deployment||p.name||'';const ns=p.namespace||'default';
+          return`<tr><td style="font-size:.78em;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace">${p.name||'--'}</td><td>${ns}</td><td><span class="badge ${cls}">${status}</span></td><td><button class="btn btn-ghost btn-sm" style="font-size:.75em;padding:3px 7px;color:var(--cyan)" onclick="App.k8sRestart('${ns}','${dep}')">&#8635; Restart</button></td></tr>`;
+        }).join('')+`</tbody></table></div>`;
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+  },
+
+  async k8sRestart(namespace,deployment){
+    if(!deployment){this.toast('Cannot determine deployment name','error');return;}
+    if(!confirm(`Restart deployment "${deployment}" in namespace "${namespace}"?`))return;
+    this.toast(`Restarting ${deployment}...`,'info');
+    try{
+      const r=await this.api('POST','/k8s/restart',{namespace,deployment});
+      if(r&&r.ok){this.toast(`Deployment ${deployment} restart triggered`,'success');setTimeout(()=>this.loadPods(),3000);}
+      else{const d=r?await r.json():{};this.toast(d.detail||'Restart failed','error');}
+    }catch(e){this.toast('Error: '+e.message,'error');}
+  },
+
+  // ── INTEGRATIONS ─────────────────────────────────────────────────
+  async loadIntegrations(){
+    const el=document.getElementById('integrations-grid');
+    el.innerHTML='<div class="loading-state" style="grid-column:1/-1"><div class="spinner"></div></div>';
+    const intDefs=[
+      {key:'aws',name:'AWS',icon:'&#9729;',color:'#f59e0b'},
+      {key:'github',name:'GitHub',icon:'&#128049;',color:'#94a3b8'},
+      {key:'slack',name:'Slack',icon:'&#128172;',color:'#34d399'},
+      {key:'jira',name:'Jira',icon:'&#128202;',color:'#60a5fa'},
+      {key:'opsgenie',name:'OpsGenie',icon:'&#128680;',color:'#f87171'},
+      {key:'grafana',name:'Grafana',icon:'&#128200;',color:'#f59e0b'},
+      {key:'k8s',name:'Kubernetes',icon:'&#128736;',color:'#22d3ee'},
+      {key:'gitlab',name:'GitLab',icon:'&#128049;',color:'#fb923c'},
+    ];
+    try{
+      const r=await this.api('GET','/health/integrations');
+      const d=r&&r.ok?await r.json():{integrations:{}};
+      const integs=d.integrations||d||{};
+      el.innerHTML=intDefs.map(i=>{
+        const ok=integs[i.key]===true||integs[i.key+'_configured']===true||integs[i.name.toLowerCase()]===true;
+        return`<div class="integration-card">
+          <div class="int-header"><div class="int-icon" style="background:${i.color}22;color:${i.color}">${i.icon}</div><div><div class="int-name">${i.name}</div></div></div>
+          <div class="int-status"><span class="status-dot ${ok?'dot-green':'dot-gray'}"></span>${ok?'Configured':'Not configured'}</div>
+        </div>`;
+      }).join('');
+    }catch(e){el.innerHTML='<div class="empty-state" style="grid-column:1/-1"><p>Could not load integrations</p></div>';}
+  },
+
+  // ── USERS ────────────────────────────────────────────────────────
+  async loadUsers(){
+    const el=document.getElementById('users-table');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/users');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Access denied</p></div>';return;}
+      const d=await r.json();const users=d.users||[];
+      if(!users.length){el.innerHTML='<div class="empty-state"><p>No users</p></div>';return;}
+      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody>`+
+        users.map(u=>{const roleCls=u.role==='admin'?'badge-purple':u.role==='developer'?'badge-cyan':'badge-gray';
+          return`<tr><td><div style="display:flex;align-items:center;gap:8px"><div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,var(--purple),var(--cyan2));display:flex;align-items:center;justify-content:center;font-size:.75em;font-weight:700">${(u.username||'?')[0].toUpperCase()}</div>${u.username}</div></td>
+          <td><span class="badge ${roleCls}">${u.role}</span></td>
+          <td class="text-muted">${(u.created_at||'').substring(0,10)||'--'}</td>
+          <td><button class="btn btn-danger btn-sm" onclick="App.deleteUser('${u.username}')" ${u.username===this.username?'disabled':''}>Delete</button></td></tr>`;
+        }).join('')+`</tbody></table></div>`;
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+  },
+
+  async deleteUser(username){
+    if(!confirm('Delete user '+username+'?')) return;
+    const r=await this.api('DELETE','/users/'+username);
+    if(r&&r.ok){this.toast('User deleted','success');this.loadUsers();}
+    else this.toast('Failed to delete user','error');
+  },
+
+  openInviteModal(){document.getElementById('invite-modal').classList.add('open');},
+
+  async submitInvite(){
+    const username=document.getElementById('invite-username').value.trim();
+    const email=document.getElementById('invite-email').value.trim();
+    const role=document.getElementById('invite-role').value;
+    if(!username){this.toast('Username required','error');return;}
+    try{
+      const r=await this.api('POST','/users/invite',{username,email,role});
+      if(r&&r.ok){const d=await r.json();this.toast('Invite sent! OTP: '+d.otp,'success');this.closeModal('invite-modal');this.loadUsers();}
+      else this.toast('Failed to create invite','error');
+    }catch(e){this.toast('Error: '+e.message,'error');}
+  },
+
+  // ── SECURITY ─────────────────────────────────────────────────────
+  async loadSecrets(){
+    const el=document.getElementById('secrets-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/secrets/status');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Could not load secrets</p></div>';return;}
+      const d=await r.json();const secrets=d.secrets||d||{};
+      el.innerHTML=Object.entries(secrets).map(([k,v])=>`<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);font-size:.85em"><span class="status-dot ${v?'dot-green':'dot-red'}"></span><span style="flex:1;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.88em">${k}</span><span class="badge ${v?'badge-green':'badge-red'}">${v?'Configured':'Missing'}</span></div>`).join('');
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Error loading secrets</p></div>';}
+  },
+
+  async loadAudit(){
+    const el=document.getElementById('audit-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/audit/log?limit=10');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Could not load audit log</p></div>';return;}
+      const d=await r.json();const logs=d.entries||d.logs||[];
+      if(!logs.length){el.innerHTML='<div class="empty-state"><p>No audit entries</p></div>';return;}
+      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Result</th></tr></thead><tbody>`+
+        logs.map(l=>`<tr><td class="text-muted" style="font-size:.78em;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace">${(l.timestamp||l.ts||'').substring(11,19)||'--'}</td><td>${l.user||'system'}</td><td>${l.action||l.event||'--'}</td><td><span class="badge ${(l.result&&(l.result.success||l.result.ok))?'badge-green':'badge-gray'}">${(l.result&&(l.result.success||l.result.ok))?'ok':'--'}</span></td></tr>`).join('')+`</tbody></table></div>`;
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Error loading audit log</p></div>';}
+  },
+
+  loadWebhookUrls(){
+    const base=window.location.origin;
+    document.getElementById('webhook-urls').innerHTML=`
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${[['Grafana','/webhooks/grafana'],['CloudWatch (SNS)','/webhooks/cloudwatch'],['OpsGenie','/webhooks/opsgenie'],['PagerDuty','/webhooks/pagerduty']].map(([name,path])=>`
+        <div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+          <span style="font-size:.85em;font-weight:600;width:130px;flex-shrink:0">${name}</span>
+          <code style="flex:1;font-size:.78em;color:var(--cyan);font-family:'SF Mono','Cascadia Code',ui-monospace,monospace">${base+path}</code>
+          <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${base+path}').then(()=>App.toast('Copied!','success'))">Copy</button>
+        </div>`).join('')}
+      </div>`;
+  },
+
+};
+
+document.addEventListener('DOMContentLoaded', () => App.init());
 </script>
 </body>
 </html>
-""", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+"""
+    _html = _html.replace("'{{ aws_region }}'", f"'{_aws_region}'")
+    return HTMLResponse(_html, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -2397,36 +2613,53 @@ def _resolve_auth(
     from app.security.rbac import get_user_role
     username = None
     jwt_role = None
-    if credentials and credentials.credentials:
+    token_provided = bool(credentials and credentials.credentials)
+    if token_provided:
         try:
             from app.core.auth import decode_token
             payload = decode_token(credentials.credentials)
             username = payload.get("sub")
-            jwt_role = payload.get("role")  # trust role embedded in JWT
-        except Exception:
-            pass
+            jwt_role = payload.get("role")
+        except HTTPException:
+            # Token was sent but is invalid/expired — mark as unauthenticated
+            # require_developer / require_admin will raise 401 to trigger browser re-login
+            username = None
+            jwt_role = None
     if not username and x_user:
         username = x_user.strip().lower()
     if not username:
         username = "anonymous"
-    # JWT role takes precedence; fall back to RBAC lookup for X-User / anonymous
     role = jwt_role if jwt_role else get_user_role(username)
-    return AuthContext(username=username, role=role)
+    # Attach whether a (bad) token was attempted — used by stricter guards
+    ctx = AuthContext(username=username, role=role)
+    ctx._bad_token = token_provided and username == "anonymous" and not jwt_role
+    return ctx
 
 def require_admin(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    if getattr(auth, "_bad_token", False):
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
     if auth.role not in ("admin",):
         raise HTTPException(status_code=403, detail="Admin access required")
     return auth
 
 def require_developer(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    if getattr(auth, "_bad_token", False):
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
     if auth.role not in ("admin", "developer"):
         raise HTTPException(status_code=403, detail="Role 'developer' or 'admin' required")
     return auth
 
 def require_viewer(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    # Viewer endpoints allow anonymous access — even a bad token degrades gracefully
     if auth.role not in ("admin", "developer", "viewer"):
         raise HTTPException(status_code=403, detail="Authentication required")
     return auth
+
+def optional_auth(auth: AuthContext = Depends(_resolve_auth)) -> Optional[AuthContext]:
+    """Returns auth context if valid token provided, None otherwise (no 401)."""
+    if auth.role in ("admin", "developer", "viewer"):
+        return auth
+    return None
 
 # ── /auth/me ──────────────────────────────────────────────────────────────────
 
@@ -2885,6 +3118,27 @@ def aws_ec2_console(instance_id: str):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return {"console_output": result}
 
+@app.post("/aws/ec2/{instance_id}/start")
+def aws_ec2_start(instance_id: str, auth: AuthContext = Depends(require_developer)):
+    result = start_ec2_instance(instance_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to start instance"))
+    return result
+
+@app.post("/aws/ec2/{instance_id}/stop")
+def aws_ec2_stop(instance_id: str, auth: AuthContext = Depends(require_developer)):
+    result = stop_ec2_instance(instance_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to stop instance"))
+    return result
+
+@app.post("/aws/ec2/{instance_id}/reboot")
+def aws_ec2_reboot(instance_id: str, auth: AuthContext = Depends(require_developer)):
+    result = reboot_ec2_instance(instance_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to reboot instance"))
+    return result
+
 # CloudWatch Logs
 @app.get("/aws/logs/groups")
 def aws_log_groups(prefix: str = "", limit: int = 50):
@@ -3131,6 +3385,17 @@ def incident_github_pr(head: str, base: str = "main"):
     result = create_pull_request(head, base)
     return {"github_pr": result}
 
+@app.get("/memory/incidents")
+def memory_incidents_list(limit: int = 10):
+    try:
+        from app.memory.vector_db import search_similar_incidents
+        results = search_similar_incidents("", n_results=limit)
+        if results and isinstance(results[0], list):
+            results = results[0]
+        return {"incidents": results or []}
+    except Exception as exc:
+        return {"incidents": [], "error": str(exc)}
+
 @app.post("/memory/incidents")
 def memory_incident(incident: Event):
     record = store_incident(incident.model_dump())
@@ -3138,7 +3403,19 @@ def memory_incident(incident: Event):
 
 @app.post("/security/check")
 def security_check(req: AccessRequest):
-    result = check_access(req.user, req.action)
+    # Map action type → required permission via policy engine, then check role
+    try:
+        from app.policies.policy_engine import PolicyEngine
+        engine = PolicyEngine()
+        required_perm = engine.get_required_permission(req.action)
+        if required_perm:
+            result = check_access(req.user, required_perm)
+            result["action"] = req.action
+            result["required_permission"] = required_perm
+        else:
+            result = check_access(req.user, req.action)
+    except Exception:
+        result = check_access(req.user, req.action)
     return {"access": result}
 
 @app.post("/security/roles")
@@ -3154,27 +3431,53 @@ def security_revoke_role(user: str, x_user: Optional[str] = Header(default=None)
     return {"result": result}
 
 @app.post("/incident/run")
-def incident_run(req: IncidentRunRequest, x_user: Optional[str] = Header(default=None)):
-    """End-to-end autonomous incident response pipeline.
+def incident_run(req: IncidentRunRequest, x_user: Optional[str] = Header(default=None),
+                 auth: Optional[AuthContext] = Depends(optional_auth)):
+    """End-to-end autonomous incident response pipeline (LangGraph v2).
 
-    Collects AWS + K8s + GitHub observability data, runs AI root cause analysis,
-    executes recommended actions (GitHub PR, Jira, Slack, OpsGenie, K8s ops),
-    stores the incident in memory, and returns a full incident report.
-
-    Requires X-User header with 'deploy' permission for auto_remediate=true.
+    Collects AWS + K8s + GitHub context, runs AI root cause analysis via
+    PlannerAgent, gates risky actions through DecisionAgent approval workflow,
+    executes policy-validated actions, validates results, and stores to memory.
     """
+    # Resolve user/role from JWT auth or X-User header
+    resolved_user = (auth.username if auth else None) or x_user or req.user or "system"
+    resolved_role = (auth.role if auth else None) or req.role or "admin"
+
     if req.auto_remediate:
-        _rbac_guard(x_user, "deploy")
-    report = run_incident_pipeline(
+        if auth and auth.role not in ("admin", "developer"):
+            raise HTTPException(status_code=403, detail="deploy permission required for auto_remediate")
+        elif not auth:
+            _rbac_guard(x_user, "deploy")
+
+    import os as _os
+    if req.llm_provider:
+        _os.environ["LLM_PROVIDER"] = req.llm_provider
+
+    # Merge aws_cfg: prefer explicit aws_cfg field, fall back to AWSConfig object
+    aws_cfg = req.aws_cfg or (req.aws.model_dump() if req.aws else {})
+    k8s_cfg = req.k8s_cfg or (req.k8s.model_dump() if req.k8s else {})
+
+    result = run_pipeline_v2(
         incident_id    = req.incident_id,
         description    = req.description,
-        severity       = req.severity,
-        aws_cfg        = req.aws.model_dump() if req.aws else {},
-        k8s_cfg        = req.k8s.model_dump() if req.k8s else {},
         auto_remediate = req.auto_remediate,
-        hours          = req.hours,
+        dry_run        = req.dry_run,
+        metadata       = {
+            "user":          resolved_user,
+            "role":          resolved_role,
+            "aws_cfg":       aws_cfg,
+            "k8s_cfg":       k8s_cfg,
+            "hours":         req.hours,
+            "slack_channel": req.slack_channel,
+        },
     )
-    return report
+
+    # Store state for resume-after-approval
+    if result.get("status") == "awaiting_approval":
+        cid = result.get("correlation_id")
+        if cid:
+            _PENDING_PIPELINE_STATES[cid] = result
+    return result
 
 
 # ── v2: LangGraph multi-agent pipeline ───────────────────────
@@ -3189,33 +3492,27 @@ class IncidentRunV2Request(BaseModel):
     k8s_cfg:        Optional[Dict[str, Any]] = None
     hours:          int  = 2
     slack_channel:  str  = "#incidents"
+    llm_provider:   str  = ""
+    metadata:       Optional[Dict[str, Any]] = None
 
 @app.post("/v2/incident/run")
 def incident_run_v2(req: IncidentRunV2Request,
-                    x_user: Optional[str] = Header(default=None)):
-    """LangGraph multi-agent incident pipeline (v2).
-
-    Runs: Context Collection → PlannerAgent → DecisionAgent →
-          Executor (policy-gated) → Validator → MemoryAgent.
-
-    Requires X-User header with 'deploy' permission when auto_remediate=true.
-    """
-    if req.auto_remediate:
-        _rbac_guard(x_user, "deploy")
-    result = run_pipeline_v2(
+                    auth: AuthContext = Depends(require_developer)):
+    """Alias for /incidents/run — kept for backwards compatibility."""
+    unified = IncidentRunRequest(
         incident_id    = req.incident_id,
         description    = req.description,
         auto_remediate = req.auto_remediate,
-        metadata       = {
-            "user":          req.user,
-            "role":          req.role,
-            "aws_cfg":       req.aws_cfg or {},
-            "k8s_cfg":       req.k8s_cfg or {},
-            "hours":         req.hours,
-            "slack_channel": req.slack_channel,
-        },
+        hours          = req.hours,
+        user           = req.user,
+        role           = req.role,
+        aws_cfg        = req.aws_cfg,
+        k8s_cfg        = req.k8s_cfg,
+        slack_channel  = req.slack_channel,
+        llm_provider   = req.llm_provider,
+        metadata       = req.metadata,
     )
-    return result
+    return incident_run(unified, x_user=None, auth=auth)
 
 
 # ── GitHub PR Review ──────────────────────────────────────────
@@ -3456,7 +3753,7 @@ class SecretsPayload(BaseModel):
 
 
 @app.get("/secrets/status")
-def secrets_status(auth: AuthContext = Depends(require_viewer)):
+def secrets_status(auth: AuthContext = Depends(require_admin)):
     """Return which env vars are configured (boolean only — never exposes values)."""
     status: Dict[str, Dict[str, bool]] = {}
     for group, keys in _SECRET_SCHEMA.items():
@@ -3488,6 +3785,8 @@ class ChatPayload(BaseModel):
     pending_action: Optional[str] = None  # action name carried from previous turn
     pending_params: Optional[Dict] = None # params carried from previous turn
     dry_run: bool = False                  # if True: describe what would happen, don't execute
+    session_id: Optional[str] = None      # conversation memory session ID
+    incident_context: Optional[Dict] = None  # optional war-room context
 
 class WarRoomRequest(BaseModel):
     incident_id:  str
@@ -3961,12 +4260,21 @@ Rules:
 - Output ONLY valid JSON, no markdown, nothing else"""
 
 
-def _detect_intent(message: str, force_provider: str = "") -> dict:
-    """Use LLM to classify whether message is an action or a question."""
+def _detect_intent(message: str, force_provider: str = "", conv_context: str = "") -> dict:
+    """Use LLM to classify whether message is an action or a question.
+
+    conv_context: last few turns of conversation so pronouns like 'that'/'it' can be resolved.
+    """
     import json as _json
     from app.llm.claude import _llm, _extract_json
+    content = message
+    if conv_context:
+        content = (
+            f"=== RECENT CONVERSATION (for pronoun/context resolution) ===\n{conv_context}\n"
+            f"=== NEW MESSAGE ===\n{message}"
+        )
     try:
-        raw = _llm(_INTENT_SYSTEM, [{"role": "user", "content": message}],
+        raw = _llm(_INTENT_SYSTEM, [{"role": "user", "content": content}],
                    max_tokens=400, force_provider=force_provider)
         return _json.loads(_extract_json(raw))
     except Exception:
@@ -4118,12 +4426,64 @@ def _chat_inner(payload: ChatPayload, x_user: str):
             reply = "Got it — operation cancelled."
 
     if not reply:
-        intent_data = _detect_intent(payload.message, force_prov)
+        # Fetch recent conversation history to pass as context to intent detection
+        # so pronouns like "that", "it", "the instance" can be resolved
+        _conv_context = ""
+        try:
+            from app.chat.memory import get_history as _get_hist
+            _sid_for_ctx = payload.session_id or f"chat-{x_user}"
+            _hist = _get_hist(_sid_for_ctx, max_messages=6)
+            if _hist:
+                _conv_context = "\n".join(
+                    f"{getattr(m,'role','?').upper()}: {getattr(m,'content','')[:300]}"
+                    for m in _hist
+                )
+        except Exception:
+            pass
+        intent_data = _detect_intent(payload.message, force_prov, conv_context=_conv_context)
 
         if intent_data.get("intent") == "action":
             action_name = intent_data.get("action", "")
             params      = intent_data.get("params", {})
             action_def  = _ACTION_CATALOGUE.get(action_name)
+
+            # ── EC2 instance ID validation ──────────────────────────────────
+            # If action needs an instance_id but it's vague/invalid, resolve from AWS
+            if action_name in ("start_ec2", "stop_ec2", "reboot_ec2"):
+                raw_iid = params.get("instance_id", "")
+                if not raw_iid or not str(raw_iid).startswith("i-"):
+                    # Try to resolve from session EC2 cache or live AWS
+                    from app.chat.intelligence import _ec2_session_cache
+                    cached = _ec2_session_cache.get(sid, [])
+                    if not cached:
+                        try:
+                            from app.integrations.aws_ops import list_ec2_instances
+                            result = list_ec2_instances()
+                            instances = result.get("instances", [])
+                            if instances:
+                                _ec2_session_cache[sid] = [
+                                    {"id": i["id"], "name": i.get("name",""), "state": i.get("state","")}
+                                    for i in instances
+                                ]
+                                cached = _ec2_session_cache[sid]
+                        except Exception:
+                            pass
+                    if len(cached) == 1:
+                        params = dict(params)
+                        params["instance_id"] = cached[0]["id"]
+                    elif len(cached) > 1:
+                        names = ", ".join(f'{i["id"]} ({i.get("name","?")}, {i.get("state","?")})' for i in cached[:5])
+                        reply = f"Multiple EC2 instances found: {names}\n\nWhich one should I {action_name.replace('_ec2','')}? Please specify the instance ID (e.g. `i-0abc1234`)."
+                        used_provider = force_prov or _provider or "none"
+                        return {"reply": reply, "sources": [], "llm_provider": used_provider,
+                                "action_taken": None, "action_result": None, "action_count": _chat_action_count,
+                                "pending_action": None, "pending_params": None, "needs_confirm": False}
+                    else:
+                        reply = "I couldn't find any EC2 instances in your AWS account."
+                        used_provider = force_prov or _provider or "none"
+                        return {"reply": reply, "sources": [], "llm_provider": used_provider,
+                                "action_taken": None, "action_result": None, "action_count": _chat_action_count,
+                                "pending_action": None, "pending_params": None, "needs_confirm": False}
 
             if not action_def:
                 reply = (
@@ -4165,16 +4525,44 @@ def _chat_inner(payload: ChatPayload, x_user: str):
 
     # ── Path C: general question / conversation ───────────────
     if not reply:
-        context: dict = {}
+        import uuid as _uuid, logging as _log_m
+        sid = payload.session_id or f"chat-{x_user}-default"
         try:
-            context = collect_all_context(hours=2)
-        except Exception:
-            pass
-        reply = chat_devops(payload.message, history, context, force_provider=force_prov)
+            from app.chat.intelligence import chat_with_intelligence
+            reply = chat_with_intelligence(
+                message=payload.message,
+                session_id=sid,
+                incident_context=payload.incident_context,
+                preferred_provider=force_prov or None,
+            )
+        except Exception as exc:
+            _log_m.getLogger("chat").error("chat_with_intelligence failed: %s", exc, exc_info=True)
+            # Fallback: build history from memory if available, then use basic LLM
+            fallback_history = history  # payload.history (may be empty)
+            try:
+                from app.chat.memory import get_history as _gh
+                _mh = _gh(sid, max_messages=10)
+                if _mh:
+                    fallback_history = [
+                        {"role": getattr(m, "role", "user"), "content": getattr(m, "content", "")}
+                        for m in _mh
+                    ]
+            except Exception:
+                pass
+            context: dict = {}
+            try:
+                context = collect_all_context(hours=2)
+            except Exception:
+                pass
+            reply = chat_devops(payload.message, fallback_history, context, force_provider=force_prov)
 
     used_provider = force_prov or _provider or "none"
+    import uuid as _uuid2
+    sid_out = payload.session_id or f"chat-{x_user}-{_uuid2.uuid4().hex[:8]}"
     return {
         "reply":          reply,
+        "answer":         reply,   # alias so UI can use either field
+        "session_id":     sid_out,
         "sources":        [],
         "llm_provider":   used_provider,
         "action_taken":   action_taken,
@@ -4388,9 +4776,10 @@ def k8s_diagnose(req: AWSDiagnoseRequest):
 
 # Incidents — canonical paths matching UI
 @app.post("/incidents/run")
-def incidents_run_alias(req: IncidentRunRequest, x_user: Optional[str] = Header(default=None)):
-    """Alias for /incident/run — matches the documented path."""
-    return incident_run(req, x_user)
+def incidents_run_alias(req: IncidentRunRequest, x_user: Optional[str] = Header(default=None),
+                        auth: Optional[AuthContext] = Depends(optional_auth)):
+    """Primary incident pipeline endpoint — LangGraph multi-agent (same as /incident/run)."""
+    return incident_run(req, x_user, auth)
 
 @app.post("/incidents/run/async")
 async def incidents_run_async(req: IncidentRunRequest, x_user: Optional[str] = Header(default=None)):
@@ -4470,16 +4859,17 @@ def aws_cw_logs(log_group: str = "", minutes: int = 30):
     return {"log_groups": result}
 
 @app.get("/aws/context")
-def aws_context_snapshot():
-    """Full AWS observability snapshot."""
-    result = collect_diagnosis_context()
+def aws_context_snapshot(resource_type: str = "ec2", resource_id: str = ""):
+    """Full AWS observability snapshot for a given resource."""
+    result = collect_diagnosis_context(resource_type=resource_type, resource_id=resource_id)
     return {"aws_context": result}
 
 @app.get("/aws/synthesize")
-def aws_synthesize(incident_id: str = "snapshot", description: str = "infrastructure status review"):
+def aws_synthesize(incident_id: str = "snapshot", description: str = "infrastructure status review",
+                   resource_type: str = "ec2", resource_id: str = ""):
     """AI synthesis of current AWS infrastructure state."""
     from app.llm.claude import synthesize_incident
-    context = collect_diagnosis_context()
+    context = collect_diagnosis_context(resource_type=resource_type, resource_id=resource_id)
     result = synthesize_incident({"incident_id": incident_id, "description": description, "aws_context": context})
     return {"synthesis": result}
 
@@ -4573,3 +4963,326 @@ async def websocket_events(websocket: WebSocket):
             })
     except WebSocketDisconnect:
         pass
+
+# ── Approvals ────────────────────────────────────────────────────────────────
+
+@app.get("/approvals/pending", tags=["approvals"])
+def list_pending_approvals_endpoint(auth: AuthContext = Depends(require_viewer)):
+    try:
+        from app.incident.approval import list_pending_approvals
+        approvals = list_pending_approvals()
+        return {"approvals": [vars(a) for a in approvals]}
+    except Exception as e:
+        return {"approvals": [], "error": str(e)}
+
+class ApprovalDecision(BaseModel):
+    approved_action_indices: List[int] = []
+    reason: Optional[str] = None
+
+@app.post("/approvals/{correlation_id}/approve", tags=["approvals"])
+def approve_actions_endpoint(correlation_id: str, req: ApprovalDecision, auth: AuthContext = Depends(require_developer)):
+    try:
+        from app.incident.approval import approve_actions
+        result = approve_actions(correlation_id, req.approved_action_indices, auth.username)
+        return {"success": True, "approval": vars(result)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/approvals/{correlation_id}/reject", tags=["approvals"])
+def reject_approval_endpoint(correlation_id: str, req: ApprovalDecision, auth: AuthContext = Depends(require_developer)):
+    try:
+        from app.incident.approval import reject_approval
+        result = reject_approval(correlation_id, req.reason or "Rejected by user", auth.username)
+        # Remove from pending states
+        _PENDING_PIPELINE_STATES.pop(correlation_id, None)
+        return {"success": True, "approval": vars(result)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/approvals/{correlation_id}/resume", tags=["approvals"])
+def resume_approved_pipeline(
+    correlation_id: str,
+    auth: AuthContext = Depends(require_developer),
+):
+    """Resume an awaiting-approval pipeline after human approval.
+
+    Retrieves the paused pipeline state, filters to only approved actions,
+    and runs execute → validate → store_memory using the existing context
+    so no re-collection or re-planning is needed.
+    """
+    from app.incident.approval import get_approval_request, STATUS_APPROVED
+    from app.execution.executor import Executor
+    from app.execution.validator import Validator
+    from app.agents.memory.agent import MemoryAgent
+    import datetime as _dt
+
+    # Check approval record exists and is approved
+    approval = get_approval_request(correlation_id)
+    if not approval:
+        raise HTTPException(status_code=404, detail=f"Approval {correlation_id} not found")
+    if approval.status != STATUS_APPROVED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Approval is in state '{approval.status}', not approved",
+        )
+
+    # Retrieve the saved pipeline state
+    saved_state = _PENDING_PIPELINE_STATES.get(correlation_id)
+    if not saved_state:
+        raise HTTPException(
+            status_code=404,
+            detail="Pipeline state not found — it may have expired. Re-run the incident.",
+        )
+
+    # Build a resumable state: restore plan but allow execution
+    resume_state = dict(saved_state)
+    resume_state["auto_remediate"]         = True
+    resume_state["requires_human_approval"] = False
+    resume_state["approval_reason"]         = f"Manually approved by {auth.username}"
+    resume_state["status"]                  = "running"
+
+    # Filter plan actions to only those approved
+    plan = resume_state.get("plan") or {}
+    all_actions = plan.get("actions", [])
+    if approval.approved_action_indices:
+        approved_actions = [
+            all_actions[i] for i in approval.approved_action_indices
+            if i < len(all_actions)
+        ]
+        resume_state["plan"] = {**plan, "actions": approved_actions}
+
+    try:
+        # Execute approved actions
+        executor = Executor()
+        resume_state = executor.run(resume_state)
+
+        # Validate
+        validator = Validator()
+        resume_state = validator.run(resume_state)
+
+        # Store memory
+        memory_agent = MemoryAgent()
+        resume_state = memory_agent.run(resume_state)
+
+        resume_state["status"]       = "completed"
+        resume_state["completed_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        resume_state["resumed_by"]   = auth.username
+
+    except Exception as exc:
+        resume_state["status"] = "failed"
+        resume_state["errors"] = resume_state.get("errors", []) + [str(exc)]
+
+    # Clean up pending state
+    _PENDING_PIPELINE_STATES.pop(correlation_id, None)
+    return resume_state
+
+# ── War Room AI ───────────────────────────────────────────────────────────────
+
+class WarRoomQuestion(BaseModel):
+    question: str
+    asked_by: Optional[str] = None
+
+@app.post("/warroom/{war_room_id}/ask", tags=["warroom"])
+async def ask_war_room_ai(war_room_id: str, req: WarRoomQuestion, auth: AuthContext = Depends(require_viewer)):
+    try:
+        from app.incident.war_room_intelligence import answer_war_room_question
+        answer = answer_war_room_question(war_room_id, req.question, req.asked_by or auth.username)
+        return {"answer": answer, "war_room_id": war_room_id}
+    except Exception as e:
+        return {"answer": f"War room intelligence unavailable: {e}", "war_room_id": war_room_id}
+
+@app.get("/warroom/active", tags=["warroom"])
+def list_active_war_rooms(auth: AuthContext = Depends(require_viewer)):
+    try:
+        from app.incident.war_room_intelligence import list_active_war_rooms as _list
+        return {"war_rooms": _list()}
+    except Exception as e:
+        return {"war_rooms": [], "error": str(e)}
+
+
+class SlackSendRequest(BaseModel):
+    message:  str
+    sent_by:  str = "user"
+
+
+@app.get("/warroom/{war_room_id}/slack-history", tags=["warroom"])
+def get_war_room_slack_history(war_room_id: str, limit: int = 30, auth: AuthContext = Depends(require_viewer)):
+    """Fetch recent messages from the Slack channel linked to this war room."""
+    try:
+        from app.incident.war_room_intelligence import _war_rooms
+        import datetime as _dt
+        wr = _war_rooms.get(war_room_id)
+        channel = wr.slack_channel if wr else ""
+        if not channel:
+            return {"messages": [], "channel": "", "note": "No Slack channel linked to this war room"}
+        from app.integrations.slack import _client as _slack_client
+        sc = _slack_client()
+        # resolve channel name to ID
+        ch_id = channel
+        if not channel.startswith("C"):  # not already an ID
+            name = channel.lstrip("#")
+            result = sc.conversations_list(types="public_channel,private_channel", limit=500)
+            for ch in result.get("channels", []):
+                if ch["name"] == name:
+                    ch_id = ch["id"]
+                    break
+        resp = sc.conversations_history(channel=ch_id, limit=limit)
+        messages = []
+        for m in reversed(resp.get("messages", [])):
+            if m.get("subtype"):
+                continue  # skip join/leave system messages
+            ts = float(m.get("ts", 0))
+            time_str = _dt.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else ""
+            # try to resolve user display name
+            username = m.get("username") or m.get("user", "unknown")
+            messages.append({"username": username, "text": m.get("text", ""), "time": time_str, "ts": m.get("ts","")})
+        return {"messages": messages, "channel": channel, "count": len(messages)}
+    except Exception as e:
+        return {"messages": [], "channel": "", "error": str(e)}
+
+
+@app.post("/warroom/{war_room_id}/slack-send", tags=["warroom"])
+def send_war_room_slack_message(war_room_id: str, req: SlackSendRequest, auth: AuthContext = Depends(require_viewer)):
+    """Send a message to the Slack channel linked to this war room."""
+    try:
+        from app.incident.war_room_intelligence import _war_rooms
+        wr = _war_rooms.get(war_room_id)
+        channel = wr.slack_channel if wr else ""
+        if not channel:
+            raise HTTPException(status_code=400, detail="No Slack channel linked to this war room")
+        from app.integrations.slack import post_message
+        text = f"*{req.sent_by}* (via NexusOps): {req.message}"
+        result = post_message(channel=channel, text=text)
+        return {"success": result.get("ok", False), "channel": channel}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── Post-Mortem ────────────────────────────────────────────────────────────────
+
+class PostMortemRequest(BaseModel):
+    incident_id:       str
+    description:       Optional[str] = None
+    root_cause:        Optional[str] = None
+    severity:          Optional[str] = "SEV2"
+    started_at:        Optional[str] = None
+    resolved_at:       Optional[str] = None
+    actions_taken:     Optional[list] = []
+    validation:        Optional[dict] = {}
+    errors:            Optional[list] = []
+    save_to_disk:      bool = False
+
+@app.post("/incidents/{incident_id}/post-mortem", tags=["incidents"])
+def generate_post_mortem_endpoint(
+    incident_id: str,
+    req: PostMortemRequest,
+    auth: AuthContext = Depends(require_viewer),
+):
+    """Generate an AI-written blameless post-mortem for a resolved incident."""
+    try:
+        from app.incident.post_mortem import generate_post_mortem, format_as_markdown, save_post_mortem
+        state = {
+            "incident_id":    incident_id,
+            "description":    req.description or "",
+            "root_cause":     req.root_cause or "",
+            "severity":       req.severity,
+            "started_at":     req.started_at or "",
+            "resolved_at":    req.resolved_at or "",
+            "actions_taken":  req.actions_taken or [],
+            "validation":     req.validation or {},
+            "errors":         req.errors or [],
+        }
+        pm       = generate_post_mortem(state)
+        markdown = format_as_markdown(pm)
+        result   = {
+            "incident_id":          pm.incident_id,
+            "title":                pm.title,
+            "severity":             pm.severity,
+            "duration_minutes":     pm.duration_minutes,
+            "root_cause":           pm.root_cause,
+            "contributing_factors": pm.contributing_factors,
+            "impact":               pm.impact,
+            "resolution":           pm.resolution,
+            "action_items":         [vars(a) for a in pm.action_items],
+            "lessons_learned":      pm.lessons_learned,
+            "prevention_steps":     pm.prevention_steps,
+            "generated_at":         pm.generated_at,
+            "markdown":             markdown,
+        }
+        if req.save_to_disk:
+            saved_path = save_post_mortem(pm)
+            result["saved_to"] = saved_path
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Post-mortem generation failed: {e}")
+
+# /chat/v2 is retired — /chat now uses the intelligent engine directly
+
+@app.get("/chat/sessions", tags=["chat"])
+def list_chat_sessions(auth: AuthContext = Depends(require_viewer)):
+    try:
+        from app.chat.memory import list_sessions
+        return {"sessions": list_sessions()}
+    except Exception as e:
+        return {"sessions": [], "error": str(e)}
+
+# ── Webhook receivers ─────────────────────────────────────────────────────────
+
+@app.post("/webhooks/grafana", tags=["webhooks"])
+async def grafana_webhook(payload: Dict[str, Any]):
+    try:
+        from app.integrations.webhooks import process_grafana_webhook
+        return process_grafana_webhook(payload)
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@app.post("/webhooks/cloudwatch", tags=["webhooks"])
+async def cloudwatch_webhook(payload: Dict[str, Any]):
+    try:
+        from app.integrations.webhooks import process_cloudwatch_webhook
+        return process_cloudwatch_webhook(payload)
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@app.post("/webhooks/opsgenie", tags=["webhooks"])
+async def opsgenie_webhook(payload: Dict[str, Any]):
+    try:
+        from app.integrations.webhooks import process_opsgenie_webhook
+        return process_opsgenie_webhook(payload)
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+# ── Post-mortem ───────────────────────────────────────────────────────────────
+
+class PostMortemRequest(BaseModel):
+    incident_id: str
+    incident_state: Dict[str, Any]
+
+# ── Cost Analysis ─────────────────────────────────────────────────────────────
+
+class CostAnalysisRequest(BaseModel):
+    actions: List[Dict[str, Any]]
+    aws_cfg: Optional[Dict[str, Any]] = None
+
+@app.post("/cost/analyze", tags=["cost"])
+async def analyze_costs_endpoint(req: CostAnalysisRequest, auth: AuthContext = Depends(require_viewer)):
+    try:
+        from app.cost.analyzer import analyze_action_costs, format_cost_report
+        import dataclasses as _dc
+        report = analyze_action_costs(req.actions, req.aws_cfg)
+        report_dict = _dc.asdict(report)
+        return {"report": report_dict, "formatted": format_cost_report(report)}
+    except Exception as e:
+        return {"report": None, "formatted": f"Cost analysis unavailable: {e}", "error": str(e)}
+
+@app.get("/cost/dashboard", tags=["cost"])
+async def cost_dashboard_endpoint(auth: AuthContext = Depends(require_viewer)):
+    """Full cost dashboard: MTD spend, forecast, service breakdown, 6-month trend."""
+    try:
+        from app.cost.analyzer import fetch_cost_dashboard
+        return fetch_cost_dashboard()
+    except Exception as e:
+        return {"available": False, "error": str(e), "current_monthly_spend": 0.0,
+                "last_month_spend": 0.0, "forecast_month_end": 0.0,
+                "service_breakdown": [], "monthly_trend": []}

@@ -10,6 +10,7 @@ class PipelineState(TypedDict, total=False):
     incident_id:    str
     description:    str
     auto_remediate: bool
+    dry_run:        bool
     # caller-supplied extras: user, role, aws_cfg, k8s_cfg, hours, slack_channel
     metadata:       dict[str, Any]
 

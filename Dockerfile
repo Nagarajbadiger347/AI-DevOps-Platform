@@ -1,17 +1,17 @@
 # Stage 1: deps
-FROM python:3.11-slim AS deps
+FROM python:3.13-slim AS deps
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Stage 2: final
-FROM python:3.11-slim AS final
+FROM python:3.13-slim AS final
 WORKDIR /app
 
 # non-root user
 RUN useradd -r -u 1001 -g root nexusops
 
-COPY --from=deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=deps /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=deps /usr/local/bin /usr/local/bin
 COPY --chown=nexusops:root . .
 

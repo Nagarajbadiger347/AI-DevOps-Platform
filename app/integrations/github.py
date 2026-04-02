@@ -360,11 +360,12 @@ def create_incident_pr(incident_id: str, title: str, body: str,
 
         pr = repo.create_pull(title=title, body=body, head=branch_name, base=base)
         return {
-            "success":   True,
-            "branch":    branch_name,
-            "pr_number": pr.number,
-            "url":       pr.html_url,
-            "repo":      repo.full_name,
+            "success":     True,
+            "branch":      branch_name,
+            "branch_name": branch_name,
+            "pr_number":   pr.number,
+            "url":         pr.html_url,
+            "repo":        repo.full_name,
         }
     except RuntimeError as e:
         return {"success": False, "error": str(e)}

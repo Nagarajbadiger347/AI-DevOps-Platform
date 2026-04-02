@@ -39,3 +39,8 @@ Thumbs.db
 
 # Vector/runtime databases
 chroma_db/
+
+# Runtime data files
+post_mortems/
+approvals.json
+*.pyc

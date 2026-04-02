@@ -32,9 +32,10 @@ class Validator:
                     for a in failed_actions
                 ]
             }
-            logger.warning("validation_failed_execution_errors",
-                           incident_id=incident_id,
-                           failed_count=len(failed_actions))
+            logger.warning("validation_failed_execution_errors", extra={
+                "incident_id": incident_id,
+                "failed_count": len(failed_actions),
+            })
             return state
 
         # Re-check K8s health if any K8s action was executed
@@ -44,14 +45,12 @@ class Validator:
             if not k8s_result["healthy"]:
                 state["validation_passed"] = False
                 state["validation_detail"] = k8s_result
-                logger.warning("validation_failed_k8s_unhealthy",
-                               incident_id=incident_id,
-                               detail=k8s_result)
+                logger.warning("validation_failed_k8s_unhealthy", extra={"incident_id": incident_id, "detail": k8s_result})
                 return state
 
         state["validation_passed"] = True
         state["validation_detail"] = {"reason": "all checks passed"}
-        logger.info("validation_passed", incident_id=incident_id)
+        logger.info("validation_passed", extra={"incident_id": incident_id})
         return state
 
     @staticmethod
@@ -79,6 +78,11 @@ class Validator:
                 "unhealthy_pods": unhealthy[:10],  # cap list size
             }
         except Exception as exc:
-            # Can't reach K8s — treat as inconclusive (pass)
-            logger.warning("validator_k8s_check_failed", error=str(exc))
-            return {"healthy": True, "reason": f"k8s unreachable: {exc}"}
+            # Can't reach K8s — fail validation rather than silently passing
+            logger.warning("validator_k8s_check_failed", extra={"error": str(exc)})
+            return {
+                "healthy": False,
+                "validation_passed": False,
+                "reason": "cannot verify k8s state — unreachable",
+                "error": str(exc),
+            }

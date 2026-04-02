@@ -25,6 +25,7 @@ import random
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -94,7 +95,7 @@ def consume_invite(token: str) -> None:
         _save()
 
 
-def get_invite_username(token: str) -> str | None:
+def get_invite_username(token: str) -> Optional[str]:
     """Return username for a token without consuming it."""
     inv = _invites.get(token)
     if not inv:

@@ -63,13 +63,14 @@ def collect_context(state: PipelineState) -> PipelineState:
         state.get("description", ""), n=5
     )
 
-    logger.info("context_collected", extra={
-        "incident_id": state.get("incident_id"),
-        "aws_ok": state["aws_context"].get("_data_available", False),
-        "k8s_ok": state["k8s_context"].get("_data_available", False),
-        "github_ok": state["github_context"].get("_data_available", False),
-        "similar_incidents": len(state["similar_incidents"]),
-    })
+    logger.info(
+        "context_collected",
+        incident_id=state.get("incident_id"),
+        aws_ok=state["aws_context"].get("_data_available", False),
+        k8s_ok=state["k8s_context"].get("_data_available", False),
+        github_ok=state["github_context"].get("_data_available", False),
+        similar_incidents=len(state["similar_incidents"]),
+    )
     return state
 
 
@@ -99,11 +100,10 @@ def escalate(state: PipelineState) -> PipelineState:
     incident_id = state.get("incident_id", "unknown")
     last_error  = (state.get("errors") or ["unknown"])[-1]
 
-    logger.warning("escalating_incident", extra={
-        "incident_id": incident_id,
-        "retry_count": state.get("retry_count", 0),
-        "last_error": last_error,
-    })
+    logger.warning("escalating_incident",
+                   incident_id=incident_id,
+                   retry_count=state.get("retry_count", 0),
+                   last_error=last_error)
 
     try:
         from app.integrations.slack import post_message
@@ -117,7 +117,7 @@ def escalate(state: PipelineState) -> PipelineState:
             ),
         )
     except Exception as exc:
-        logger.warning("escalate_slack_failed", extra={"error": str(exc)})
+        logger.warning("escalate_slack_failed", error=str(exc))
 
     try:
         from app.integrations.opsgenie import notify_on_call
@@ -126,7 +126,7 @@ def escalate(state: PipelineState) -> PipelineState:
             alias=f"escalation-{incident_id}",
         )
     except Exception as exc:
-        logger.warning("escalate_opsgenie_failed", extra={"error": str(exc)})
+        logger.warning("escalate_opsgenie_failed", error=str(exc))
 
     state["status"]       = "escalated"
     state["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -138,12 +138,9 @@ def escalate(state: PipelineState) -> PipelineState:
 
 def _route_after_decide(state: PipelineState) -> str:
     if state.get("requires_human_approval"):
-        state["status"]       = "awaiting_approval"
-        state["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        logger.info("pipeline_awaiting_approval", extra={
-            "incident_id": state.get("incident_id"),
-            "reason": state.get("approval_reason"),
-        })
+        logger.info("pipeline_awaiting_approval",
+                    incident_id=state.get("incident_id"),
+                    reason=state.get("approval_reason"))
         return "awaiting_approval"
 
     actions = state.get("plan", {}).get("actions", [])
@@ -157,10 +154,9 @@ def _route_after_validate(state: PipelineState) -> str:
     if state.get("validation_passed"):
         return "store_memory"
     if state.get("retry_count", 0) < _MAX_RETRIES:
-        logger.info("pipeline_retrying", extra={
-            "incident_id": state.get("incident_id"),
-            "retry_count": state.get("retry_count"),
-        })
+        logger.info("pipeline_retrying",
+                    incident_id=state.get("incident_id"),
+                    retry_count=state.get("retry_count"))
         return "execute"
     return "escalate"
 

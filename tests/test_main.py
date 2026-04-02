@@ -10,14 +10,13 @@ def test_root():
     response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "Nagaraj" in response.text
-    assert "AI DevOps" in response.text
+    assert "NexusOps" in response.text
 
 
 def test_health():
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"
 
 
 def test_correlate_no_events():
@@ -36,9 +35,10 @@ def test_correlate_sample_event():
 
 
 def test_llm_analyze():
-    # Without ANTHROPIC_API_KEY configured, the fallback rca is "Sample root cause"
+    # Mock the LLM provider as None to hit the no-API-key fallback path
     body = {"incident_id": "i1", "details": {"info": "test"}}
-    response = client.post("/llm/analyze", json=body)
+    with patch("app.llm.claude._provider", None):
+        response = client.post("/llm/analyze", json=body)
     assert response.status_code == 200
     assert response.json()["analysis"]["rca"] == "Sample root cause"
 
@@ -59,13 +59,17 @@ def test_check_aws():
 
 
 def test_incident_endpoints():
-    r2 = client.post("/incident/jira")
-    r3 = client.post("/incident/opsgenie")
+    # Mock Jira and OpsGenie so they don't hit real external APIs
+    with patch("app.orchestrator.main.create_incident", return_value={"success": True, "key": "INC-1"}):
+        r2 = client.post("/incident/jira")
+    with patch("app.orchestrator.main.notify_on_call", return_value={"notified": True, "alert_id": "mock-alert"}):
+        r3 = client.post("/incident/opsgenie")
     assert r2.status_code == 200
     assert r3.status_code == 200
     # War-room: mock Slack so we get a real room_url back
     mock_slack = MagicMock()
     mock_slack.chat_postMessage.return_value = {"ts": "12345"}
+    mock_slack.conversations_create.return_value = {"channel": {"id": "C123", "name": "inc-test"}}
     with patch("app.integrations.slack.WebClient", return_value=mock_slack), \
          patch("app.integrations.slack.SLACK_BOT_TOKEN", "mock-token"):
         r1 = client.post("/incident/war-room")
@@ -460,37 +464,40 @@ def test_aws_diagnose():
 
 # ── Incident pipeline (/incident/run) ─────────────────────────
 
+# v2 LangGraph pipeline response format
 _MOCK_PIPELINE_REPORT = {
-    "incident_id":       "INC-001",
-    "started_at":        "2024-01-01T00:00:00",
-    "completed_at":      "2024-01-01T00:00:05",
-    "description":       "High error rate on API",
-    "reported_severity": "high",
-    "summary":           "Service is returning 500 errors due to OOM",
-    "root_cause":        "Memory leak in user-service pod",
-    "confidence":        0.9,
-    "ai_severity":       "critical",
-    "findings":          ["Pod OOM killed 3 times in 2 hours"],
-    "observability": {
-        "aws_collected":    False,
-        "k8s_collected":    True,
-        "github_collected": True,
+    "incident_id":    "INC-001",
+    "correlation_id": "test-corr-id",
+    "status":         "completed",
+    "started_at":     "2024-01-01T00:00:00",
+    "completed_at":   "2024-01-01T00:00:05",
+    "description":    "High error rate on API",
+    "auto_remediate": False,
+    "plan": {
+        "root_cause":  "Memory leak in user-service pod",
+        "confidence":  0.9,
+        "risk":        "high",
+        "actions": [
+            {"type": "github_pr", "reason": "Fix memory leak"},
+        ],
     },
-    "auto_remediate":    False,
-    "actions_taken": [
+    "executed_actions": [
         {
             "type":   "github_pr",
-            "reason": "Fix memory leak",
+            "status": "ok",
             "result": {"success": True, "pr_number": 42, "url": "https://github.com/test/pr/42"},
         }
     ],
-    "raw_context": {"aws": {}, "k8s": {}, "github": {}},
+    "blocked_actions":        [],
+    "validation_passed":      True,
+    "requires_human_approval": False,
+    "errors":                 [],
 }
 
 
 def test_incident_run_basic():
-    """Pipeline endpoint returns full incident report when pipeline is mocked."""
-    with patch("app.orchestrator.main.run_incident_pipeline", return_value=_MOCK_PIPELINE_REPORT):
+    """Pipeline endpoint returns v2 LangGraph report when pipeline is mocked."""
+    with patch("app.orchestrator.main.run_pipeline_v2", return_value=_MOCK_PIPELINE_REPORT):
         response = client.post("/incident/run", json={
             "incident_id": "INC-001",
             "description": "High error rate on API",
@@ -499,24 +506,28 @@ def test_incident_run_basic():
     assert response.status_code == 200
     data = response.json()
     assert data["incident_id"] == "INC-001"
-    assert data["root_cause"] == "Memory leak in user-service pod"
-    assert data["confidence"] == 0.9
-    assert data["ai_severity"] == "critical"
-    assert len(data["actions_taken"]) == 1
-    assert data["actions_taken"][0]["type"] == "github_pr"
+    assert data["plan"]["root_cause"] == "Memory leak in user-service pod"
+    assert data["plan"]["confidence"] == 0.9
+    assert data["status"] == "completed"
+    assert len(data["executed_actions"]) == 1
+    assert data["executed_actions"][0]["type"] == "github_pr"
 
 
 def test_incident_run_with_aws_k8s():
-    """Pipeline endpoint forwards aws/k8s config to the pipeline correctly."""
+    """Pipeline endpoint forwards aws/k8s config to the v2 pipeline correctly."""
     captured = {}
 
-    def fake_pipeline(**kwargs):
-        captured.update(kwargs)
+    def fake_pipeline(incident_id, description, auto_remediate, metadata):
+        captured["incident_id"]    = incident_id
+        captured["auto_remediate"] = auto_remediate
+        captured["aws_cfg"]        = metadata.get("aws_cfg", {})
+        captured["k8s_cfg"]        = metadata.get("k8s_cfg", {})
+        captured["hours"]          = metadata.get("hours")
         return _MOCK_PIPELINE_REPORT
 
     from app.security import rbac as _rbac_mod
     _rbac_mod.assign_role("pipeline-test-user", "admin")
-    with patch("app.orchestrator.main.run_incident_pipeline", side_effect=fake_pipeline):
+    with patch("app.orchestrator.main.run_pipeline_v2", side_effect=fake_pipeline):
         response = client.post("/incident/run", json={
             "incident_id":    "INC-002",
             "description":    "ECS tasks crashing",
@@ -528,7 +539,6 @@ def test_incident_run_with_aws_k8s():
         }, headers={"X-User": "pipeline-test-user"})
     assert response.status_code == 200
     assert captured["incident_id"] == "INC-002"
-    assert captured["severity"] == "critical"
     assert captured["aws_cfg"]["resource_type"] == "ecs"
     assert captured["k8s_cfg"]["namespace"] == "production"
     assert captured["auto_remediate"] is True
@@ -542,18 +552,19 @@ def test_incident_run_missing_fields():
 
 
 def test_incident_run_auto_remediate_false():
-    """auto_remediate=False is forwarded and shown in report."""
+    """auto_remediate=False is forwarded to the v2 pipeline and reflected in response."""
     captured = {}
 
-    def fake_pipeline(**kwargs):
-        captured.update(kwargs)
+    def fake_pipeline(incident_id, description, auto_remediate, metadata):
+        captured["auto_remediate"] = auto_remediate
         report = dict(_MOCK_PIPELINE_REPORT)
-        report["auto_remediate"] = False
-        report["actions_taken"] = [{"type": "k8s_restart", "skipped": True,
-                                     "reason": "auto_remediate=false — manual approval required"}]
+        report["auto_remediate"]         = False
+        report["status"]                 = "awaiting_approval"
+        report["requires_human_approval"] = True
+        report["executed_actions"]       = []
         return report
 
-    with patch("app.orchestrator.main.run_incident_pipeline", side_effect=fake_pipeline):
+    with patch("app.orchestrator.main.run_pipeline_v2", side_effect=fake_pipeline):
         response = client.post("/incident/run", json={
             "incident_id": "INC-003",
             "description": "Pod crashlooping",
@@ -562,7 +573,7 @@ def test_incident_run_auto_remediate_false():
     assert response.status_code == 200
     assert captured["auto_remediate"] is False
     data = response.json()
-    assert data["actions_taken"][0]["skipped"] is True
+    assert data["auto_remediate"] is False
 
 
 # ── Pipeline internals ─────────────────────────────────────────
@@ -671,7 +682,7 @@ def test_github_create_incident_pr_duplicate_branch():
     mock_pr.html_url = "https://github.com/test/pr/99"
     mock_repo.create_pull.return_value = mock_pr
 
-    with patch.object(gh, "_repo", return_value=mock_repo):
+    with patch.object(gh, "_pick_repo", return_value=mock_repo):
         result = gh.create_incident_pr("INC-DUP", "Fix", "body")
 
     # Should succeed — branch already existed but was reused
@@ -722,18 +733,21 @@ def test_k8s_restart_with_deploy_permission():
 
 
 def test_incident_run_auto_remediate_requires_user():
-    """POST /incident/run with auto_remediate=true requires X-User with deploy permission."""
+    """POST /incident/run with auto_remediate=true requires a user with deploy permission."""
+    # No auth header and no X-User — should be blocked
     response = client.post("/incident/run", json={
         "incident_id":    "INC-RBAC",
         "description":    "test",
         "auto_remediate": True,
+        "user":           "nobody",
+        "role":           "viewer",
     })
     assert response.status_code == 403
 
 
 def test_incident_run_no_remediate_no_auth_needed():
     """POST /incident/run with auto_remediate=false doesn't need X-User."""
-    with patch("app.orchestrator.main.run_incident_pipeline",
+    with patch("app.orchestrator.main.run_pipeline_v2",
                return_value=_MOCK_PIPELINE_REPORT):
         response = client.post("/incident/run", json={
             "incident_id":    "INC-NORBAC",
@@ -841,7 +855,7 @@ def test_aws_predict_scaling_success():
 def test_claude_review_pr_no_api_key():
     """review_pr returns error dict when no API key configured."""
     from app.llm.claude import review_pr as _review_pr
-    with patch("app.llm.claude.client", None):
+    with patch("app.llm.claude._provider", None):
         result = _review_pr({"title": "test", "files": []})
     assert "error" in result
     assert result["issues"] == []
@@ -1053,7 +1067,7 @@ def test_claude_assess_deployment_no_api_key():
 def test_claude_interpret_jira_no_api_key():
     """interpret_jira_for_pr returns safe defaults when no API key."""
     from app.llm.claude import interpret_jira_for_pr as _interp
-    with patch("app.llm.claude.client", None):
+    with patch("app.llm.claude._provider", None):
         result = _interp({"key": "DEV-1", "summary": "Update deps", "labels": []})
     assert result["pr_title"] == "Update deps"
     assert result["file_patches"] == []

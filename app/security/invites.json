@@ -1,56 +1,27 @@
 {
-  "Wa_XjrEqSq3KEfpPBu9WPYE6mGiBp0x_td2Fw_NXTMw": {
-    "username": "test_invite",
-    "email": "test@example.com",
-    "otp": "958799",
-    "expires_at": "2026-04-01T11:35:32.385128"
+  "invites": {},
+  "kqT2lBhpNp8pdWs6SvRM3xy5rWnLfb4uVFC9gRa3xpA": {
+    "username": "invited@company.com",
+    "email": "invited@company.com",
+    "otp": "308183",
+    "expires_at": "2026-04-02T07:55:54.582960"
   },
-  "fOyo3RuAAGMDt_2POh_oHAcClhQ_3W28mss6hCTXPdw": {
-    "username": "new_engineer",
-    "email": "test@gmail.com",
-    "otp": "934196",
-    "expires_at": "2026-04-01T11:36:40.514879"
-  },
-  "7IeAmSrIQw2_PFx4TZHP7Af1BK61RLGmV0jMGHFPdq8": {
+  "SC_RaRotTqck7LYeGX1Ty_a4v03etSVZrtgE8ZzRiaE": {
     "username": "nagaraj",
     "email": "nagarajbadiger347@gmail.com",
-    "otp": "251191",
-    "expires_at": "2026-04-01T11:36:51.724398"
+    "otp": "752842",
+    "expires_at": "2026-04-03T05:20:07.519056"
   },
-  "F1UCMbyVSgDGgdrHnW3p4XBqeQWFWFcKPwMkesluLkA": {
-    "username": "engineer_bob",
-    "email": "bob@company.com",
-    "otp": "589687",
-    "expires_at": "2026-04-01T11:37:50.179600"
-  },
-  "cnZypoq0VkJCXBwYEnhRvrD8df5KzrSSe64xolUh6g0": {
-    "username": "testuser",
-    "email": "test@example.com",
-    "otp": "800601",
-    "expires_at": "2026-04-01T12:11:40.239785"
-  },
-  "_uHK-Rdld_Fwa7ISb5TS0zC-fn_aX8DNZHnMJ6GdQ1U": {
+  "wohRS8G1pFqBrF1dWVZXGKwM4yXmPvTr6QDUNqeGeLU": {
     "username": "nagaraj",
     "email": "nagarajbadiger347@gmail.com",
-    "otp": "404479",
-    "expires_at": "2026-04-01T12:12:23.741335"
+    "otp": "612148",
+    "expires_at": "2026-04-03T05:20:08.091139"
   },
-  "Ml-kE0VZCbv5zbLhfatlkyAqkefa5ReWnhxr7BCH8rY": {
-    "username": "testuser99",
-    "email": "test@example.com",
-    "otp": "836780",
-    "expires_at": "2026-04-02T05:23:10.167836"
-  },
-  "UrSu55tEmu66xd30hTSAYXOGq6GIu1QrrbQdS1brQyE": {
-    "username": "testuser99",
-    "email": "test@example.com",
-    "otp": "569572",
-    "expires_at": "2026-04-02T05:23:22.652932"
-  },
-  "XlsEpA4wYotliJ81WBlQC580CbRGHhEDpddCbfFgloM": {
-    "username": "smoketest_del",
-    "email": "test@test.com",
-    "otp": "368959",
-    "expires_at": "2026-04-02T05:29:49.138061"
+  "WXXx2mQibu9Mu5elMBlWE1q1AtScXfEjAfkI3uZAjCY": {
+    "username": "nagaraj",
+    "email": "nagarajbadiger347@gmail.com",
+    "otp": "890360",
+    "expires_at": "2026-04-03T05:29:19.700851"
   }
 }

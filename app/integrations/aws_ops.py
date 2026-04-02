@@ -63,8 +63,15 @@ def list_ec2_instances(state: str = "", region: str = "") -> dict:
         return {"success": False, "error": str(e), "region": used_region}
 
 
+def _is_valid_instance_id(instance_id: str) -> bool:
+    """Return True only if instance_id looks like a real EC2 ID (i-xxxxxxxx)."""
+    return bool(instance_id) and instance_id.startswith("i-") and len(instance_id) > 3
+
+
 def get_ec2_status_checks(instance_id: str = "") -> dict:
     """Get system and instance status checks for all instances (or a specific one)."""
+    if instance_id and not _is_valid_instance_id(instance_id):
+        return {"success": False, "error": f"'{instance_id}' is not a valid EC2 instance ID. Use list_ec2_instances to find the correct ID."}
     try:
         ec2 = _client("ec2")
         kwargs = {"IncludeAllInstances": True}
@@ -94,6 +101,8 @@ def get_ec2_status_checks(instance_id: str = "") -> dict:
 
 def start_ec2_instance(instance_id: str, region: str = "") -> dict:
     """Start a stopped EC2 instance."""
+    if not _is_valid_instance_id(instance_id):
+        return {"success": False, "error": f"'{instance_id}' is not a valid EC2 instance ID. Use list_ec2_instances to find the correct ID."}
     try:
         ec2 = _client("ec2", region=region)
         resp = ec2.start_instances(InstanceIds=[instance_id])
@@ -110,6 +119,8 @@ def start_ec2_instance(instance_id: str, region: str = "") -> dict:
 
 def stop_ec2_instance(instance_id: str, region: str = "") -> dict:
     """Stop a running EC2 instance."""
+    if not _is_valid_instance_id(instance_id):
+        return {"success": False, "error": f"'{instance_id}' is not a valid EC2 instance ID. Use list_ec2_instances to find the correct ID."}
     try:
         ec2 = _client("ec2", region=region)
         resp = ec2.stop_instances(InstanceIds=[instance_id])
@@ -126,6 +137,8 @@ def stop_ec2_instance(instance_id: str, region: str = "") -> dict:
 
 def reboot_ec2_instance(instance_id: str, region: str = "") -> dict:
     """Reboot a running EC2 instance."""
+    if not _is_valid_instance_id(instance_id):
+        return {"success": False, "error": f"'{instance_id}' is not a valid EC2 instance ID. Use list_ec2_instances to find the correct ID."}
     try:
         ec2 = _client("ec2", region=region)
         ec2.reboot_instances(InstanceIds=[instance_id])
@@ -193,7 +206,7 @@ def get_recent_logs(log_group: str, minutes: int = 30, limit: int = 100) -> dict
         )
         events = [
             {
-                "timestamp": datetime.datetime.utcfromtimestamp(e["timestamp"] / 1000).isoformat(),
+                "timestamp": datetime.datetime.fromtimestamp(e["timestamp"] / 1000, tz=datetime.timezone.utc).isoformat(),
                 "stream":    e.get("logStreamName", ""),
                 "message":   e["message"].strip(),
             }
@@ -225,7 +238,7 @@ def search_logs(log_group: str, pattern: str, hours: int = 1, limit: int = 100) 
         )
         events = [
             {
-                "timestamp": datetime.datetime.utcfromtimestamp(e["timestamp"] / 1000).isoformat(),
+                "timestamp": datetime.datetime.fromtimestamp(e["timestamp"] / 1000, tz=datetime.timezone.utc).isoformat(),
                 "stream":    e.get("logStreamName", ""),
                 "message":   e["message"].strip(),
             }
@@ -479,26 +492,50 @@ def get_target_health(target_group_arn: str) -> dict:
 
 # ── CloudTrail ────────────────────────────────────────────────
 
-def get_cloudtrail_events(hours: int = 1, resource_name: str = "") -> dict:
-    """Get recent CloudTrail API events — useful for spotting who changed what before an incident."""
+def get_cloudtrail_events(hours: int = 0, resource_name: str = "", days: int = 0,
+                          event_name: str = "", username: str = "") -> dict:
+    """Get CloudTrail API events with flexible time range and filters.
+
+    hours / days: lookback window (days takes priority if both given).
+    resource_name: filter by specific resource (e.g. instance ID).
+    event_name: filter by API event (e.g. StopInstances, StartInstances).
+    username: filter by IAM user/role.
+    """
     try:
-        ct     = _client("cloudtrail")
-        start  = _hours_ago(hours)
-        kwargs = {"StartTime": start, "EndTime": _now(), "MaxResults": 50}
+        ct = _client("cloudtrail")
+        lookback_hours = (days * 24) if days else (hours or 24)
+        # CloudTrail max lookback is 90 days
+        lookback_hours = min(lookback_hours, 90 * 24)
+        start = _hours_ago(lookback_hours)
+        kwargs: dict = {"StartTime": start, "EndTime": _now(), "MaxResults": 50}
         if resource_name:
             kwargs["LookupAttributes"] = [{"AttributeKey": "ResourceName", "AttributeValue": resource_name}]
-        resp   = ct.lookup_events(**kwargs)
-        events = [
-            {
-                "time":          e["EventTime"].isoformat(),
-                "event_name":    e["EventName"],
-                "user":          e.get("Username", ""),
-                "source_ip":     e.get("CloudTrailEvent", "{}"),
-                "resources":     [r.get("ResourceName", "") for r in e.get("Resources", [])],
-            }
-            for e in resp.get("Events", [])
-        ]
-        return {"success": True, "events": events, "count": len(events)}
+        elif event_name:
+            kwargs["LookupAttributes"] = [{"AttributeKey": "EventName", "AttributeValue": event_name}]
+        elif username:
+            kwargs["LookupAttributes"] = [{"AttributeKey": "Username", "AttributeValue": username}]
+        resp = ct.lookup_events(**kwargs)
+        events = []
+        for e in resp.get("Events", []):
+            raw = e.get("CloudTrailEvent", "{}")
+            try:
+                import json as _json
+                raw_parsed = _json.loads(raw)
+                source_ip = raw_parsed.get("sourceIPAddress", "")
+                user_agent = raw_parsed.get("userAgent", "")
+            except Exception:
+                source_ip = ""
+                user_agent = ""
+            events.append({
+                "time":       e["EventTime"].isoformat(),
+                "event_name": e["EventName"],
+                "user":       e.get("Username", "unknown"),
+                "source_ip":  source_ip,
+                "user_agent": user_agent,
+                "resources":  [r.get("ResourceName", "") for r in e.get("Resources", [])],
+            })
+        return {"success": True, "events": events, "count": len(events),
+                "lookback_hours": lookback_hours}
     except (BotoCoreError, ClientError) as e:
         return {"success": False, "error": str(e)}
 

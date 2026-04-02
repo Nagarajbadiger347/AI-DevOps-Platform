@@ -46,16 +46,15 @@ class BaseAgent(ABC):
         try:
             return json.loads(candidate)
         except json.JSONDecodeError as exc:
-            logger.warning(
-                "agent_json_parse_failed",
-                agent=self.__class__.__name__,
-                error=str(exc),
-                raw_snippet=text[:200],
-            )
+            logger.warning("agent_json_parse_failed", extra={
+                "agent": self.__class__.__name__,
+                "error": str(exc),
+                "raw_snippet": text[:200],
+            })
             return {}
 
     def _log(self, event: str, **kwargs: Any) -> None:
-        logger.info(event, agent=self.__class__.__name__, **kwargs)
+        logger.info(event, extra={"agent": self.__class__.__name__, **kwargs})
 
     def _warn(self, event: str, **kwargs: Any) -> None:
-        logger.warning(event, agent=self.__class__.__name__, **kwargs)
+        logger.warning(event, extra={"agent": self.__class__.__name__, **kwargs})

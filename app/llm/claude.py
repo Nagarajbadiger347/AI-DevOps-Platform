@@ -30,24 +30,32 @@ if ANTHROPIC_API_KEY and not _ANTHROPIC_KEY_VALID:
         "ANTHROPIC_API_KEY=\"sk-ant-...\". Falling back to next available provider."
     )
 
+_anthropic_client = None
+_groq_client      = None
+
 if ANTHROPIC_API_KEY and _ANTHROPIC_KEY_VALID:
     from anthropic import Anthropic
-    client    = Anthropic(api_key=ANTHROPIC_API_KEY)
+    _anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
+    client    = _anthropic_client
     _provider = "anthropic"
-elif GROQ_API_KEY:
+
+if GROQ_API_KEY:
     from groq import Groq
-    client    = Groq(api_key=GROQ_API_KEY)
-    _provider = "groq"
-else:
-    # Try Ollama — pick first available model
-    try:
-        r = _urllib.urlopen(f"{OLLAMA_HOST}/api/tags", timeout=3)
-        models = json.loads(r.read()).get("models", [])
-        if models:
-            _ollama_model = models[0]["name"]
-            _provider     = "ollama"
-    except Exception:
-        pass
+    _groq_client = Groq(api_key=GROQ_API_KEY, timeout=60.0)
+    if not _provider:
+        client    = _groq_client
+        _provider = "groq"
+
+# Always probe Ollama regardless of other providers — needed for explicit selection
+try:
+    _r = _urllib.urlopen(f"{OLLAMA_HOST}/api/tags", timeout=3)
+    _models = json.loads(_r.read()).get("models", [])
+    if _models:
+        _ollama_model = _models[0]["name"]
+        if not _provider:
+            _provider = "ollama"
+except Exception:
+    pass
 
 
 def _llm(system: str, messages: list, max_tokens: int = 1024,
@@ -58,16 +66,26 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
     Falls back to the auto-detected provider if the requested one is not configured.
     """
     provider = force_provider if force_provider else _provider
-    # Validate forced provider is actually configured
-    if force_provider == "anthropic" and not (ANTHROPIC_API_KEY and _ANTHROPIC_KEY_VALID):
-        provider = _provider  # fallback
-    if force_provider == "groq" and not GROQ_API_KEY:
-        provider = _provider  # fallback
-    if force_provider == "ollama" and not _ollama_model:
-        provider = _provider  # fallback
+    # When user explicitly picks a provider, check it's actually available
+    if force_provider:
+        if force_provider == "anthropic" and not (ANTHROPIC_API_KEY and _ANTHROPIC_KEY_VALID):
+            raise RuntimeError(
+                "Claude (Anthropic) is not configured. Add a valid ANTHROPIC_API_KEY "
+                "(starting with sk-ant-) to your .env file."
+            )
+        if force_provider == "groq" and not GROQ_API_KEY:
+            raise RuntimeError(
+                "Groq is not configured. Add GROQ_API_KEY to your .env file."
+            )
+        if force_provider == "ollama" and not _ollama_model:
+            raise RuntimeError(
+                "Ollama is not running or has no models loaded. "
+                f"Start Ollama and pull a model (e.g. `ollama pull llama3`), "
+                f"then restart the server. Checked: {OLLAMA_HOST}"
+            )
 
     if provider == "anthropic":
-        resp = client.messages.create(
+        resp = _anthropic_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=max_tokens,
             system=system,
@@ -77,7 +95,7 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
 
     elif provider == "groq":
         all_msgs = [{"role": "system", "content": system}] + messages
-        resp = client.chat.completions.create(
+        resp = _groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=all_msgs,
             max_tokens=max_tokens,
@@ -101,7 +119,7 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
         }).encode()
         req = _urllib.Request(f"{OLLAMA_HOST}/api/generate", data=payload,
                               headers={"Content-Type": "application/json"})
-        r = _urllib.urlopen(req, timeout=120)
+        r = _urllib.urlopen(req, timeout=30)
         return json.loads(r.read())["response"]
 
     else:
@@ -386,7 +404,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
             "comment":          content,
         }
     except Exception as e:
-        return {"error": str(e), "verdict": "comment", "summary": "Review failed"}
+        return {"error": str(e), "verdict": "comment", "summary": "Review failed", "issues": [], "recommendations": [], "security_concerns": [], "infra_changes": [], "comment": ""}
 
 
 def predict_scaling(metrics_data: dict) -> dict:
@@ -583,7 +601,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
             "confidence":   0.0,
         }
     except Exception as e:
-        return {"error": str(e), "pr_title": jira_data.get("summary", ""), "file_patches": []}
+        return {"error": str(e), "pr_title": jira_data.get("summary", ""), "file_patches": [], "branch_name": f"jira/{jira_data.get('key', 'ticket').lower()}", "target_files": []}
 
 
 def chat_devops(message: str, history: list, context: dict,
@@ -613,6 +631,11 @@ RESPONSE LENGTH RULES (follow strictly):
 - Troubleshooting, debugging, root cause analysis: structured answer with relevant detail — use bullet points, include error context, suggest a fix.
 - How-to, explain a concept, write a command/config: as long as needed, use code blocks, be thorough.
 - Incident response or "what should I do?": step-by-step with priorities, be thorough.
+
+PLAIN LANGUAGE RULES:
+- Always write so that a non-engineer can understand. Avoid jargon; when you must use a technical term, briefly explain it in plain words (e.g. "pods — the small containers your app runs in").
+- If someone asks in simple or casual language, reply the same way. Don't over-engineer the answer.
+- Lead with the key takeaway, then add supporting detail.
 
 CONTENT RULES:
 - NEVER fabricate infrastructure data. Only use resource names, IDs, pod names, alarm names that appear VERBATIM in the live context below.
@@ -665,7 +688,16 @@ class ClaudeProvider(BaseLLM):
     the rest of this module uses — so no separate client setup needed.
     """
 
+    def __init__(self, force_provider: str = ""):
+        self._force_provider = force_provider
+
     def is_available(self) -> bool:
+        if self._force_provider == "anthropic":
+            return bool(ANTHROPIC_API_KEY and _ANTHROPIC_KEY_VALID)
+        if self._force_provider == "groq":
+            return bool(GROQ_API_KEY)
+        if self._force_provider == "ollama":
+            return bool(_ollama_model)
         return _provider is not None
 
     def complete(
@@ -675,14 +707,32 @@ class ClaudeProvider(BaseLLM):
         system: str = "You are an expert DevOps AI assistant.",
         max_tokens: int = 2048,
     ) -> LLMResponse:
-        content = _llm(system, [{"role": "user", "content": prompt}], max_tokens)
+        try:
+            content = _llm(system, [{"role": "user", "content": prompt}], max_tokens,
+                           force_provider=self._force_provider)
+        except Exception as exc:
+            err = str(exc)
+            # Credit exhausted or billing error — mark provider permanently unavailable
+            # for this process so the factory falls back to next provider
+            if "credit balance" in err.lower() or "billing" in err.lower() or "payment" in err.lower():
+                _prov = self._force_provider or _provider or "anthropic"
+                from app.llm.factory import mark_rate_limited
+                # Mark both "claude" and "anthropic" keys so factory skips it
+                mark_rate_limited(_prov, "try again in 999m0s")
+                mark_rate_limited("claude", "try again in 999m0s")
+                mark_rate_limited("anthropic", "try again in 999m0s")
+                raise RuntimeError(
+                    f"Provider '{_prov}' has no credits. Falling back to next available provider."
+                ) from exc
+            raise
+        used = self._force_provider or _provider or "unknown"
         model_name = (
-            "claude-sonnet-4-6" if _provider == "anthropic"
-            else "llama-3.3-70b-versatile" if _provider == "groq"
+            "claude-sonnet-4-6" if used == "anthropic"
+            else "llama-3.3-70b-versatile" if used == "groq"
             else _ollama_model or "ollama"
         )
         return LLMResponse(
             content=content,
             model=model_name,
-            provider=_provider or "unknown",
+            provider=used,
         )

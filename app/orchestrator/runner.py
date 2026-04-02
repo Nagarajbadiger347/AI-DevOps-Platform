@@ -25,6 +25,7 @@ def run_pipeline(
     incident_id: str,
     description: str,
     auto_remediate: bool = False,
+    dry_run: bool = False,
     metadata: dict | None = None,
 ) -> dict:
     """Invoke the LangGraph pipeline synchronously and return the final state.
@@ -39,15 +40,17 @@ def run_pipeline(
         Final PipelineState as a plain dict.
     """
     cid = new_correlation_id()
-    logger.info("pipeline_started",
-                incident_id=incident_id,
-                auto_remediate=auto_remediate,
-                correlation_id=cid)
+    logger.info("pipeline_started", extra={
+        "incident_id": incident_id,
+        "auto_remediate": auto_remediate,
+        "correlation_id": cid,
+    })
 
     initial_state: PipelineState = {
         "incident_id":    incident_id,
         "description":    description,
         "auto_remediate": auto_remediate,
+        "dry_run":        dry_run,
         "metadata":       metadata or {},
         "errors":         [],
         "retry_count":    0,
@@ -59,19 +62,21 @@ def run_pipeline(
     try:
         final_state: dict = pipeline_graph.invoke(initial_state)
     except Exception as exc:
-        logger.error("pipeline_unhandled_error",
-                     incident_id=incident_id, error=str(exc))
+        logger.error("pipeline_unhandled_error", extra={
+            "incident_id": incident_id, "error": str(exc),
+        })
         final_state = {**initial_state,
                        "status": "failed",
                        "errors": [str(exc)],
                        "completed_at": datetime.datetime.now(
                            datetime.timezone.utc).isoformat()}
 
-    logger.info("pipeline_finished",
-                incident_id=incident_id,
-                status=final_state.get("status"),
-                validation_passed=final_state.get("validation_passed"),
-                actions_executed=len(final_state.get("executed_actions", [])),
-                actions_blocked=len(final_state.get("blocked_actions", [])))
+    logger.info("pipeline_finished", extra={
+        "incident_id": incident_id,
+        "status": final_state.get("status"),
+        "validation_passed": final_state.get("validation_passed"),
+        "actions_executed": len(final_state.get("executed_actions", [])),
+        "actions_blocked": len(final_state.get("blocked_actions", [])),
+    })
 
     return final_state

@@ -56,20 +56,38 @@ def post_thread_reply(channel: str, thread_ts: str, text: str) -> dict:
 
 # ── War room ──────────────────────────────────────────────────
 
-def create_war_room(topic: str = "War Room", members=None) -> dict:
-    """Post a war room announcement to the default Slack channel.
+def create_war_room(topic: str = "War Room", members=None, incident_id: str = "") -> dict:
+    """Create a dedicated incident channel and post a war room announcement.
 
-    For full war room (dedicated channel), use create_incident_channel().
+    Creates #inc-<incident_id> (or a sanitised version of topic) as a dedicated
+    channel, then posts the announcement there.  Falls back to posting in
+    SLACK_CHANNEL if channel creation is not permitted.
     """
     if not SLACK_BOT_TOKEN:
         return {"error": "SLACK_BOT_TOKEN not configured"}
     try:
+        # Try to create a dedicated channel
+        channel_id   = None
+        channel_name = None
+        if incident_id:
+            ch_result = create_incident_channel(incident_id, topic=topic)
+            if ch_result.get("success"):
+                channel_id   = ch_result["channel_id"]
+                channel_name = ch_result["channel_name"]
+
+        target_channel = channel_id or SLACK_CHANNEL
         msg = f"🚨 War room opened: *{topic}*\nParticipants: {members or 'TBD'}"
-        resp = _client().chat_postMessage(channel=SLACK_CHANNEL, text=msg)
+        resp = _client().chat_postMessage(channel=target_channel, text=msg)
         return {
-            "room_url": f"https://slack.com/app_redirect?channel={SLACK_CHANNEL.strip('#')}",
-            "ts": resp.get("ts"),
-            "message": msg,
+            "room_url": (
+                f"https://slack.com/app_redirect?channel={channel_id}"
+                if channel_id else
+                f"https://slack.com/app_redirect?channel={SLACK_CHANNEL.strip('#')}"
+            ),
+            "channel_id":   channel_id,
+            "channel_name": channel_name,
+            "ts":           resp.get("ts"),
+            "message":      msg,
         }
     except SlackApiError as e:
         return {"error": str(e), "details": e.response.get("error")}
