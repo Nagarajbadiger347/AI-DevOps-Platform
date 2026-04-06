@@ -37,7 +37,7 @@ from app.integrations.aws_ops import (
     list_ecs_services, get_stopped_ecs_tasks,
     list_lambda_functions, get_lambda_errors,
     list_rds_instances, get_rds_events,
-    get_target_health, get_cloudtrail_events,
+    get_cloudtrail_events,
     collect_diagnosis_context, get_scaling_metrics,
     list_s3_buckets, list_sqs_queues, list_dynamodb_tables,
     list_route53_healthchecks, list_sns_topics,
@@ -125,8 +125,8 @@ async def _lifespan(_: FastAPI):
         pass
 
 app = FastAPI(
-    title="AI DevOps Intelligence Platform",
-    description="Autonomous DevOps management powered by multi-agent AI — built by Nagaraj",
+    title="NexusOps",
+    description="NexusOps — Autonomous DevOps management powered by multi-agent AI",
     version="2.0.0",
     lifespan=_lifespan,
 )
@@ -1138,51 +1138,222 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <!-- COST ANALYSIS -->
       <div id="s-cost" class="section-page">
         <div class="section-header">
-          <div><div class="section-title">Cost Analysis</div><div class="section-sub">Live AWS spend data + action impact estimation</div></div>
-          <button class="btn btn-ghost btn-sm" onclick="App.loadCostOverview()">
+          <div><div class="section-title">Cost Analysis</div><div class="section-sub">Live AWS spend · resource-level costs · multi-account Organizations</div></div>
+          <button class="btn btn-ghost btn-sm" onclick="App.costMainRefresh()">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             Refresh
           </button>
         </div>
-        <!-- Live AWS spend summary -->
-        <div id="cost-summary-row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px"></div>
-        <!-- Service breakdown + trend -->
-        <div class="grid-2" style="margin-bottom:16px">
-          <div class="card">
-            <div class="card-header"><div class="card-title">&#128202; Top Services This Month</div></div>
-            <div id="cost-services"><div class="loading-state"><div class="spinner"></div></div></div>
+
+        <!-- Main cost view tabs -->
+        <div style="display:flex;align-items:center;gap:0;margin-bottom:18px;border-bottom:1px solid var(--border)">
+          <button class="cost-main-tab active" id="cmt-overview"   onclick="App.costMainTab('overview',this)"   style="padding:8px 18px;font-size:.83em;font-weight:600;background:none;border:none;border-bottom:2px solid var(--purple);color:var(--text);cursor:pointer;letter-spacing:.02em">Overview</button>
+          <button class="cost-main-tab"        id="cmt-resource"   onclick="App.costMainTab('resource',this)"   style="padding:8px 18px;font-size:.83em;font-weight:600;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;letter-spacing:.02em">By Resource</button>
+          <button class="cost-main-tab"        id="cmt-account"    onclick="App.costMainTab('account',this)"    style="padding:8px 18px;font-size:.83em;font-weight:600;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;letter-spacing:.02em">By Account</button>
+          <button class="cost-main-tab"        id="cmt-orgs"       onclick="App.costMainTab('orgs',this)"       style="padding:8px 18px;font-size:.83em;font-weight:600;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;letter-spacing:.02em">Organizations</button>
+          <button class="cost-main-tab"        id="cmt-estimate"   onclick="App.costMainTab('estimate',this)"   style="padding:8px 18px;font-size:.83em;font-weight:600;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;letter-spacing:.02em">Estimate</button>
+        </div>
+
+        <!-- ── OVERVIEW PANE ───────────────────────────────────────────────── -->
+        <div id="cost-view-overview">
+          <div id="cost-summary-row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px"></div>
+          <div class="grid-2" style="margin-bottom:16px">
+            <div class="card">
+              <div class="card-header"><div class="card-title">&#128202; Top Services This Month</div></div>
+              <div id="cost-services"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+            <div class="card">
+              <div class="card-header"><div class="card-title">&#128200; 6-Month Spend Trend</div></div>
+              <div id="cost-trend"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
           </div>
+          <!-- Cost insights row -->
           <div class="card">
-            <div class="card-header"><div class="card-title">&#128200; 6-Month Spend Trend</div></div>
-            <div id="cost-trend"><div class="loading-state"><div class="spinner"></div></div></div>
+            <div class="card-header"><div class="card-title">&#128161; Optimization Insights</div></div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;font-size:.83em">
+              <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-weight:600;margin-bottom:3px">&#127381; Reserved Instances</div>
+                <div class="text-muted">Save 30–72% vs on-demand with 1–3yr commitment.</div>
+                <a href="https://aws.amazon.com/ec2/pricing/reserved-instances/" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Learn more &#8599;</a>
+              </div>
+              <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-weight:600;margin-bottom:3px">&#128200; Savings Plans</div>
+                <div class="text-muted">Flexible 1-3yr commitment — EC2, Fargate, Lambda. Up to 66% off.</div>
+                <a href="https://aws.amazon.com/savingsplans/pricing/" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Learn more &#8599;</a>
+              </div>
+              <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-weight:600;margin-bottom:3px">&#128176; Spot Instances</div>
+                <div class="text-muted">Up to 90% savings for fault-tolerant, batch, or CI/CD workloads.</div>
+                <a href="https://aws.amazon.com/ec2/spot/pricing/" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Learn more &#8599;</a>
+              </div>
+              <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                <div style="font-weight:600;margin-bottom:3px">&#128203; AWS Pricing Calculator</div>
+                <div class="text-muted">Official AWS tool to model full architecture costs before deploying.</div>
+                <a href="https://calculator.aws/pricing/2/home" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Open &#8599;</a>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="grid-2">
+
+        <!-- ── BY RESOURCE PANE ───────────────────────────────────────────── -->
+        <div id="cost-view-resource" style="display:none">
           <div class="card">
-            <div class="card-header">
-              <div class="card-title">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-                Analyze Action Costs
+            <div class="card-header" style="flex-wrap:wrap;gap:10px">
+              <div class="card-title">&#128187; Resource-Level Cost Breakdown</div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="text" id="cost-res-search" class="form-input" style="width:200px;padding:5px 10px;font-size:.82em" placeholder="Search resource ID / name..." oninput="App.filterCostResources()"/>
+                <select id="cost-res-svc" class="form-input" style="width:140px;padding:5px 10px;font-size:.82em" onchange="App.filterCostResources()">
+                  <option value="">All Services</option>
+                  <option>EC2</option><option>RDS</option><option>Lambda</option><option>ECS</option><option>S3</option>
+                </select>
+                <button class="btn btn-primary btn-sm" onclick="App.loadCostResources()">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                  Load Resources
+                </button>
               </div>
             </div>
-            <div class="form-group mb-12">
-              <label class="form-label">Actions JSON</label>
-              <textarea id="cost-actions" class="form-input" rows="7" style="font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.82em" placeholder='[{"type":"k8s_scale","namespace":"prod","deployment":"api","replicas":5}]'></textarea>
-            </div>
-            <button class="btn btn-primary" onclick="App.analyzeCost()" style="width:100%;justify-content:center">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              Analyze Cost Impact
-            </button>
-            <div id="cost-result"></div>
+            <div id="cost-res-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px"></div>
+            <div id="cost-res-table"><div class="empty-state"><p style="color:var(--muted)">Click "Load Resources" to fetch live resource inventory with cost estimates</p></div></div>
           </div>
+        </div>
+
+        <!-- ── BY ACCOUNT PANE ────────────────────────────────────────────── -->
+        <div id="cost-view-account" style="display:none">
           <div class="card">
-            <div class="card-header">
-              <div class="card-title">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-6"/></svg>
-                Action Impact Result
+            <div class="card-header" style="flex-wrap:wrap;gap:10px">
+              <div class="card-title">&#127981; Account-Level Spend</div>
+              <button class="btn btn-primary btn-sm" onclick="App.loadCostAccounts()">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                Refresh
+              </button>
+            </div>
+            <div id="cost-acct-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px"></div>
+            <div id="cost-acct-table"><div class="loading-state"><div class="spinner"></div></div></div>
+          </div>
+        </div>
+
+        <!-- ── ORGANIZATIONS PANE ─────────────────────────────────────────── -->
+        <div id="cost-view-orgs" style="display:none">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div class="card">
+              <div class="card-header"><div class="card-title">&#127963; AWS Organizations — Linked Accounts</div></div>
+              <div style="font-size:.8em;color:var(--muted);margin-bottom:12px">Requires management account credentials with Cost Explorer + Organizations access. Set <code>AWS_MANAGEMENT_ACCOUNT_ROLE</code> in .env for cross-account access.</div>
+              <button class="btn btn-primary" onclick="App.loadCostOrgs()" style="margin-bottom:14px">&#128260; Load Organization Spend</button>
+              <div id="cost-orgs-list"><div class="empty-state"><p style="color:var(--muted)">No data loaded</p></div></div>
+            </div>
+            <div class="card">
+              <div class="card-header"><div class="card-title">&#128200; Spend Distribution</div></div>
+              <div id="cost-orgs-chart"><div class="empty-state"><p style="color:var(--muted)">Load organization data first</p></div></div>
+              <div style="margin-top:16px;padding:12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);font-size:.8em">
+                <div style="font-weight:600;margin-bottom:6px;color:var(--text)">&#128276; Setup Guide — Multi-Account</div>
+                <div style="display:flex;flex-direction:column;gap:5px;color:var(--muted)">
+                  <div>1. Enable <b>Cost Explorer</b> in your management account</div>
+                  <div>2. Set <code style="color:var(--cyan)">AWS_ACCESS_KEY_ID</code> / <code style="color:var(--cyan)">AWS_SECRET_ACCESS_KEY</code> to management account creds</div>
+                  <div>3. Or set <code style="color:var(--cyan)">AWS_MANAGEMENT_ACCOUNT_ROLE</code> to an IAM Role ARN for cross-account access</div>
+                  <div>4. Ensure the IAM policy includes <code style="color:var(--cyan)">ce:GetCostAndUsage</code> + <code style="color:var(--cyan)">organizations:ListAccounts</code></div>
+                </div>
               </div>
             </div>
-            <div id="cost-aws" style="padding:8px 0"><div class="empty-state"><p class="text-muted">Run an analysis to see impact</p></div></div>
+          </div>
+        </div>
+
+        <!-- ── ESTIMATE PANE ───────────────────────────────────────────────── -->
+        <div id="cost-view-estimate" style="display:none">
+          <div class="grid-2">
+            <div class="card">
+              <div class="card-header" style="margin-bottom:10px;flex-wrap:wrap;gap:8px">
+                <div class="card-title">&#128176; Estimate &amp; Analyze</div>
+                <div class="tab-pills" id="cost-tabs" style="gap:4px">
+                  <button class="tab-pill active" onclick="App.costTab('quick',this)" style="font-size:.77em;padding:4px 10px">Quick Estimate</button>
+                  <button class="tab-pill" onclick="App.costTab('actions',this)" style="font-size:.77em;padding:4px 10px">Action Impact</button>
+                  <button class="tab-pill" onclick="App.costTab('terraform',this)" style="font-size:.77em;padding:4px 10px">Terraform Plan</button>
+                </div>
+              </div>
+              <!-- Quick estimate pane -->
+              <div id="cost-pane-quick">
+                <div class="form-group mb-10">
+                  <label class="form-label">Describe resources (plain English)</label>
+                  <input type="text" id="cost-quick-desc" class="form-input"
+                    placeholder="e.g. 3 t3.medium instances, db.r5.large postgres 200gb multi-az, lambda 512mb 5M invocations"
+                    onkeydown="if(event.key==='Enter')App.quickEstimate()"/>
+                  <div style="font-size:.74em;color:var(--muted);margin-top:4px">Live AWS Pricing API &bull; EC2 &bull; RDS &bull; Lambda &bull; Fargate &bull; S3</div>
+                </div>
+                <div class="form-row mb-12">
+                  <div class="form-group">
+                    <label class="form-label">Region</label>
+                    <select id="cost-quick-region" class="form-input">
+                      <option>us-east-1</option><option>us-east-2</option><option>us-west-1</option>
+                      <option>us-west-2</option><option>eu-west-1</option><option>eu-west-2</option>
+                      <option>eu-central-1</option><option>ap-southeast-1</option>
+                      <option>ap-northeast-1</option><option>ap-south-1</option>
+                    </select>
+                  </div>
+                </div>
+                <button class="btn btn-primary" onclick="App.quickEstimate()" style="width:100%;justify-content:center">&#128176; Get Live Price Estimate</button>
+                <div id="cost-quick-result" style="margin-top:12px"></div>
+              </div>
+              <!-- Action impact pane -->
+              <div id="cost-pane-actions" style="display:none">
+                <div class="form-group mb-10">
+                  <label class="form-label">Describe what you want to do</label>
+                  <textarea id="cost-actions-desc" class="form-input" rows="3"
+                    placeholder="e.g. scale api deployment from 2 to 5 replicas&#10;reboot i-0abc1234 t3.medium instance&#10;scale ECS service from 3 to 8 tasks"></textarea>
+                  <div style="font-size:.74em;color:var(--muted);margin-top:4px">Plain English or JSON — both work</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                  <div style="flex:1;height:1px;background:var(--border)"></div>
+                  <span style="font-size:.72em;color:var(--muted)">or paste JSON directly</span>
+                  <div style="flex:1;height:1px;background:var(--border)"></div>
+                </div>
+                <div class="form-group mb-12">
+                  <textarea id="cost-actions" class="form-input" rows="4" style="font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.8em"
+                    placeholder='[{"type":"k8s_scale","deployment":"api","current_replicas":2,"replicas":5}]'></textarea>
+                </div>
+                <button class="btn btn-primary" onclick="App.analyzeCost()" style="width:100%;justify-content:center">&#128269; Analyze Cost Impact</button>
+                <div id="cost-result" style="margin-top:12px"></div>
+              </div>
+              <!-- Terraform pane -->
+              <div id="cost-pane-terraform" style="display:none">
+                <div class="form-group mb-10">
+                  <label class="form-label">Terraform Plan JSON</label>
+                  <textarea id="cost-tf-plan" class="form-input" rows="8" style="font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.78em"
+                    placeholder="Paste JSON from: terraform plan -out=plan.tfplan &amp;&amp; terraform show -json plan.tfplan"></textarea>
+                  <div style="font-size:.73em;color:var(--muted);margin-top:4px">Supports: aws_instance, aws_db_instance, aws_lambda_function, aws_ecs_service, aws_s3_bucket, aws_lb</div>
+                </div>
+                <button class="btn btn-primary" onclick="App.analyzeTerraformCost()" style="width:100%;justify-content:center">&#127959; Estimate Terraform Cost</button>
+                <div id="cost-tf-result" style="margin-top:12px"></div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-header"><div class="card-title">&#128161; Pricing Reference</div></div>
+              <div style="display:flex;flex-direction:column;gap:10px;font-size:.84em">
+                <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                  <div style="font-weight:600;margin-bottom:4px;color:var(--text)">&#127381; Reserved Instances</div>
+                  <div class="text-muted">Save 30–72% vs on-demand by committing to 1 or 3 year terms.</div>
+                  <a href="https://aws.amazon.com/ec2/pricing/reserved-instances/" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">AWS RI Pricing &#8599;</a>
+                </div>
+                <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                  <div style="font-weight:600;margin-bottom:4px;color:var(--text)">&#128200; Savings Plans</div>
+                  <div class="text-muted">Flexible 1-3yr commitment — covers EC2, Fargate, Lambda. Up to 66% savings.</div>
+                  <a href="https://aws.amazon.com/savingsplans/pricing/" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">AWS Savings Plans &#8599;</a>
+                </div>
+                <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                  <div style="font-weight:600;margin-bottom:4px;color:var(--text)">&#128176; Spot Instances</div>
+                  <div class="text-muted">Up to 90% savings for fault-tolerant workloads. Good for batch jobs and CI/CD.</div>
+                  <a href="https://aws.amazon.com/ec2/spot/pricing/" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Spot Pricing &#8599;</a>
+                </div>
+                <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                  <div style="font-weight:600;margin-bottom:4px;color:var(--text)">&#128203; AWS Pricing Calculator</div>
+                  <div class="text-muted">Official AWS tool to estimate full architecture costs before deploying.</div>
+                  <a href="https://calculator.aws/pricing/2/home" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Open Calculator &#8599;</a>
+                </div>
+                <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                  <div style="font-weight:600;margin-bottom:4px;color:var(--text)">&#128269; AWS Cost Explorer</div>
+                  <div class="text-muted">View and analyze your historical AWS spend and usage patterns.</div>
+                  <a href="https://console.aws.amazon.com/cost-management/home#/cost-explorer" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Open Cost Explorer &#8599;</a>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1244,72 +1415,157 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <!-- INFRASTRUCTURE -->
       <div id="s-infra" class="section-page">
         <div class="section-header">
-          <div><div class="section-title">Infrastructure</div><div class="section-sub">AWS and Kubernetes resource overview</div></div>
-          <div class="tab-pills" id="infra-tabs">
-            <button class="tab-pill active" onclick="App.infraTab('aws',this)">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:5px;vertical-align:middle"><path d="M4.5 16.5c-1.5 1.26-2 5-1 5.5s2.5.31 2.5-1.5c0-3.84 2.5-6.5 4.5-6.5 1.14 0 2.5.5 2.5.5S15 16.5 18 14.5c1.28-.86 2-2.5 2-4 0-2.5-1.5-4-3.5-4-1.5 0-3 1-3 1S12.5 6.5 10 6.5C7 6.5 4.5 9.5 4.5 12.5c0 1 .5 2.5 0 4z"/></svg>
-              AWS
-            </button>
-            <button class="tab-pill" onclick="App.infraTab('k8s',this)">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:5px;vertical-align:middle"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-              Kubernetes
+          <div><div class="section-title">Infrastructure</div><div class="section-sub">All AWS resources and Kubernetes — select region to filter</div></div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <div class="tab-pills" id="infra-tabs">
+              <button class="tab-pill active" onclick="App.infraTab('aws',this)">&#9729; AWS</button>
+              <button class="tab-pill" onclick="App.infraTab('k8s',this)">&#9112; Kubernetes</button>
+            </div>
+            <!-- Region selector -->
+            <select id="infra-region-select" class="form-input" style="padding:4px 10px;font-size:.82em;width:auto;min-width:160px" onchange="App.refreshInfra()">
+              <option value="">All Regions</option>
+              <option value="us-east-1">us-east-1 (N. Virginia)</option>
+              <option value="us-east-2">us-east-2 (Ohio)</option>
+              <option value="us-west-1">us-west-1 (N. California)</option>
+              <option value="us-west-2" selected>us-west-2 (Oregon)</option>
+              <option value="ca-central-1">ca-central-1 (Canada)</option>
+              <option value="eu-west-1">eu-west-1 (Ireland)</option>
+              <option value="eu-west-2">eu-west-2 (London)</option>
+              <option value="eu-central-1">eu-central-1 (Frankfurt)</option>
+              <option value="eu-north-1">eu-north-1 (Stockholm)</option>
+              <option value="ap-southeast-1">ap-southeast-1 (Singapore)</option>
+              <option value="ap-southeast-2">ap-southeast-2 (Sydney)</option>
+              <option value="ap-northeast-1">ap-northeast-1 (Tokyo)</option>
+              <option value="ap-northeast-2">ap-northeast-2 (Seoul)</option>
+              <option value="ap-south-1">ap-south-1 (Mumbai)</option>
+              <option value="sa-east-1">sa-east-1 (São Paulo)</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="App.refreshInfra()" title="Refresh">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             </button>
           </div>
         </div>
+
+        <!-- AWS tab -->
         <div id="infra-aws">
-          <div class="grid-2">
-            <div class="card">
+          <!-- Summary counters -->
+          <div id="infra-aws-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px"></div>
+          <!-- All resource panels rendered dynamically — hidden until data loads -->
+          <div class="grid-2" style="margin-bottom:14px">
+            <div class="card" id="card-ec2">
               <div class="card-header">
-                <div class="card-title">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                  EC2 Instances
-                </div>
-                <button class="btn btn-ghost btn-sm" onclick="App.loadEC2()">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                </button>
+                <div class="card-title">&#128421; EC2 Instances</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadEC2()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
               </div>
-              <div id="ec2-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+              <div id="ec2-list"><div class="loading-state"><div class="spinner"></div></div></div>
             </div>
-            <div class="card">
+            <div class="card" id="card-alarms">
               <div class="card-header">
-                <div class="card-title">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
-                  CloudWatch Alarms
-                </div>
-                <button class="btn btn-ghost btn-sm" onclick="App.loadAlarms()">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                </button>
+                <div class="card-title">&#128268; CloudWatch Alarms</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadAlarms()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
               </div>
-              <div id="alarms-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+              <div id="alarms-list"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+          </div>
+          <div class="grid-2" style="margin-bottom:14px">
+            <div class="card" id="card-ecs">
+              <div class="card-header">
+                <div class="card-title">&#128230; ECS Services</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadECS()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+              </div>
+              <div id="ecs-list"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+            <div class="card" id="card-rds">
+              <div class="card-header">
+                <div class="card-title">&#128184; RDS Databases</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadRDS()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+              </div>
+              <div id="rds-list"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+          </div>
+          <div class="grid-2" style="margin-bottom:14px">
+            <div class="card" id="card-lambda">
+              <div class="card-header">
+                <div class="card-title">&#955; Lambda Functions</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadLambda()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+              </div>
+              <div id="lambda-list"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+            <div class="card" id="card-s3">
+              <div class="card-header">
+                <div class="card-title">&#128193; S3 Buckets</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadS3()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+              </div>
+              <div id="s3-list"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+          </div>
+          <div class="grid-2" style="margin-bottom:14px">
+            <div class="card" id="card-sqs">
+              <div class="card-header">
+                <div class="card-title">&#128233; SQS Queues</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadSQS()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+              </div>
+              <div id="sqs-list"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+            <div class="card" id="card-dynamodb">
+              <div class="card-header">
+                <div class="card-title">&#128197; DynamoDB Tables</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadDynamoDB()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+              </div>
+              <div id="dynamodb-list"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="card" id="card-elb">
+              <div class="card-header">
+                <div class="card-title">&#9878; Load Balancers</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadELB()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+              </div>
+              <div id="elb-list"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+            <div class="card" id="card-cloudtrail">
+              <div class="card-header">
+                <div class="card-title">&#128270; Recent CloudTrail Activity</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadCloudTrail()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+              </div>
+              <div id="cloudtrail-list"><div class="loading-state"><div class="spinner"></div></div></div>
             </div>
           </div>
         </div>
+
+        <!-- Kubernetes tab -->
         <div id="infra-k8s" style="display:none">
-          <div class="grid-2">
+          <div class="grid-2" style="margin-bottom:14px">
             <div class="card">
               <div class="card-header">
-                <div class="card-title">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-                  Cluster Health
-                </div>
-                <button class="btn btn-ghost btn-sm" onclick="App.loadK8sHealth()">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                </button>
+                <div class="card-title">&#9899; Cluster Health</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadK8sHealth()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
               </div>
-              <div id="k8s-health"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+              <div id="k8s-health"><div class="loading-state"><div class="spinner"></div></div></div>
             </div>
             <div class="card">
               <div class="card-header">
-                <div class="card-title">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-                  Pods
-                </div>
-                <button class="btn btn-ghost btn-sm" onclick="App.loadPods()">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                </button>
+                <div class="card-title">&#9112; Deployments</div>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadDeployments()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
               </div>
-              <div id="pods-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+              <div id="deployments-list"><div class="loading-state"><div class="spinner"></div></div></div>
             </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">&#128230; Pods</div>
+              <div style="display:flex;gap:6px;align-items:center">
+                <select id="k8s-ns-filter" class="form-input" style="padding:3px 8px;font-size:.8em;width:auto" onchange="App.loadPods()">
+                  <option value="">all namespaces</option>
+                  <option value="default">default</option>
+                  <option value="kube-system">kube-system</option>
+                  <option value="prod">prod</option>
+                  <option value="staging">staging</option>
+                </select>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadPods()"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+              </div>
+            </div>
+            <div id="pods-list"><div class="loading-state"><div class="spinner"></div></div></div>
           </div>
         </div>
       </div>
@@ -1351,36 +1607,51 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <!-- SECURITY -->
       <div id="s-security" class="section-page">
         <div class="section-header">
-          <div><div class="section-title">Security</div><div class="section-sub">API keys, audit log, and webhook configuration</div></div>
+          <div>
+            <div class="section-title">Security</div>
+            <div class="section-sub">API keys, audit trail, and webhook configuration</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="App.loadSecrets();App.loadAudit();" style="gap:6px">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Refresh
+          </button>
         </div>
-        <div class="grid-2 mb-16">
-          <div class="card">
-            <div class="card-header">
-              <div class="card-title">
+
+        <!-- Security summary stats -->
+        <div id="sec-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px"></div>
+
+        <!-- API Keys + Audit side by side -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+          <div class="card" style="padding:0;overflow:hidden">
+            <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
+              <div class="card-title" style="font-size:.9em">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                API Keys Status
+                Integration Keys
               </div>
             </div>
-            <div id="secrets-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+            <div id="secrets-list" style="padding:4px 0"><div class="loading-state"><div class="spinner"></div></div></div>
           </div>
-          <div class="card">
-            <div class="card-header">
-              <div class="card-title">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-                Audit Log
+          <div class="card" style="padding:0;overflow:hidden">
+            <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
+              <div class="card-title" style="font-size:.9em">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                Recent Audit Events
               </div>
             </div>
-            <div id="audit-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+            <div id="audit-list" style="padding:4px 0"><div class="loading-state"><div class="spinner"></div></div></div>
           </div>
         </div>
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">
+
+        <!-- Webhook endpoints -->
+        <div class="card" style="padding:0;overflow:hidden">
+          <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
+            <div class="card-title" style="font-size:.9em">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-              Webhook Endpoints
+              Inbound Webhook Endpoints
             </div>
+            <span style="font-size:.75em;color:var(--muted)">Point your monitoring tools to these URLs</span>
           </div>
-          <div id="webhook-urls"></div>
+          <div id="webhook-urls" style="padding:16px 18px"></div>
         </div>
       </div>
 
@@ -1476,16 +1747,84 @@ const App = {
     if(sel) sel.value=val;
   },
 
+  async syncLLMStatus(){
+    try{
+      const r=await this.api('GET','/llm/status');
+      if(!r||!r.ok) return;
+      const d=await r.json();
+      const active=d.active||'';
+      // If user has no saved preference OR saved Groq but Claude is now available, auto-upgrade
+      const saved=localStorage.getItem('nexusops_llm')||'';
+      if(!saved || (saved==='groq' && active==='anthropic')){
+        this.setGlobalLLM('');  // blank = Auto (best available)
+      }
+      // Show a badge on the selector indicating active provider
+      const sel=document.getElementById('global-llm-select');
+      if(sel){
+        const groqUnavail=d.providers&&d.providers.find(p=>p.name==='groq'&&!p.available);
+        const claudeAvail=d.providers&&d.providers.find(p=>p.name==='anthropic'&&p.available);
+        if(active==='anthropic'||claudeAvail){
+          sel.style.color='#a3e635';  // green = Claude active
+        } else if(active==='groq'){
+          sel.style.color='#f59e0b';  // amber = Groq (may hit limits)
+        }
+      }
+      // Warn if Groq is the only available provider (prone to 100k TPD exhaustion)
+      const claudeAvail=d.providers&&d.providers.find(p=>p.name==='anthropic'&&p.available);
+      if(active==='groq'&&!claudeAvail){
+        const existing=document.getElementById('llm-warn-banner');
+        if(!existing){
+          const bar=document.createElement('div');
+          bar.id='llm-warn-banner';
+          bar.style.cssText='position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#92400e;color:#fef3c7;padding:8px 20px;border-radius:8px;font-size:.8em;z-index:9999;display:flex;align-items:center;gap:10px;box-shadow:0 4px 20px rgba(0,0,0,.4)';
+          bar.innerHTML='⚠️ Using Groq/Llama — subject to 100k token/day limit. Add <b>ANTHROPIC_API_KEY</b> to .env for Claude. <button onclick="this.parentElement.remove()" style="background:none;border:none;color:#fef3c7;cursor:pointer;font-size:1em;margin-left:6px">✕</button>';
+          document.body.appendChild(bar);
+          setTimeout(()=>bar.remove(),12000);
+        }
+      }
+    }catch(e){}
+  },
+
   // ── HTTP ──────────────────────────────────────────────────────────
-  async api(method, path, body=null) {
+  async api(method, path, body=null, timeoutMs=0) {
     const headers = {};
     if(this.token) headers['Authorization']='Bearer '+this.token;
     if(body!==null) headers['Content-Type']='application/json';
     try{
-      const r=await fetch(path,{method,headers,body:body!==null?JSON.stringify(body):undefined});
+      let fetchOpts={method,headers,body:body!==null?JSON.stringify(body):undefined};
+      let r;
+      if(timeoutMs>0){
+        const ctrl=new AbortController();
+        const tid=setTimeout(()=>ctrl.abort(),timeoutMs);
+        try{r=await fetch(path,{...fetchOpts,signal:ctrl.signal});}
+        finally{clearTimeout(tid);}
+      }else{
+        r=await fetch(path,fetchOpts);
+      }
       if(r.status===401){this.logout();return null;}
       return r;
-    }catch(e){this.toast('Connection error: '+e.message,'error');return null;}
+    }catch(e){
+      if(e.name==='AbortError') return null; // timed out — caller handles
+      this.toast('Connection error: '+e.message,'error');return null;
+    }
+  },
+
+  // ── Infra API call with 12s timeout — returns parsed data or null ──
+  async _infraApi(path){
+    try{
+      const r=await this.api('GET',path,null,12000);
+      if(!r||!r.ok) return null;
+      return await r.json();
+    }catch(e){return null;}
+  },
+
+  // Hide a card gracefully — show "Not available" placeholder
+  _noData(cardId,listElId,msg='Not available in this region'){
+    const card=document.getElementById(cardId);
+    const el=document.getElementById(listElId);
+    if(el) el.innerHTML=`<div class="empty-state" style="padding:14px 0"><span style="font-size:1.4em">&#128274;</span><p style="margin-top:6px;color:var(--muted);font-size:.85em">${msg}</p></div>`;
+    // Keep card visible but muted so user knows it was checked
+    if(card) card.style.opacity='0.55';
   },
 
   // ── TOASTS ────────────────────────────────────────────────────────
@@ -1528,6 +1867,7 @@ const App = {
     else if(section==='cost')this.loadCostOverview();
     else if(section==='warroom')this.loadWarRooms();
     else if(section==='incidents')this.loadIncidents();
+    else if(section==='chat')this.restoreChatHistory();
   },
 
   refreshCurrent(){
@@ -1628,6 +1968,7 @@ const App = {
         this.loadDashboard();
       }
     },60000); // 60s — not 30s to reduce server load
+    this.syncLLMStatus();  // auto-detect active LLM on startup
   },
 
   async loadBadges(){
@@ -1918,15 +2259,111 @@ const App = {
   async generatePostMortem(id){
     if(!id){this.toast('No incident selected','error');return;}
     this.toast('Generating post-mortem...','info');
-    const resp=await this.api('POST',`/incidents/${id}/post-mortem`,{incident_id:id,description:'',root_cause:''});
+    const resp=await this.api('POST',`/incidents/${id}/post-mortem`,{incident_id:id,description:'',root_cause:''},30000);
     const r=resp&&resp.ok?await resp.json():null;
     if(r&&r.markdown){
       this.toast('Post-mortem generated!','success');
       const el=document.getElementById('inc-result');
-      if(el)el.innerHTML=`<div class="result-card"><pre style="white-space:pre-wrap;font-size:.82em">${r.markdown.replace(/</g,'&lt;')}</pre></div>`;
+      if(el) el.innerHTML=this._renderPostMortem(r);
     }else{
       this.toast('Post-mortem generation failed — check LLM configuration','error');
     }
+  },
+
+  _renderPostMortem(r){
+    const sev=r.severity||'SEV2';
+    const sevColor={'SEV1':'#ef4444','SEV2':'#f97316','SEV3':'#f59e0b','SEV4':'#22c55e'}[sev]||'#94a3b8';
+    const now=new Date(r.generated_at||Date.now()).toLocaleString();
+    const dur=r.duration_minutes>0?`${Math.round(r.duration_minutes)} min`:'< 1 min';
+
+    const section=(title,icon,content)=>`
+      <div style="margin-bottom:24px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+          <span style="font-size:1em">${icon}</span>
+          <span style="font-size:.88em;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)">${title}</span>
+        </div>
+        ${content}
+      </div>`;
+
+    const bullet=(items,emptyMsg='None identified.')=>items&&items.length
+      ? `<ul style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px">${items.map(i=>`<li style="font-size:.85em;line-height:1.5">${i}</li>`).join('')}</ul>`
+      : `<p style="font-size:.84em;color:var(--muted);font-style:italic">${emptyMsg}</p>`;
+
+    const actionItems=r.action_items&&r.action_items.length?`
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${r.action_items.map((a,i)=>{
+          const pc={'P1':'#ef4444','P2':'#f97316','P3':'#22c55e'}[a.priority]||'#94a3b8';
+          return`<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface2);border-radius:8px;border-left:3px solid ${pc}">
+            <span style="font-size:.78em;font-weight:700;color:${pc};width:24px;flex-shrink:0">${a.priority}</span>
+            <span style="flex:1;font-size:.84em;font-weight:500">${a.title}</span>
+            <span style="font-size:.76em;color:var(--muted);white-space:nowrap">${a.owner}</span>
+            <span style="font-size:.74em;color:var(--muted);white-space:nowrap">${a.due_date||'TBD'}</span>
+          </div>`;
+        }).join('')}
+      </div>`
+      : `<p style="font-size:.84em;color:var(--muted);font-style:italic">No action items recorded.</p>`;
+
+    const timeline=r.timeline&&r.timeline.length?`
+      <div style="display:flex;flex-direction:column;gap:0">
+        ${r.timeline.map((e,i)=>`
+        <div style="display:flex;gap:12px;padding:8px 0;${i<r.timeline.length-1?'border-bottom:1px solid var(--border)':''}">
+          <div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">
+            <div style="width:10px;height:10px;border-radius:50%;background:var(--cyan);flex-shrink:0;margin-top:4px"></div>
+            ${i<r.timeline.length-1?'<div style="width:1px;flex:1;background:var(--border);margin-top:4px"></div>':''}
+          </div>
+          <div style="flex:1;padding-bottom:${i<r.timeline.length-1?'8':'0'}px">
+            <div style="font-size:.74em;color:var(--muted);font-family:\'SF Mono\',ui-monospace,monospace">${e.timestamp||''}</div>
+            <div style="font-size:.84em;font-weight:500;margin-top:2px">${e.event||''}</div>
+            ${e.actor&&e.actor!=='system'?`<div style="font-size:.74em;color:var(--cyan);margin-top:2px">by ${e.actor}</div>`:''}
+          </div>
+        </div>`).join('')}
+      </div>`
+      : `<p style="font-size:.84em;color:var(--muted);font-style:italic">No timeline recorded.</p>`;
+
+    const copyBtn=`<button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(${JSON.stringify(r.markdown||'')}).then(()=>App.toast('Markdown copied!','success'))">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      Copy Markdown
+    </button>`;
+
+    return`<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;max-width:860px">
+      <!-- Header -->
+      <div style="background:linear-gradient(135deg,rgba(124,58,237,.12),rgba(59,130,246,.08));padding:24px 28px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+              <span style="font-size:1.1em">📋</span>
+              <span style="font-size:.72em;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)">Post-Mortem Report</span>
+            </div>
+            <h2 style="font-size:1.15em;font-weight:700;margin:0 0 12px">${r.title||'Incident Post-Mortem'}</h2>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              <span class="badge" style="background:${sevColor}18;color:${sevColor};border:1px solid ${sevColor}40;font-size:.72em;font-weight:700">${sev}</span>
+              <span style="font-size:.76em;color:var(--muted);display:flex;align-items:center;gap:4px">🔖 ${r.incident_id}</span>
+              <span style="font-size:.76em;color:var(--muted);display:flex;align-items:center;gap:4px">⏱ ${dur}</span>
+              <span style="font-size:.76em;color:var(--muted);display:flex;align-items:center;gap:4px">🗓 ${now}</span>
+            </div>
+          </div>
+          ${copyBtn}
+        </div>
+      </div>
+
+      <!-- Body -->
+      <div style="padding:24px 28px">
+        ${section('Executive Summary','📊',`<p style="font-size:.86em;line-height:1.7;margin:0">${r.impact||'See incident description.'}</p>`)}
+        ${section('Timeline','🕐',timeline)}
+        ${section('Root Cause','🔍',`<div style="padding:14px 16px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.2);border-radius:8px;font-size:.85em;line-height:1.6">${r.root_cause||'Not determined.'}</div>`)}
+        ${section('Contributing Factors','⚠️',bullet(r.contributing_factors))}
+        ${section('Resolution','✅',`<p style="font-size:.85em;line-height:1.7;margin:0">${r.resolution||'See incident notes.'}</p>`)}
+        ${section('Action Items','📌',actionItems)}
+        ${section('Lessons Learned','💡',bullet(r.lessons_learned,'None recorded.'))}
+        ${section('Prevention Steps','🛡️',bullet(r.prevention_steps,'None recorded.'))}
+      </div>
+
+      <!-- Footer -->
+      <div style="padding:14px 28px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface2)">
+        <span style="font-size:.74em;color:var(--muted)">Auto-generated by NexusOps AI · Blameless post-mortem</span>
+        <span style="font-size:.74em;color:var(--muted)">${now}</span>
+      </div>
+    </div>`;
   },
 
   // ── WAR ROOM ─────────────────────────────────────────────────────
@@ -2121,6 +2558,287 @@ const App = {
   closeModal(id){document.getElementById(id).classList.remove('open');},
 
   // ── COST ─────────────────────────────────────────────────────────
+  costMainTab(view, btn){
+    ['overview','resource','account','orgs','estimate'].forEach(v=>{
+      const el=document.getElementById('cost-view-'+v);
+      if(el) el.style.display=v===view?'block':'none';
+    });
+    document.querySelectorAll('.cost-main-tab').forEach(b=>{
+      b.style.borderBottomColor='transparent';
+      b.style.color='var(--muted)';
+    });
+    btn.style.borderBottomColor='var(--purple)';
+    btn.style.color='var(--text)';
+    // Auto-load data for the selected view
+    if(view==='overview') this.loadCostOverview();
+    else if(view==='account') this.loadCostAccounts();
+  },
+
+  costMainRefresh(){
+    const active=document.querySelector('.cost-main-tab[style*="var(--purple)"]');
+    if(!active) return this.loadCostOverview();
+    const id=active.id||'';
+    if(id.includes('resource')) this.loadCostResources();
+    else if(id.includes('account')) this.loadCostAccounts();
+    else if(id.includes('orgs')) this.loadCostOrgs();
+    else this.loadCostOverview();
+  },
+
+  _costResAll:[],
+  async loadCostResources(){
+    const el=document.getElementById('cost-res-table');
+    const sumEl=document.getElementById('cost-res-summary');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div> Scanning AWS resources...</div>';
+    sumEl.innerHTML='';
+    try{
+      const r=await this.api('GET','/cost/resources');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p style="color:var(--muted)">&#9888; AWS credentials not configured or Cost Explorer unavailable</p></div>';return;}
+      const d=await r.json();
+      if(d.error){el.innerHTML=`<div style="padding:12px;color:var(--amber);font-size:.83em">&#9888; ${d.error}</div>`;return;}
+      const resources=d.resources||[];
+      this._costResAll=resources;
+      const total=resources.reduce((s,r)=>s+r.monthly_usd,0);
+      const byType={};resources.forEach(r=>{byType[r.service]=(byType[r.service]||0)+r.monthly_usd;});
+      sumEl.innerHTML=[
+        {label:'Total Resources',val:resources.length,color:'var(--text)'},
+        {label:'Est. Monthly Cost',val:'$'+total.toFixed(2),color:'var(--purple)'},
+        {label:'Est. Annual Cost',val:'$'+(total*12).toFixed(2),color:'var(--cyan)'},
+        {label:'Services',val:Object.keys(byType).length,color:'var(--amber)'},
+      ].map(c=>`<div style="padding:12px 14px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+        <div style="font-size:.73em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${c.label}</div>
+        <div style="font-size:1.4em;font-weight:800;color:${c.color}">${c.val}</div>
+      </div>`).join('');
+      this._renderCostResTable(resources);
+    }catch(e){el.innerHTML=`<div style="padding:12px;color:var(--red)">Error: ${e.message}</div>`;}
+  },
+
+  filterCostResources(){
+    if(!this._costResAll||!this._costResAll.length) return;
+    const search=(document.getElementById('cost-res-search').value||'').toLowerCase();
+    const svc=(document.getElementById('cost-res-svc').value||'');
+    const filtered=this._costResAll.filter(r=>{
+      const matchSvc=!svc||r.service===svc;
+      const matchSearch=!search||(r.resource_id||'').toLowerCase().includes(search)||(r.name||'').toLowerCase().includes(search)||(r.type||'').toLowerCase().includes(search);
+      return matchSvc&&matchSearch;
+    });
+    this._renderCostResTable(filtered);
+  },
+
+  _renderCostResTable(resources){
+    const el=document.getElementById('cost-res-table');
+    if(!resources.length){el.innerHTML='<div class="empty-state"><p style="color:var(--muted)">No resources match filter</p></div>';return;}
+    const rows=resources.map(r=>{
+      const badge=r.service==='EC2'?'badge-cyan':r.service==='RDS'?'badge-amber':r.service==='Lambda'?'badge-green':'badge-purple';
+      return`<tr>
+        <td style="padding:8px 10px"><span class="badge ${badge}" style="font-size:.72em">${r.service}</span></td>
+        <td style="padding:8px 10px;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.8em;color:var(--text2)">${r.resource_id||'—'}</td>
+        <td style="padding:8px 10px;color:var(--text)">${r.name||'—'}</td>
+        <td style="padding:8px 10px;color:var(--muted);font-size:.82em">${r.region||'—'}</td>
+        <td style="padding:8px 10px;color:var(--muted);font-size:.82em">${r.instance_type||r.details||'—'}</td>
+        <td style="padding:8px 10px;font-weight:700;color:var(--purple);text-align:right">$${(r.monthly_usd||0).toFixed(2)}<span style="font-size:.75em;font-weight:400;color:var(--muted)">/mo</span></td>
+        <td style="padding:8px 10px;color:var(--muted);font-size:.8em;text-align:right">$${((r.monthly_usd||0)*12).toFixed(0)}/yr</td>
+      </tr>`;
+    }).join('');
+    el.innerHTML=`<div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:.83em">
+        <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted);font-size:.78em;text-transform:uppercase;letter-spacing:.05em">
+          <th style="padding:6px 10px;text-align:left;font-weight:600">Service</th>
+          <th style="padding:6px 10px;text-align:left;font-weight:600">Resource ID</th>
+          <th style="padding:6px 10px;text-align:left;font-weight:600">Name</th>
+          <th style="padding:6px 10px;text-align:left;font-weight:600">Region</th>
+          <th style="padding:6px 10px;text-align:left;font-weight:600">Type / Details</th>
+          <th style="padding:6px 10px;text-align:right;font-weight:600">Est. Monthly</th>
+          <th style="padding:6px 10px;text-align:right;font-weight:600">Est. Annual</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="margin-top:8px;font-size:.74em;color:var(--muted);padding:0 4px">* Costs are estimates based on on-demand pricing. Actual costs may differ due to Reserved Instances, Savings Plans, or data transfer.</div>
+    </div>`;
+  },
+
+  async loadCostAccounts(){
+    const el=document.getElementById('cost-acct-table');
+    const sumEl=document.getElementById('cost-acct-summary');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div> Fetching account spend...</div>';
+    sumEl.innerHTML='';
+    try{
+      const r=await this.api('GET','/cost/dashboard');
+      if(!r||!r.ok){el.innerHTML='<div style="padding:12px;color:var(--muted);font-size:.83em">&#9888; Cost Explorer unavailable — check AWS credentials and that Cost Explorer is enabled.</div>';return;}
+      const d=await r.json();
+      if(!d.available){el.innerHTML=`<div style="padding:12px;color:var(--amber);font-size:.83em">&#9888; ${d.error||'Cost Explorer unavailable'}</div>`;return;}
+      const accounts=d.accounts||[];
+      const total=accounts.reduce((s,a)=>s+a.amount_usd,0);
+      const days=30;
+      sumEl.innerHTML=[
+        {label:'Total Accounts',val:accounts.length,color:'var(--text)'},
+        {label:`Total Spend (${days}d)`,val:'$'+total.toFixed(2),color:'var(--purple)'},
+        {label:'Avg per Account',val:accounts.length?'$'+(total/accounts.length).toFixed(2):'—',color:'var(--cyan)'},
+        {label:'Top Account',val:accounts[0]?`$${accounts[0].amount_usd.toFixed(2)}`:'—',color:'var(--amber)'},
+      ].map(c=>`<div style="padding:12px 14px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+        <div style="font-size:.73em;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">${c.label}</div>
+        <div style="font-size:1.4em;font-weight:800;color:${c.color}">${c.val}</div>
+      </div>`).join('');
+      if(!accounts.length){el.innerHTML='<div class="empty-state"><p>No account data — single-account setup or no spend in period</p></div>';return;}
+      const rows=accounts.map((a,i)=>{
+        const pct=total>0?Math.round(a.amount_usd/total*100):0;
+        const barW=accounts[0].amount_usd>0?Math.round(a.amount_usd/accounts[0].amount_usd*100):0;
+        const colors=['var(--purple)','var(--cyan)','var(--amber)','var(--green)','var(--red)'];
+        const col=colors[i%colors.length];
+        return`<tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:9px 10px;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.8em;color:var(--text2)">${a.account_id||'—'}</td>
+          <td style="padding:9px 10px;color:var(--text);font-weight:500">${a.account_name||a.account_id||'—'}</td>
+          <td style="padding:9px 10px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="flex:1;background:var(--surface3);border-radius:4px;height:8px;overflow:hidden;min-width:80px"><div style="width:${barW}%;height:100%;background:${col};border-radius:4px"></div></div>
+              <span style="font-weight:700;color:${col};min-width:70px;text-align:right">$${a.amount_usd.toFixed(2)}</span>
+            </div>
+          </td>
+          <td style="padding:9px 10px;text-align:right;color:var(--muted);font-size:.83em">${pct}%</td>
+          <td style="padding:9px 10px;text-align:right;color:var(--muted);font-size:.82em">$${(a.amount_usd/days*30).toFixed(2)}/mo est.</td>
+        </tr>`;
+      }).join('');
+      el.innerHTML=`<div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:.83em">
+          <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted);font-size:.78em;text-transform:uppercase;letter-spacing:.05em">
+            <th style="padding:6px 10px;text-align:left;font-weight:600">Account ID</th>
+            <th style="padding:6px 10px;text-align:left;font-weight:600">Account Name</th>
+            <th style="padding:6px 10px;text-align:left;font-weight:600">Spend</th>
+            <th style="padding:6px 10px;text-align:right;font-weight:600">% of Total</th>
+            <th style="padding:6px 10px;text-align:right;font-weight:600">Monthly Est.</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div style="margin-top:6px;font-size:.74em;color:var(--muted);padding:0 4px">Source: AWS Cost Explorer · ${days}-day period</div>
+      </div>`;
+    }catch(e){el.innerHTML=`<div style="padding:12px;color:var(--red)">Error: ${e.message}</div>`;}
+  },
+
+  async loadCostOrgs(){
+    const listEl=document.getElementById('cost-orgs-list');
+    const chartEl=document.getElementById('cost-orgs-chart');
+    listEl.innerHTML='<div class="loading-state"><div class="spinner"></div> Loading organization accounts...</div>';
+    chartEl.innerHTML='';
+    try{
+      const r=await this.api('GET','/cost/dashboard');
+      if(!r||!r.ok){listEl.innerHTML='<div style="padding:12px;color:var(--muted);font-size:.83em">&#9888; Cost Explorer unavailable. See setup guide →</div>';return;}
+      const d=await r.json();
+      if(!d.available){listEl.innerHTML=`<div style="padding:12px;color:var(--amber);font-size:.83em">&#9888; ${d.error||'Cost Explorer unavailable'}</div>`;return;}
+      const accounts=d.accounts||[];
+      const total=accounts.reduce((s,a)=>s+a.amount_usd,0);
+      if(!accounts.length){listEl.innerHTML='<div class="empty-state"><p>No linked accounts found — single-account or no spend data.</p></div>';return;}
+      const colors=['#a855f7','#22d3ee','#fbbf24','#34d399','#f87171','#60a5fa'];
+      listEl.innerHTML=accounts.map((a,i)=>{
+        const pct=total>0?(a.amount_usd/total*100).toFixed(1):0;
+        const col=colors[i%colors.length];
+        return`<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);margin-bottom:6px">
+          <div style="width:10px;height:10px;border-radius:50%;background:${col};flex-shrink:0"></div>
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;font-size:.84em;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${a.account_name||a.account_id}</div>
+            <div style="font-size:.75em;color:var(--muted);font-family:'SF Mono','Cascadia Code',ui-monospace,monospace">${a.account_id}</div>
+          </div>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-weight:700;color:${col}">$${a.amount_usd.toFixed(2)}</div>
+            <div style="font-size:.75em;color:var(--muted)">${pct}%</div>
+          </div>
+        </div>`;
+      }).join('');
+      // Donut-style bar chart
+      const chartRows=accounts.map((a,i)=>{
+        const pct=total>0?Math.round(a.amount_usd/total*100):0;
+        const col=colors[i%colors.length];
+        return`<div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:.8em;margin-bottom:3px">
+            <span style="color:var(--text)">${a.account_name||a.account_id}</span>
+            <span style="font-weight:600;color:${col}">$${a.amount_usd.toFixed(2)} <span style="color:var(--muted);font-weight:400">(${pct}%)</span></span>
+          </div>
+          <div style="background:var(--surface3);border-radius:6px;height:10px;overflow:hidden">
+            <div style="width:${pct}%;height:100%;background:${col};border-radius:6px;transition:width .4s ease"></div>
+          </div>
+        </div>`;
+      }).join('');
+      chartEl.innerHTML=`<div style="padding:4px 0">
+        <div style="font-size:.75em;color:var(--muted);margin-bottom:12px;text-align:center">30-day spend · Total: <b style="color:var(--text)">$${total.toFixed(2)}</b></div>
+        ${chartRows}
+      </div>`;
+    }catch(e){listEl.innerHTML=`<div style="padding:12px;color:var(--red)">Error: ${e.message}</div>`;}
+  },
+
+  costTab(tab,btn){
+    ['quick','actions','terraform'].forEach(t=>{
+      document.getElementById('cost-pane-'+t).style.display=t===tab?'block':'none';
+    });
+    document.querySelectorAll('#cost-tabs .tab-pill').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+  },
+
+  async quickEstimate(){
+    const desc=document.getElementById('cost-quick-desc').value.trim();
+    const region=document.getElementById('cost-quick-region').value;
+    if(!desc){this.toast('Enter a resource description','error');return;}
+    const el=document.getElementById('cost-quick-result');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div> Fetching live AWS prices...</div>';
+    try{
+      const r=await this.api('POST','/cost/estimate',{description:desc,region});
+      if(!r||!r.ok){el.innerHTML='<div class="result-card"><p class="text-muted">Price lookup failed</p></div>';return;}
+      const d=await r.json();
+      if(d.error){el.innerHTML=`<div class="result-card"><p style="color:var(--red)">${d.error}</p></div>`;return;}
+      const resources=d.resources||[];
+      const sourceTag=resources[0]?.source==='aws_pricing_api'?'<span class="badge badge-green" style="font-size:.7em">&#9989; Live AWS Pricing API</span>':'<span class="badge badge-amber" style="font-size:.7em">&#9888; Reference rates</span>';
+      el.innerHTML=`<div class="result-card">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+          <span style="font-size:1.6em;font-weight:800;color:var(--purple)">$${d.total_monthly_usd.toFixed(2)}<span style="font-size:.5em;font-weight:400;color:var(--muted)">/mo</span></span>
+          <span style="font-size:1.1em;color:var(--muted)">· $${d.total_annual_usd.toFixed(2)}/yr</span>
+          ${sourceTag}
+        </div>
+        ${resources.length?`<div style="display:flex;flex-direction:column;gap:6px;font-size:.83em">
+          ${resources.map(r=>`<div style="display:flex;justify-content:space-between;padding:7px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)">
+            <span style="color:var(--text2)"><b>${r.type}</b> ${r.details}</span>
+            <span style="font-weight:700;color:var(--cyan)">$${r.monthly_usd.toFixed(2)}/mo</span>
+          </div>`).join('')}
+        </div>`:''}
+        ${d.warnings&&d.warnings.length?`<div style="margin-top:8px;font-size:.78em;color:var(--amber)">&#9888; ${d.warnings.join('<br>&#9888; ')}</div>`:''}
+        <div style="margin-top:10px;font-size:.74em;color:var(--muted)">
+          &#128196; <a href="https://aws.amazon.com/pricing/" target="_blank" rel="noopener" style="color:var(--cyan)">AWS Official Pricing</a> &bull;
+          On-demand rates &bull; Reserved saves 30-70% &bull; Region: ${region}
+        </div>
+      </div>`;
+    }catch(e){el.innerHTML=`<div class="result-card"><p style="color:var(--red)">Error: ${e.message}</p></div>`;}
+  },
+
+  async analyzeTerraformCost(){
+    const raw=document.getElementById('cost-tf-plan').value.trim();
+    if(!raw){this.toast('Paste Terraform plan JSON first','error');return;}
+    let plan;try{plan=JSON.parse(raw);}catch(e){this.toast('Invalid JSON — make sure you ran: terraform show -json','error');return;}
+    const el=document.getElementById('cost-tf-result');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div> Analyzing Terraform plan...</div>';
+    try{
+      const r=await this.api('POST','/cost/terraform',{plan_json:plan});
+      if(!r||!r.ok){el.innerHTML='<div class="result-card"><p class="text-muted">Analysis failed</p></div>';return;}
+      const d=await r.json();
+      if(d.error){el.innerHTML=`<div class="result-card"><p style="color:var(--red)">${d.error}</p></div>`;return;}
+      const resources=d.resources||[];
+      el.innerHTML=`<div class="result-card">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+          <span style="font-size:1.5em;font-weight:800;color:var(--purple)">$${d.total_monthly_usd.toFixed(2)}<span style="font-size:.5em;font-weight:400;color:var(--muted)">/mo</span></span>
+          <span style="color:var(--muted)">· $${d.total_annual_usd.toFixed(2)}/yr</span>
+          <span class="badge badge-cyan">${d.resource_count} resources</span>
+        </div>
+        ${resources.length?`<div style="display:flex;flex-direction:column;gap:5px;font-size:.81em">
+          ${resources.map(r=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)">
+            <div>
+              <div style="font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;color:var(--text)">${r.address}</div>
+              <div style="color:var(--muted);font-size:.9em">${r.details}</div>
+              ${r.note?`<div style="color:var(--amber);font-size:.85em">&#9888; ${r.note}</div>`:''}
+            </div>
+            <span style="font-weight:700;color:var(--cyan);white-space:nowrap;margin-left:12px">$${r.monthly_usd.toFixed(2)}/mo</span>
+          </div>`).join('')}
+        </div>`:'<p class="text-muted">No priceable resources found in this plan.</p>'}
+        ${d.warnings&&d.warnings.length?`<div style="margin-top:8px;font-size:.78em;color:var(--amber)">&#9888; ${d.warnings.join('<br>&#9888; ')}</div>`:''}
+        <div style="margin-top:10px;font-size:.74em;color:var(--muted)">Source: ${d.pricing_source||'AWS Pricing API'} &bull; <a href="${d.pricing_docs||'https://aws.amazon.com/pricing/'}" target="_blank" rel="noopener" style="color:var(--cyan)">AWS Pricing Docs</a></div>
+      </div>`;
+    }catch(e){el.innerHTML=`<div class="result-card"><p style="color:var(--red)">Error: ${e.message}</p></div>`;}
+  },
+
   async loadCostOverview(){
     const sumRow=document.getElementById('cost-summary-row');
     const svcEl=document.getElementById('cost-services');
@@ -2194,12 +2912,40 @@ const App = {
   },
 
   async analyzeCost(){
+    const desc=(document.getElementById('cost-actions-desc')||{value:''}).value.trim();
     const raw=document.getElementById('cost-actions').value.trim();
-    let actions;try{actions=JSON.parse(raw);}catch(e){this.toast('Invalid JSON in actions field','error');return;}
     const el=document.getElementById('cost-result');
-    const impactEl=document.getElementById('cost-aws');
+
+    // If plain-English description given, route to /cost/estimate instead
+    if(desc && !raw){
+      el.innerHTML='<div class="loading-state"><div class="spinner"></div> Estimating cost...</div>';
+      try{
+        const region=document.getElementById('cost-quick-region')?.value||'us-east-1';
+        const r=await this.api('POST','/cost/estimate',{description:desc,region});
+        if(!r||!r.ok){el.innerHTML='<div class="result-card"><p class="text-muted">Estimate failed</p></div>';return;}
+        const d=await r.json();
+        const resources=d.resources||[];
+        const src=resources[0]?.source==='aws_pricing_api'?'<span class="badge badge-green" style="font-size:.7em">&#9989; Live AWS Pricing API</span>':'<span class="badge badge-amber" style="font-size:.7em">&#9888; Reference rates</span>';
+        el.innerHTML=`<div class="result-card">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+            <span style="font-size:1.5em;font-weight:800;color:var(--purple)">$${d.total_monthly_usd.toFixed(2)}<span style="font-size:.5em;font-weight:400;color:var(--muted)">/mo</span></span>
+            <span style="color:var(--muted)">· $${d.total_annual_usd.toFixed(2)}/yr</span>
+            ${src}
+          </div>
+          ${resources.map(r=>`<div style="display:flex;justify-content:space-between;padding:6px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border);font-size:.83em;margin-bottom:5px">
+            <span><b>${r.type}</b> ${r.details}</span>
+            <span style="font-weight:700;color:var(--cyan)">$${r.monthly_usd.toFixed(2)}/mo</span>
+          </div>`).join('')}
+          ${d.warnings&&d.warnings.length?`<div style="margin-top:8px;font-size:.78em;color:var(--amber)">&#9888; ${d.warnings.join('<br>&#9888; ')}</div>`:''}
+          <div style="margin-top:8px;font-size:.74em;color:var(--muted)">On-demand rates · <a href="https://aws.amazon.com/pricing/" target="_blank" rel="noopener" style="color:var(--cyan)">AWS Pricing Docs &#8599;</a></div>
+        </div>`;
+      }catch(e){el.innerHTML=`<div class="result-card"><p style="color:var(--red)">Error: ${e.message}</p></div>`;}
+      return;
+    }
+
+    if(!raw && !desc){this.toast('Enter a description or paste actions JSON','error');return;}
+    let actions;try{actions=JSON.parse(raw);}catch(e){this.toast('Invalid JSON — check format or use the description field above','error');return;}
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
-    impactEl.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
     try{
       const r=await this.api('POST','/cost/analyze',{actions});
       if(r&&r.ok){
@@ -2226,17 +2972,8 @@ const App = {
             ${rep.warnings.map(w=>'&#9888; '+w).join('<br>')}
           </div>`:''}
         </div>`;
-        // Show MTD spend from real AWS in impact panel
-        const mtd=rep.current_monthly_spend||0;
-        impactEl.innerHTML=mtd?`<div style="text-align:center;padding:16px">
-          <div style="font-size:2em;font-weight:800;background:linear-gradient(135deg,var(--purple),var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent">$${mtd.toFixed(2)}</div>
-          <div class="text-muted" style="font-size:.82em">Month-to-Date AWS Spend</div>
-          ${rep.forecast_month_end?`<div style="margin-top:8px;font-size:.85em;color:var(--amber)">&#127362; Forecast month-end: <b>$${rep.forecast_month_end.toFixed(2)}</b></div>`:''}
-          <div style="margin-top:10px;font-size:.8em;color:var(--green)">&#9989; Live from AWS Cost Explorer</div>
-        </div>`:`<div class="empty-state"><p class="text-muted">AWS Cost Explorer not available</p></div>`;
       }else{
         el.innerHTML='<div class="result-card"><p class="text-muted">Cost analysis unavailable — check AWS credentials</p></div>';
-        impactEl.innerHTML='';
       }
     }catch(e){el.innerHTML=`<div class="result-card"><p style="color:var(--red)">Error: ${e.message}</p></div>`;}
   },
@@ -2244,6 +2981,7 @@ const App = {
   // ── CHAT ─────────────────────────────────────────────────────────
   newChat(){
     this.chatSessionId='sess-'+Date.now();
+    localStorage.setItem('nexusops_chat_session',this.chatSessionId);
     const msgs=document.getElementById('chat-messages');
     msgs.innerHTML='';
     const w=document.createElement('div');w.className='chat-welcome';w.id='chat-welcome';
@@ -2252,6 +2990,31 @@ const App = {
     document.getElementById('chat-session-label').textContent='';
     document.getElementById('chat-chips').style.display='flex';
     this.pendingAction=null;this.pendingParams=null;
+  },
+
+  async restoreChatHistory(){
+    // Restore previous session from localStorage; load messages from server
+    // Skip if chat already has messages loaded in this page session
+    const msgsEl=document.getElementById('chat-messages');
+    if(msgsEl&&msgsEl.querySelectorAll('.chat-row').length>0) return;
+    const saved=localStorage.getItem('nexusops_chat_session');
+    if(!saved) return;
+    this.chatSessionId=saved;
+    document.getElementById('chat-session-label').textContent='Session '+saved.slice(-8);
+    try{
+      const r=await this.api('GET','/chat/history/'+encodeURIComponent(saved));
+      if(!r||!r.ok) return;
+      const d=await r.json();
+      const msgs=d.messages||[];
+      if(!msgs.length) return;
+      // Clear welcome screen
+      const msgsEl=document.getElementById('chat-messages');
+      msgsEl.innerHTML='';
+      document.getElementById('chat-chips').style.display='none';
+      for(const m of msgs){
+        this.appendChatMsg(m.role==='assistant'?'assistant':'user', m.content, '');
+      }
+    }catch(e){}
   },
 
   chipChat(msg){document.getElementById('chat-chips').style.display='none';this.sendChatMsg(msg);},
@@ -2303,7 +3066,14 @@ const App = {
   },
 
   _md(text){
-    var s=text,_i,_j;while((_i=s.indexOf('[TOOL_CALL:'))>=0){_j=s.indexOf(']',_i);if(_j<0)break;s=s.slice(0,_i)+s.slice(_j+1);}s=s.trim();
+    var s=text;
+    // Strip ```tool ... ``` code blocks (LLM sometimes wraps tool calls in code blocks)
+    s=s.replace(/```tool[\s\S]*?```/gi,'');
+    // Strip [TOOL_CALL: ...] tokens (may span multiple lines due to JSON params)
+    s=s.replace(/\[TOOL_CALL:[^\]]*(?:\{[^}]*\}[^\]]*)*\]/g,'');
+    // Fallback: strip any remaining [TOOL_CALL: ... ] using bracket depth
+    var _i,_j;while((_i=s.indexOf('[TOOL_CALL:'))>=0){_j=s.indexOf(']',_i);if(_j<0)break;s=s.slice(0,_i)+s.slice(_j+1);}
+    s=s.trim();
     s=s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     s=s.replace(/```([a-z]*)[ \t]*([^]*?)```/g,function(_,lang,code){
       var id='cb'+Math.random().toString(36).slice(2,7);
@@ -2359,7 +3129,7 @@ const App = {
   },
 
   async sendChatMsg(msg){
-    if(!this.chatSessionId) this.chatSessionId='sess-'+Date.now();
+    if(!this.chatSessionId){this.chatSessionId='sess-'+Date.now();localStorage.setItem('nexusops_chat_session',this.chatSessionId);}
     this.appendChatMsg('user',msg);
     const ti=document.getElementById('typing-indicator');ti.style.display='flex';
     document.getElementById('chat-session-label').textContent='Session '+this.chatSessionId.slice(-8);
@@ -2382,44 +3152,260 @@ const App = {
   },
 
   // ── INFRASTRUCTURE ───────────────────────────────────────────────
+  _infraRegion(){return(document.getElementById('infra-region-select')||{}).value||'';},
+
   infraTab(tab,btn){
     document.getElementById('infra-aws').style.display=tab==='aws'?'block':'none';
     document.getElementById('infra-k8s').style.display=tab==='k8s'?'block':'none';
-    document.querySelectorAll('#infra-tabs .tab-pill').forEach(b=>{b.classList.remove('active');});
+    document.querySelectorAll('#infra-tabs .tab-pill').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active');
-    if(tab==='k8s'){this.loadK8sHealth();this.loadPods();}
+    if(tab==='k8s'){this.loadK8sHealth();this.loadDeployments();this.loadPods();}
+    if(tab==='aws'){this._loadAllAWS();}
+  },
+
+  refreshInfra(){
+    const isK8s=document.getElementById('infra-k8s').style.display!=='none';
+    if(isK8s){this.loadK8sHealth();this.loadDeployments();this.loadPods();}
+    else{this._loadAllAWS();}
+  },
+
+  _loadAllAWS(){
+    this.loadEC2();this.loadAlarms();this.loadECS();this.loadRDS();
+    this.loadLambda();this.loadS3();this.loadSQS();this.loadDynamoDB();
+    this.loadELB();this.loadCloudTrail();
+  },
+
+  _infraCard(count,label,color){return`<div class="card" style="padding:12px;text-align:center"><div style="font-size:1.8em;font-weight:800;color:${color}">${count}</div><div class="text-muted" style="font-size:.76em;margin-top:2px">${label}</div></div>`;},
+
+  // Hide card if resource returns empty (avoid clutter)
+  _hideIfEmpty(cardId,listEl,items){
+    const card=document.getElementById(cardId);
+    if(card){card.style.display=items&&items.length?'':'none';}
+    return items&&items.length;
   },
 
   async loadEC2(){
     const el=document.getElementById('ec2-list');
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const region=this._infraRegion();
+    const qs=region?`?region=${region}`:'';
     try{
-      const r=await this.api('GET','/aws/ec2/instances');
+      const r=await this.api('GET','/aws/ec2/instances'+qs);
       if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>AWS not configured</p></div>';return;}
-      const d=await r.json();const ec2d=d.ec2_instances||d;const instances=ec2d.instances||d.instances||d.data||[];
+      const d=await r.json();const instances=(d.ec2_instances||d).instances||d.instances||d.data||[];
+      this._ec2Count={total:instances.length,running:instances.filter(i=>(i.state||'').toLowerCase()==='running').length};
+      this._updateInfraSummary();
       if(!instances.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9729;</div><p>No EC2 instances</p></div>';return;}
       el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>ID</th><th>Name</th><th>State</th><th>Type</th><th>IP</th><th>Actions</th></tr></thead><tbody>`+
-        instances.map(i=>{const stateStr=i.state||i.State?.Name||'unknown';const stateCls=stateStr==='running'?'badge-green':stateStr==='stopped'?'badge-gray':'badge-amber';
-          const name=i.name||i.Name||i.instance_id||i.id||'--';
-          const iid=i.id||i.instance_id||'';
-          const running=stateStr==='running';const stopped=stateStr==='stopped';
-          return`<tr><td><code style="font-size:.8em">${iid||'--'}</code></td><td>${name}</td><td><span class="badge ${stateCls}">${stateStr}</span></td><td>${i.type||i.instance_type||'--'}</td><td>${i.public_ip||i.private_ip||'--'}</td><td style="white-space:nowrap">
-            ${stopped?`<button class="btn btn-ghost btn-sm" style="color:var(--green);font-size:.75em;padding:3px 7px" onclick="App.ec2Action('${iid}','start')">&#9654; Start</button>`:''}
-            ${running?`<button class="btn btn-ghost btn-sm" style="color:var(--amber);font-size:.75em;padding:3px 7px" onclick="App.ec2Action('${iid}','stop')">&#9646;&#9646; Stop</button>`:''}
-            ${running?`<button class="btn btn-ghost btn-sm" style="color:var(--cyan);font-size:.75em;padding:3px 7px" onclick="App.ec2Action('${iid}','reboot')">&#8635; Reboot</button>`:''}
-          </td></tr>`;
+        instances.map(i=>{
+          const st=i.state||i.State?.Name||'unknown';
+          const sc=st==='running'?'badge-green':st==='stopped'?'badge-gray':'badge-amber';
+          const iid=i.id||i.instance_id||'';const name=i.name||i.Name||iid||'--';
+          const region=this._awsRegion||'us-east-1';
+          const consoleUrl=`https://console.aws.amazon.com/ec2/v2/home?region=${region}#Instances:instanceId=${iid}`;
+          return`<tr>
+            <td><a href="${consoleUrl}" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.8em;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace">${iid||'--'} &#8599;</a></td>
+            <td>${name}</td><td><span class="badge ${sc}">${st}</span></td>
+            <td style="font-size:.82em">${i.type||i.instance_type||'--'}</td>
+            <td style="font-size:.82em">${i.public_ip||i.private_ip||'--'}</td>
+            <td style="white-space:nowrap">
+              ${st==='stopped'?`<button class="btn btn-ghost btn-sm" style="color:var(--green);font-size:.74em;padding:2px 6px" onclick="App.ec2Action('${iid}','start')">&#9654; Start</button>`:''}
+              ${st==='running'?`<button class="btn btn-ghost btn-sm" style="color:var(--amber);font-size:.74em;padding:2px 6px" onclick="App.ec2Action('${iid}','stop')">&#9646;&#9646; Stop</button>`:''}
+              ${st==='running'?`<button class="btn btn-ghost btn-sm" style="color:var(--cyan);font-size:.74em;padding:2px 6px" onclick="App.ec2Action('${iid}','reboot')">&#8635; Reboot</button>`:''}
+            </td></tr>`;
         }).join('')+`</tbody></table></div>`;
-    }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+    }catch(e){el.innerHTML=`<div class="empty-state"><p>Error: ${e.message}</p></div>`;}
   },
 
   async ec2Action(instanceId,action){
-    if(!confirm(`Are you sure you want to ${action} instance ${instanceId}?`))return;
+    if(!confirm(`${action.charAt(0).toUpperCase()+action.slice(1)} instance ${instanceId}?`))return;
     this.toast(`Sending ${action} to ${instanceId}...`,'info');
     try{
       const r=await this.api('POST',`/aws/ec2/${instanceId}/${action}`);
-      if(r&&r.ok){this.toast(`Instance ${instanceId} ${action} initiated`,'success');setTimeout(()=>this.loadEC2(),3000);}
-      else{const d=r?await r.json():{};this.toast(d.detail||`Failed to ${action} instance`,'error');}
+      if(r&&r.ok){this.toast(`${instanceId} ${action} initiated`,'success');setTimeout(()=>this.loadEC2(),3000);}
+      else{const d=r?await r.json():{};this.toast(d.detail||`Failed to ${action}`,'error');}
     }catch(e){this.toast('Error: '+e.message,'error');}
+  },
+
+  async loadECS(){
+    const el=document.getElementById('ecs-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const region=this._infraRegion();const qs=region?`?region=${region}`:'';
+    const d=await this._infraApi('/aws/ecs/services'+qs);
+    if(!d){this._noData('card-ecs','ecs-list');return;}
+    const services=d.services||d.data||[];
+    this._ecsCount=services.length;this._updateInfraSummary();
+    if(!this._hideIfEmpty('card-ecs',el,services)){return;}
+    el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Cluster</th><th>Running</th><th>Desired</th><th>Status</th></tr></thead><tbody>`+
+      services.map(s=>{
+        const running=s.running_count??s.runningCount??'--';const desired=s.desired_count??s.desiredCount??'--';
+        const ok=running===desired;const sc=ok?'badge-green':'badge-amber';
+        return`<tr><td style="font-size:.82em;font-weight:600">${s.service_name||s.serviceName||s.name||'--'}</td>
+          <td style="font-size:.8em;color:var(--muted)">${s.cluster_name||s.clusterName||s.cluster||'--'}</td>
+          <td><span class="badge ${sc}">${running}</span></td><td>${desired}</td>
+          <td><span class="badge ${s.status==='ACTIVE'?'badge-green':'badge-amber'}">${s.status||'ACTIVE'}</span></td></tr>`;
+      }).join('')+`</tbody></table></div>`;
+  },
+
+  async loadRDS(){
+    const el=document.getElementById('rds-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const region=this._infraRegion();const qs=region?`?region=${region}`:'';
+    const d=await this._infraApi('/aws/rds/instances'+qs);
+    if(!d){this._noData('card-rds','rds-list');return;}
+    const instances=d.instances||d.rds_instances||d.data||[];
+    this._rdsCount=instances.length;this._updateInfraSummary();
+    if(!this._hideIfEmpty('card-rds',el,instances)){return;}
+    el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Identifier</th><th>Engine</th><th>Class</th><th>Status</th><th>Multi-AZ</th></tr></thead><tbody>`+
+      instances.map(i=>{
+        const st=i.status||i.DBInstanceStatus||'unknown';const sc=st==='available'?'badge-green':st==='stopped'?'badge-gray':'badge-amber';
+        return`<tr><td style="font-size:.82em;font-weight:600">${i.identifier||i.DBInstanceIdentifier||'--'}</td>
+          <td style="font-size:.8em">${i.engine||i.Engine||'--'} ${i.engine_version||i.EngineVersion||''}</td>
+          <td style="font-size:.8em">${i.instance_class||i.DBInstanceClass||'--'}</td>
+          <td><span class="badge ${sc}">${st}</span></td>
+          <td><span class="badge ${(i.multi_az||i.MultiAZ)?'badge-cyan':'badge-gray'}">${(i.multi_az||i.MultiAZ)?'Yes':'No'}</span></td></tr>`;
+      }).join('')+`</tbody></table></div>`;
+  },
+
+  async loadLambda(){
+    const el=document.getElementById('lambda-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const region=this._infraRegion();const qs=region?`?region=${region}`:'';
+    const d=await this._infraApi('/aws/lambda/functions'+qs);
+    if(!d){this._noData('card-lambda','lambda-list');return;}
+    const fns=d.functions||d.lambda_functions||d.data||[];
+    this._lambdaCount=fns.length;this._updateInfraSummary();
+    if(!this._hideIfEmpty('card-lambda',el,fns)){return;}
+    el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Function</th><th>Runtime</th><th>Memory</th><th>Timeout</th><th>Last Modified</th></tr></thead><tbody>`+
+      fns.slice(0,20).map(f=>{
+        const modified=(f.last_modified||f.LastModified||'').substring(0,10);
+        return`<tr><td style="font-size:.82em;font-weight:600">${f.function_name||f.FunctionName||'--'}</td>
+          <td style="font-size:.8em"><span class="badge badge-cyan">${f.runtime||f.Runtime||'--'}</span></td>
+          <td style="font-size:.8em">${f.memory_size||f.MemorySize||'--'}MB</td>
+          <td style="font-size:.8em">${f.timeout||f.Timeout||'--'}s</td>
+          <td style="font-size:.78em;color:var(--muted)">${modified||'--'}</td></tr>`;
+      }).join('')+`</tbody></table></div>`;
+  },
+
+  _updateInfraSummary(){
+    const el=document.getElementById('infra-aws-summary');if(!el)return;
+    const ec2=this._ec2Count||{total:0,running:0};
+    const region=this._infraRegion();const rLabel=region?` (${region})`:'';
+    el.innerHTML=
+      this._infraCard(ec2.running,'EC2 Running'+rLabel,'var(--green)')+
+      this._infraCard((ec2.total-ec2.running)||0,'EC2 Stopped','var(--muted)')+
+      this._infraCard(this._ecsCount||0,'ECS Services','var(--cyan)')+
+      this._infraCard(this._rdsCount||0,'RDS Databases','var(--purple)')+
+      this._infraCard(this._lambdaCount||0,'Lambda','var(--amber)')+
+      this._infraCard(this._s3Count||0,'S3 Buckets','var(--blue,#3b82f6)')+
+      this._infraCard(this._sqsCount||0,'SQS Queues','var(--pink,#ec4899)')+
+      this._infraCard(this._dynamoCount||0,'DynamoDB Tables','var(--orange,#f97316)');
+  },
+
+  async loadS3(){
+    const el=document.getElementById('s3-list');if(!el)return;
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const d=await this._infraApi('/aws/s3/buckets');
+    if(!d){this._noData('card-s3','s3-list');return;}
+    const buckets=d.buckets||d.data||[];
+    this._s3Count=buckets.length;this._updateInfraSummary();
+    if(!this._hideIfEmpty('card-s3',el,buckets)){return;}
+    el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Bucket Name</th><th>Region</th><th>Created</th><th>Console</th></tr></thead><tbody>`+
+      buckets.slice(0,30).map(b=>{
+        const name=b.name||b.Name||'--';const bregion=b.region||b.LocationConstraint||'us-east-1';
+        const url=`https://s3.console.aws.amazon.com/s3/buckets/${name}`;
+        const created=(b.creation_date||b.CreationDate||'').substring(0,10);
+        return`<tr><td style="font-size:.82em;font-weight:600">${name}</td>
+          <td style="font-size:.8em;color:var(--muted)">${bregion}</td>
+          <td style="font-size:.78em;color:var(--muted)">${created||'--'}</td>
+          <td><a href="${url}" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.8em">Open &#8599;</a></td></tr>`;
+      }).join('')+`</tbody></table></div>`;
+  },
+
+  async loadSQS(){
+    const el=document.getElementById('sqs-list');if(!el)return;
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const region=this._infraRegion();const qs=region?`?region=${region}`:'';
+    const d=await this._infraApi('/aws/sqs/queues'+qs);
+    if(!d){this._noData('card-sqs','sqs-list');return;}
+    const queues=d.queues||d.data||[];
+    this._sqsCount=queues.length;this._updateInfraSummary();
+    if(!this._hideIfEmpty('card-sqs',el,queues)){return;}
+    el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Queue Name</th><th>Type</th><th>Messages</th><th>Console</th></tr></thead><tbody>`+
+      queues.slice(0,20).map(q=>{
+        const url_raw=q.url||q.QueueUrl||'';const name=url_raw.split('/').pop()||q.name||'--';
+        const fifo=name.endsWith('.fifo');
+        const msgs=q.approximate_number_of_messages??q.ApproximateNumberOfMessages??'--';
+        const cUrl=`https://sqs.${region||'us-east-1'}.console.aws.amazon.com/sqs/v3/home#/queues/${encodeURIComponent(url_raw)}`;
+        return`<tr><td style="font-size:.82em;font-weight:600">${name}</td>
+          <td><span class="badge ${fifo?'badge-purple':'badge-cyan'}">${fifo?'FIFO':'Standard'}</span></td>
+          <td style="font-size:.82em">${msgs}</td>
+          <td><a href="${cUrl}" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.8em">Open &#8599;</a></td></tr>`;
+      }).join('')+`</tbody></table></div>`;
+  },
+
+  async loadDynamoDB(){
+    const el=document.getElementById('dynamodb-list');if(!el)return;
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const region=this._infraRegion();const qs=region?`?region=${region}`:'';
+    const d=await this._infraApi('/aws/dynamodb/tables'+qs);
+    if(!d){this._noData('card-dynamodb','dynamodb-list');return;}
+    const tables=d.tables||d.data||[];
+    this._dynamoCount=tables.length;this._updateInfraSummary();
+    if(!this._hideIfEmpty('card-dynamodb',el,tables)){return;}
+    el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Table Name</th><th>Status</th><th>Console</th></tr></thead><tbody>`+
+      tables.slice(0,20).map(t=>{
+        const name=t.name||t.TableName||t||'--';
+        const status=t.status||t.TableStatus||'ACTIVE';
+        const sc=status==='ACTIVE'?'badge-green':'badge-amber';
+        const cUrl=`https://console.aws.amazon.com/dynamodbv2/home?region=${region||'us-east-1'}#table?name=${encodeURIComponent(name)}`;
+        return`<tr><td style="font-size:.82em;font-weight:600">${name}</td>
+          <td><span class="badge ${sc}">${status}</span></td>
+          <td><a href="${cUrl}" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.8em">Open &#8599;</a></td></tr>`;
+      }).join('')+`</tbody></table></div>`;
+  },
+
+  async loadELB(){
+    const el=document.getElementById('elb-list');if(!el)return;
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const region=this._infraRegion();const qs=region?`?region=${region}`:'';
+    const d=await this._infraApi('/aws/elb/target-health'+qs);
+    if(!d){this._noData('card-elb','elb-list');return;}
+    const lbs=d.load_balancers||d.target_groups||d.data||[];
+    if(!this._hideIfEmpty('card-elb',el,lbs)){return;}
+    el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Healthy</th><th>Unhealthy</th><th>Console</th></tr></thead><tbody>`+
+      lbs.slice(0,15).map(lb=>{
+        const name=lb.name||lb.TargetGroupName||lb.LoadBalancerName||'--';
+        const type=lb.type||lb.TargetType||'--';
+        const healthy=lb.healthy||lb.healthy_count||0;const unhealthy=lb.unhealthy||lb.unhealthy_count||0;
+        const sc=unhealthy>0?'badge-red':'badge-green';
+        const cUrl=`https://console.aws.amazon.com/ec2/v2/home?region=${region||'us-east-1'}#LoadBalancers:`;
+        return`<tr><td style="font-size:.82em;font-weight:600">${name}</td>
+          <td style="font-size:.8em">${type}</td>
+          <td><span class="badge badge-green">${healthy} &#10003;</span></td>
+          <td><span class="badge ${sc}">${unhealthy}</span></td>
+          <td><a href="${cUrl}" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.8em">Open &#8599;</a></td></tr>`;
+      }).join('')+`</tbody></table></div>`;
+  },
+
+  async loadCloudTrail(){
+    const el=document.getElementById('cloudtrail-list');if(!el)return;
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const d=await this._infraApi('/aws/cloudtrail/events?hours=24');
+    if(!d){this._noData('card-cloudtrail','cloudtrail-list');return;}
+    const events=d.events||d.data||[];
+    if(!this._hideIfEmpty('card-cloudtrail',el,events)){return;}
+    el.innerHTML=events.slice(0,15).map(e=>{
+      const time=(e.time||e.EventTime||'').substring(0,16);
+      const evt=e.event_name||e.EventName||'--';const user=e.user||e.Username||'--';
+      const res=(e.resources||[]).join(', ')||'--';
+      return`<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:.8em">
+        <span style="color:var(--muted);white-space:nowrap">${time}</span>
+        <span style="font-weight:600;color:var(--cyan)">${evt}</span>
+        <span style="color:var(--muted)">by ${user}</span>
+        <span style="color:var(--text);font-size:.9em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${res}</span>
+      </div>`;
+    }).join('');
   },
 
   async loadAlarms(){
@@ -2428,12 +3414,17 @@ const App = {
     try{
       const r=await this.api('GET','/aws/cloudwatch/alarms');
       if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>CloudWatch not configured</p></div>';return;}
-      const d=await r.json();const cwd=d.cloudwatch_alarms||d;const alarms=cwd.alarms||d.alarms||d.data||[];
-      if(!alarms.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No alarms</p></div>';return;}
-      el.innerHTML=alarms.slice(0,10).map(a=>{const state=a.state_value||a.StateValue||'OK';const cls=state==='ALARM'?'badge-red':state==='OK'?'badge-green':'badge-amber';
-        return`<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:.83em"><span class="badge ${cls}">${state}</span><span style="flex:1">${a.alarm_name||a.AlarmName||'Alarm'}</span></div>`;
+      const d=await r.json();const alarms=(d.cloudwatch_alarms||d).alarms||d.alarms||d.data||[];
+      if(!alarms.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No active alarms</p></div>';return;}
+      el.innerHTML=alarms.slice(0,12).map(a=>{
+        const st=a.state_value||a.StateValue||'OK';const sc=st==='ALARM'?'badge-red':st==='OK'?'badge-green':'badge-amber';
+        return`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-size:.83em">
+          <span class="badge ${sc}">${st}</span>
+          <span style="flex:1">${a.alarm_name||a.AlarmName||'Alarm'}</span>
+          <span style="font-size:.8em;color:var(--muted)">${(a.metric_name||a.MetricName||'')}</span>
+        </div>`;
       }).join('');
-    }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+    }catch(e){el.innerHTML=`<div class="empty-state"><p>Error: ${e.message}</p></div>`;}
   },
 
   async loadK8sHealth(){
@@ -2442,31 +3433,79 @@ const App = {
     try{
       const r=await this.api('GET','/check/k8s');
       if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>K8s not configured</p></div>';return;}
-      const d=await r.json();
-      const status=d.status||'unknown';const cls=status==='healthy'?'dot-green':status==='degraded'?'dot-amber':'dot-red';
-      el.innerHTML=`<div style="padding:12px 0">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><span class="status-dot ${cls}"></span><span style="font-size:1.1em;font-weight:700;text-transform:capitalize">${status}</span></div>
-        ${d.nodes?`<div class="flex-center gap-8 mb-8 text-sm"><span class="text-muted">Nodes:</span><span class="badge badge-green">${d.nodes.ready||0} ready</span><span class="badge badge-red">${d.nodes.not_ready||0} not ready</span></div>`:''}
-        ${d.pods?`<div class="flex-center gap-8 text-sm"><span class="text-muted">Pods:</span><span class="badge badge-green">${d.pods.running||0} running</span><span class="badge badge-red">${d.pods.failed||0} failed</span></div>`:''}
-        ${d.message?`<div class="text-muted" style="margin-top:10px;font-size:.8em">${d.message}</div>`:''}
+      const d=await r.json();const k=d.k8s_check||d;
+      const st=k.status||'unknown';const cls=st==='healthy'?'dot-green':st==='degraded'?'dot-amber':'dot-red';
+      el.innerHTML=`<div style="padding:8px 0">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <span class="status-dot ${cls}"></span>
+          <span style="font-size:1.1em;font-weight:700;text-transform:capitalize">${st}</span>
+        </div>
+        ${k.nodes?`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <span class="badge badge-green">&#9632; ${k.nodes.ready||0} nodes ready</span>
+          ${(k.nodes.not_ready||0)?`<span class="badge badge-red">&#9632; ${k.nodes.not_ready} not ready</span>`:''}
+        </div>`:''}
+        ${k.pods?`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <span class="badge badge-green">&#11044; ${k.pods.running||0} running</span>
+          ${(k.pods.pending||0)?`<span class="badge badge-amber">&#11044; ${k.pods.pending} pending</span>`:''}
+          ${(k.pods.failed||0)?`<span class="badge badge-red">&#11044; ${k.pods.failed} failed</span>`:''}
+        </div>`:''}
+        ${k.message?`<div class="text-muted" style="font-size:.8em;margin-top:6px">${k.message}</div>`:''}
       </div>`;
-    }catch(e){el.innerHTML='<div class="empty-state"><p>K8s: '+e.message+'</p></div>';}
+    }catch(e){el.innerHTML=`<div class="empty-state"><p>K8s: ${e.message}</p></div>`;}
+  },
+
+  async loadDeployments(){
+    const el=document.getElementById('deployments-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/k8s/deployments');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>K8s not configured</p></div>';return;}
+      const d=await r.json();const deps=(d.k8s_deployments||d).deployments||d.deployments||d.data||[];
+      if(!deps.length){el.innerHTML='<div class="empty-state"><p>No deployments</p></div>';return;}
+      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Name</th><th>Namespace</th><th>Ready</th><th>Actions</th></tr></thead><tbody>`+
+        deps.slice(0,15).map(dep=>{
+          const ready=dep.ready_replicas??dep.readyReplicas??0;const desired=dep.replicas??dep.desired??1;
+          const ok=ready>=desired;const ns=dep.namespace||'default';const name=dep.name||'--';
+          return`<tr>
+            <td style="font-size:.83em;font-weight:600">${name}</td>
+            <td style="font-size:.8em;color:var(--muted)">${ns}</td>
+            <td><span class="badge ${ok?'badge-green':'badge-amber'}">${ready}/${desired}</span></td>
+            <td><button class="btn btn-ghost btn-sm" style="font-size:.74em;padding:2px 6px;color:var(--cyan)" onclick="App.k8sRestart('${ns}','${name}')">&#8635; Restart</button></td></tr>`;
+        }).join('')+`</tbody></table></div>`;
+    }catch(e){el.innerHTML=`<div class="empty-state"><p>Error: ${e.message}</p></div>`;}
   },
 
   async loadPods(){
     const el=document.getElementById('pods-list');
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
     try{
-      const r=await this.api('GET','/k8s/pods');
+      const ns=(document.getElementById('k8s-ns-filter')||{value:''}).value;
+      const r=await this.api('GET','/k8s/pods'+(ns?`?namespace=${ns}`:''));
       if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>K8s not configured</p></div>';return;}
-      const d=await r.json();const k8sd=d.k8s_pods||d;if(k8sd.status==='error'){el.innerHTML=`<div class="empty-state"><p>K8s: ${k8sd.details||'not configured'}</p></div>`;return;}const pods=k8sd.pods||d.pods||d.data||[];
+      const d=await r.json();const k8sd=d.k8s_pods||d;
+      if(k8sd.status==='error'){el.innerHTML=`<div class="empty-state"><p>${k8sd.details||'K8s not configured'}</p></div>`;return;}
+      const pods=k8sd.pods||d.pods||d.data||[];
       if(!pods.length){el.innerHTML='<div class="empty-state"><p>No pods found</p></div>';return;}
-      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Name</th><th>Namespace</th><th>Status</th><th>Actions</th></tr></thead><tbody>`+
-        pods.slice(0,15).map(p=>{const status=p.status||p.phase||'unknown';const cls=status==='Running'?'badge-green':status==='Pending'?'badge-amber':status==='Succeeded'?'badge-cyan':'badge-red';
-          const dep=p.deployment||p.name||'';const ns=p.namespace||'default';
-          return`<tr><td style="font-size:.78em;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace">${p.name||'--'}</td><td>${ns}</td><td><span class="badge ${cls}">${status}</span></td><td><button class="btn btn-ghost btn-sm" style="font-size:.75em;padding:3px 7px;color:var(--cyan)" onclick="App.k8sRestart('${ns}','${dep}')">&#8635; Restart</button></td></tr>`;
+      const counts={Running:0,Pending:0,Failed:0,Other:0};
+      pods.forEach(p=>{const s=p.status||p.phase||'Other';counts[s]=(counts[s]||0)+1;counts.Other=counts.Other;});
+      el.innerHTML=
+        `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;font-size:.8em">
+          <span class="badge badge-green">&#11044; ${pods.filter(p=>(p.status||p.phase)==='Running').length} Running</span>
+          <span class="badge badge-amber">&#11044; ${pods.filter(p=>(p.status||p.phase)==='Pending').length} Pending</span>
+          <span class="badge badge-red">&#11044; ${pods.filter(p=>['Failed','CrashLoopBackOff','Error'].includes(p.status||p.phase)).length} Failed</span>
+        </div>`+
+        `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Namespace</th><th>Status</th><th>Actions</th></tr></thead><tbody>`+
+        pods.slice(0,20).map(p=>{
+          const st=p.status||p.phase||'unknown';
+          const sc=st==='Running'?'badge-green':st==='Pending'?'badge-amber':st==='Succeeded'?'badge-cyan':'badge-red';
+          const dep=p.deployment||p.name||'';const pns=p.namespace||'default';
+          return`<tr>
+            <td style="font-size:.77em;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;max-width:180px;overflow:hidden;text-overflow:ellipsis">${p.name||'--'}</td>
+            <td style="font-size:.8em">${pns}</td>
+            <td><span class="badge ${sc}">${st}</span></td>
+            <td><button class="btn btn-ghost btn-sm" style="font-size:.74em;padding:2px 6px;color:var(--cyan)" onclick="App.k8sRestart('${pns}','${dep}')">&#8635; Restart</button></td></tr>`;
         }).join('')+`</tbody></table></div>`;
-    }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+    }catch(e){el.innerHTML=`<div class="empty-state"><p>Error: ${e.message}</p></div>`;}
   },
 
   async k8sRestart(namespace,deployment){
@@ -2552,11 +3591,90 @@ const App = {
   async loadSecrets(){
     const el=document.getElementById('secrets-list');
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    // Icons keyed by integration group name (lowercased)
+    const _icons={
+      'claude ai':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>',
+      'aws':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+      'github':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>',
+      'gitlab':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22.65 14.39L12 22.13 1.35 14.39a.84.84 0 0 1-.3-.94l1.22-3.78 2.44-7.51A.42.42 0 0 1 4.82 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.49h8.1l2.44-7.51A.42.42 0 0 1 18.6 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.51L22.95 13.45a.84.84 0 0 1-.3.94z"/></svg>',
+      'slack':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 10c-.83 0-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5z"/><path d="M20.5 10H19V8.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/><path d="M9.5 14c.83 0 1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5S8 21.33 8 20.5v-5c0-.83.67-1.5 1.5-1.5z"/><path d="M3.5 14H5v1.5c0 .83-.67 1.5-1.5 1.5S2 16.33 2 15.5 2.67 14 3.5 14z"/><path d="M14 14.5c0-.83.67-1.5 1.5-1.5h5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5h-5c-.83 0-1.5-.67-1.5-1.5z"/><path d="M15.5 19H14v1.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5-.67-1.5-1.5-1.5z"/><path d="M10 9.5C10 8.67 9.33 8 8.5 8h-5C2.67 8 2 8.67 2 9.5S2.67 11 3.5 11h5c.83 0 1.5-.67 1.5-1.5z"/><path d="M8.5 5H10V3.5C10 2.67 9.33 2 8.5 2S7 2.67 7 3.5 7.67 5 8.5 5z"/></svg>',
+      'kubernetes':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>',
+      'grafana':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
+      'jira':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 13.5L3 21"/><path d="M21 3l-7.5 7.5"/><path d="M21 12.5A8.5 8.5 0 0 1 12.5 21"/><path d="M3 11.5A8.5 8.5 0 0 1 11.5 3"/></svg>',
+      'opsgenie':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>',
+    };
+    const _defaultIcon='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
     try{
       const r=await this.api('GET','/secrets/status');
       if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Could not load secrets</p></div>';return;}
-      const d=await r.json();const secrets=d.secrets||d||{};
-      el.innerHTML=Object.entries(secrets).map(([k,v])=>`<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);font-size:.85em"><span class="status-dot ${v?'dot-green':'dot-red'}"></span><span style="flex:1;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.88em">${k}</span><span class="badge ${v?'badge-green':'badge-red'}">${v?'Configured':'Missing'}</span></div>`).join('');
+      // API returns grouped: {"Claude AI": {"ANTHROPIC_API_KEY": true, "GROQ_API_KEY": false}, "AWS": {...}, ...}
+      const d=await r.json();
+      const grouped=d.secrets||d||{};
+
+      // Flatten to per-integration status:
+      // An integration is "Active" if ANY of its keys is set (partial = some but not all)
+      const integrations=Object.entries(grouped).map(([name,keys])=>{
+        const vals=Object.values(keys);
+        const total=vals.length;
+        const setCount=vals.filter(Boolean).length;
+        const status = setCount===0 ? 'missing' : setCount===total ? 'active' : 'partial';
+        // Build tooltip showing which specific keys are set/missing
+        const keyDetail=Object.entries(keys).map(([k,v])=>`${v?'✓':'✗'} ${k}`).join(', ');
+        return{name,status,setCount,total,keyDetail};
+      });
+
+      const activeCount=integrations.filter(i=>i.status==='active').length;
+      const partialCount=integrations.filter(i=>i.status==='partial').length;
+      const missingCount=integrations.filter(i=>i.status==='missing').length;
+      const configuredCount=activeCount+partialCount;
+
+      // Update summary stats
+      const sum=document.getElementById('sec-summary');
+      if(sum) sum.innerHTML=
+        `<div class="card" style="padding:14px 18px;display:flex;align-items:center;gap:12px">
+          <div style="width:36px;height:36px;border-radius:10px;background:rgba(34,197,94,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </div>
+          <div><div style="font-size:1.4em;font-weight:700;color:var(--green)">${activeCount}</div><div style="font-size:.75em;color:var(--muted)">Active</div></div>
+        </div>
+        <div class="card" style="padding:14px 18px;display:flex;align-items:center;gap:12px">
+          <div style="width:36px;height:36px;border-radius:10px;background:rgba(239,68,68,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          </div>
+          <div><div style="font-size:1.4em;font-weight:700;color:${missingCount>0?'var(--red)':'var(--muted)'}">${missingCount}</div><div style="font-size:.75em;color:var(--muted)">Not Configured</div></div>
+        </div>
+        <div class="card" style="padding:14px 18px;display:flex;align-items:center;gap:12px">
+          <div style="width:36px;height:36px;border-radius:10px;background:rgba(59,130,246,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </div>
+          <div><div style="font-size:1.4em;font-weight:700">4</div><div style="font-size:.75em;color:var(--muted)">Webhooks</div></div>
+        </div>
+        <div class="card" style="padding:14px 18px;display:flex;align-items:center;gap:12px">
+          <div style="width:36px;height:36px;border-radius:10px;background:rgba(168,85,247,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a855f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          </div>
+          <div><div style="font-size:1.4em;font-weight:700;color:${missingCount===0?'var(--green)':'var(--amber)'}">${missingCount===0?'Secure':'Review'}</div><div style="font-size:.75em;color:var(--muted)">Overall</div></div>
+        </div>`;
+
+      // Render per-integration rows
+      el.innerHTML=integrations.map(({name,status,setCount,total,keyDetail})=>{
+        const icon=_icons[name.toLowerCase()]||_defaultIcon;
+        const isActive=status==='active';
+        const isPartial=status==='partial';
+        const isMissing=status==='missing';
+        const bg=isActive?'rgba(34,197,94,.1)':isPartial?'rgba(245,158,11,.1)':'rgba(239,68,68,.1)';
+        const color=isActive?'var(--green)':isPartial?'var(--amber)':'var(--red)';
+        const badgeCls=isActive?'badge-green':isPartial?'badge-amber':'badge-red';
+        const badgeTxt=isActive?'&#10003; Active':isPartial?`&#9679; Partial (${setCount}/${total})`:'&#10005; Not configured';
+        return`<div style="display:flex;align-items:center;gap:10px;padding:10px 18px;border-bottom:1px solid var(--border);transition:background .15s" title="${keyDetail}" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''">
+          <div style="width:28px;height:28px;border-radius:8px;background:${bg};display:flex;align-items:center;justify-content:center;flex-shrink:0;color:${color}">
+            ${icon}
+          </div>
+          <span style="flex:1;font-size:.85em;font-weight:500">${name}</span>
+          ${isPartial?`<span style="font-size:.72em;color:var(--muted);margin-right:6px">${keyDetail}</span>`:''}
+          <span class="badge ${badgeCls}" style="font-size:.73em">${badgeTxt}</span>
+        </div>`;
+      }).join('');
     }catch(e){el.innerHTML='<div class="empty-state"><p>Error loading secrets</p></div>';}
   },
 
@@ -2565,23 +3683,54 @@ const App = {
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
     try{
       const r=await this.api('GET','/audit/log?limit=10');
-      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Could not load audit log</p></div>';return;}
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state" style="padding:24px"><p style="font-size:.83em;color:var(--muted)">Audit log not available</p></div>';return;}
       const d=await r.json();const logs=d.entries||d.logs||[];
-      if(!logs.length){el.innerHTML='<div class="empty-state"><p>No audit entries</p></div>';return;}
-      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Result</th></tr></thead><tbody>`+
-        logs.map(l=>`<tr><td class="text-muted" style="font-size:.78em;font-family:'SF Mono','Cascadia Code',ui-monospace,monospace">${(l.timestamp||l.ts||'').substring(11,19)||'--'}</td><td>${l.user||'system'}</td><td>${l.action||l.event||'--'}</td><td><span class="badge ${(l.result&&(l.result.success||l.result.ok))?'badge-green':'badge-gray'}">${(l.result&&(l.result.success||l.result.ok))?'ok':'--'}</span></td></tr>`).join('')+`</tbody></table></div>`;
-    }catch(e){el.innerHTML='<div class="empty-state"><p>Error loading audit log</p></div>';}
+      if(!logs.length){
+        el.innerHTML=`<div style="display:flex;flex-direction:column;align-items:center;padding:32px 16px;gap:10px;color:var(--muted)">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:.4"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <span style="font-size:.82em">No audit entries yet</span>
+        </div>`;
+        return;
+      }
+      el.innerHTML=logs.map(l=>{
+        const time=(l.timestamp||l.ts||'').substring(11,19)||'--';
+        const user=l.user||'system';
+        const action=l.action||l.event||'--';
+        const ok=l.result&&(l.result.success||l.result.ok);
+        return`<div style="display:flex;align-items:center;gap:10px;padding:9px 18px;border-bottom:1px solid var(--border);font-size:.82em">
+          <span style="color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;font-size:.88em;white-space:nowrap">${time}</span>
+          <span class="badge ${ok?'badge-green':'badge-gray'}" style="font-size:.7em">${ok?'OK':'—'}</span>
+          <span style="font-weight:500;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${action}</span>
+          <span style="color:var(--muted);font-size:.85em">${user}</span>
+        </div>`;
+      }).join('');
+    }catch(e){el.innerHTML='<div class="empty-state" style="padding:24px"><p style="font-size:.83em;color:var(--muted)">Error loading audit log</p></div>';}
   },
 
   loadWebhookUrls(){
     const base=window.location.origin;
+    const hooks=[
+      {name:'Grafana',path:'/webhooks/grafana',color:'#f97316',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',desc:'Alerting & panels'},
+      {name:'CloudWatch (SNS)',path:'/webhooks/cloudwatch',color:'#f59e0b',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',desc:'AWS alarms & SNS'},
+      {name:'OpsGenie',path:'/webhooks/opsgenie',color:'#3b82f6',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/></svg>',desc:'On-call alerts'},
+      {name:'PagerDuty',path:'/webhooks/pagerduty',color:'#22c55e',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',desc:'Incident events'},
+    ];
     document.getElementById('webhook-urls').innerHTML=`
-      <div style="display:flex;flex-direction:column;gap:8px">
-        ${[['Grafana','/webhooks/grafana'],['CloudWatch (SNS)','/webhooks/cloudwatch'],['OpsGenie','/webhooks/opsgenie'],['PagerDuty','/webhooks/pagerduty']].map(([name,path])=>`
-        <div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
-          <span style="font-size:.85em;font-weight:600;width:130px;flex-shrink:0">${name}</span>
-          <code style="flex:1;font-size:.78em;color:var(--cyan);font-family:'SF Mono','Cascadia Code',ui-monospace,monospace">${base+path}</code>
-          <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${base+path}').then(()=>App.toast('Copied!','success'))">Copy</button>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        ${hooks.map(h=>`
+        <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;background:var(--surface2);border-radius:10px;border:1px solid var(--border)">
+          <div style="width:36px;height:36px;border-radius:9px;background:${h.color}18;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:${h.color}">
+            ${h.icon}
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:.84em;font-weight:600;margin-bottom:2px">${h.name}</div>
+            <div style="font-size:.72em;color:var(--muted);margin-bottom:4px">${h.desc}</div>
+            <code style="font-size:.72em;color:var(--cyan);font-family:'SF Mono',ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block">${base+h.path}</code>
+          </div>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="navigator.clipboard.writeText('${base+h.path}').then(()=>App.toast('Copied!','success'))">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            Copy
+          </button>
         </div>`).join('')}
       </div>`;
   },
@@ -3083,6 +4232,23 @@ def correlate(event_list: List[Event]):
     result = correlate_events(events)
     return {"correlation": result}
 
+@app.get("/llm/status", tags=["llm"])
+def llm_status():
+    """Return which LLM provider is currently active and available."""
+    from app.llm.claude import _provider, ANTHROPIC_API_KEY, GROQ_API_KEY, _ANTHROPIC_KEY_VALID
+    providers = []
+    if ANTHROPIC_API_KEY and _ANTHROPIC_KEY_VALID:
+        providers.append({"name": "anthropic", "label": "Claude (Anthropic)", "available": True})
+    else:
+        providers.append({"name": "anthropic", "label": "Claude (Anthropic)", "available": False, "reason": "ANTHROPIC_API_KEY not set or malformed"})
+    if GROQ_API_KEY:
+        providers.append({"name": "groq", "label": "Groq / Llama", "available": True})
+    else:
+        providers.append({"name": "groq", "label": "Groq / Llama", "available": False, "reason": "GROQ_API_KEY not set"})
+    active = _provider or "none"
+    return {"active": active, "providers": providers}
+
+
 @app.post("/llm/analyze")
 def llm_analyze(req: ContextRequest):
     result = analyze_context(req.model_dump())
@@ -3097,8 +4263,8 @@ def aws_check():
 
 # EC2
 @app.get("/aws/ec2/instances")
-def aws_ec2_list(state: str = ""):
-    result = list_ec2_instances(state)
+def aws_ec2_list(state: str = "", region: str = ""):
+    result = list_ec2_instances(state, region=region) if region else list_ec2_instances(state)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return {"ec2_instances": result}
@@ -3182,12 +4348,29 @@ def aws_cw_metrics(req: AWSMetricRequest):
 
 # ECS
 @app.get("/aws/ecs/services")
-def aws_ecs_services(cluster: str = "default"):
-    result = list_ecs_services(cluster)
-    # ClusterNotFoundException → return empty rather than 400
-    if not result.get("success"):
-        return {"ecs_services": {"success": True, "cluster": cluster, "services": [], "count": 0, "note": result.get("error")}}
-    return {"ecs_services": result}
+def aws_ecs_services(region: str = ""):
+    import boto3 as _b3, os as _os
+    _region = region or _os.getenv("AWS_REGION","us-east-1")
+    try:
+        _ecs = _b3.client("ecs", region_name=_region)
+        clusters_resp = _ecs.list_clusters()
+        all_services = []
+        for carn in clusters_resp.get("clusterArns", []):
+            cname = carn.split("/")[-1]
+            svc_resp = _ecs.list_services(cluster=cname, maxResults=100)
+            if svc_resp.get("serviceArns"):
+                desc = _ecs.describe_services(cluster=cname, services=svc_resp["serviceArns"])
+                for s in desc.get("services", []):
+                    all_services.append({
+                        "service_name": s["serviceName"],
+                        "cluster_name": cname,
+                        "status":       s["status"],
+                        "running_count": s["runningCount"],
+                        "desired_count": s["desiredCount"],
+                    })
+        return {"services": all_services, "count": len(all_services), "region": _region}
+    except Exception as e:
+        return {"services": [], "count": 0, "note": str(e), "region": _region}
 
 @app.get("/aws/ecs/stopped-tasks")
 def aws_ecs_stopped(cluster: str = "default", limit: int = 20):
@@ -3198,11 +4381,26 @@ def aws_ecs_stopped(cluster: str = "default", limit: int = 20):
 
 # Lambda
 @app.get("/aws/lambda/functions")
-def aws_lambda_list():
-    result = list_lambda_functions()
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
-    return {"lambda_functions": result}
+def aws_lambda_list(region: str = ""):
+    import boto3 as _b3, os as _os
+    _region = region or _os.getenv("AWS_REGION", "us-east-1")
+    try:
+        lam = _b3.client("lambda", region_name=_region)
+        paginator = lam.get_paginator("list_functions")
+        fns = []
+        for page in paginator.paginate():
+            for f in page.get("Functions", []):
+                fns.append({
+                    "function_name": f["FunctionName"],
+                    "runtime":       f.get("Runtime","--"),
+                    "memory_size":   f.get("MemorySize",128),
+                    "timeout":       f.get("Timeout",3),
+                    "last_modified": f.get("LastModified",""),
+                    "description":   f.get("Description",""),
+                })
+        return {"functions": fns, "count": len(fns), "region": _region}
+    except Exception as e:
+        return {"functions": [], "count": 0, "note": str(e), "region": _region}
 
 @app.get("/aws/lambda/errors")
 def aws_lambda_errors(function_name: str = "", hours: int = 1):
@@ -3225,11 +4423,28 @@ def aws_lambda_errors(function_name: str = "", hours: int = 1):
 
 # RDS
 @app.get("/aws/rds/instances")
-def aws_rds_list():
-    result = list_rds_instances()
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
-    return {"rds_instances": result}
+def aws_rds_list(region: str = ""):
+    import boto3 as _b3, os as _os
+    _region = region or _os.getenv("AWS_REGION", "us-east-1")
+    try:
+        rds = _b3.client("rds", region_name=_region)
+        paginator = rds.get_paginator("describe_db_instances")
+        instances = []
+        for page in paginator.paginate():
+            for db in page.get("DBInstances", []):
+                instances.append({
+                    "identifier":     db["DBInstanceIdentifier"],
+                    "engine":         db["Engine"],
+                    "engine_version": db.get("EngineVersion",""),
+                    "instance_class": db["DBInstanceClass"],
+                    "status":         db["DBInstanceStatus"],
+                    "multi_az":       db.get("MultiAZ", False),
+                    "endpoint":       (db.get("Endpoint") or {}).get("Address",""),
+                    "storage_gb":     db.get("AllocatedStorage", 0),
+                })
+        return {"instances": instances, "count": len(instances), "region": _region}
+    except Exception as e:
+        return {"instances": [], "count": 0, "note": str(e), "region": _region}
 
 @app.get("/aws/rds/events")
 def aws_rds_events(db_instance_id: str = "", hours: int = 24):
@@ -3250,13 +4465,37 @@ def aws_rds_events(db_instance_id: str = "", hours: int = 24):
             all_events.append(r)
     return {"rds_events": all_events, "count": len(all_events)}
 
-# ELB / ALB
+# ELB / ALB — list all load balancers with health summary
 @app.get("/aws/elb/target-health")
-def aws_elb_health(target_group_arn: str):
-    result = get_target_health(target_group_arn)
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
-    return {"target_health": result}
+def aws_elb_health(region: str = ""):
+    import boto3 as _b3, os as _os
+    _region = region or _os.getenv("AWS_REGION", "us-east-1")
+    try:
+        elb = _b3.client("elbv2", region_name=_region)
+        lbs_resp = elb.describe_load_balancers()
+        lbs = []
+        for lb in lbs_resp.get("LoadBalancers", []):
+            tg_resp = elb.describe_target_groups(LoadBalancerArn=lb["LoadBalancerArn"])
+            healthy = unhealthy = 0
+            for tg in tg_resp.get("TargetGroups", []):
+                health = elb.describe_target_health(TargetGroupArn=tg["TargetGroupArn"])
+                for t in health.get("TargetHealthDescriptions", []):
+                    if t["TargetHealth"]["State"] == "healthy":
+                        healthy += 1
+                    else:
+                        unhealthy += 1
+            lbs.append({
+                "name":      lb["LoadBalancerName"],
+                "type":      lb["Type"],
+                "scheme":    lb.get("Scheme",""),
+                "state":     lb["State"]["Code"],
+                "dns":       lb.get("DNSName",""),
+                "healthy":   healthy,
+                "unhealthy": unhealthy,
+            })
+        return {"load_balancers": lbs, "count": len(lbs), "region": _region}
+    except Exception as e:
+        return {"load_balancers": [], "count": 0, "note": str(e), "region": _region}
 
 # CloudTrail
 @app.get("/aws/cloudtrail/events")
@@ -3275,18 +4514,45 @@ def aws_s3_buckets():
     return {"s3_buckets": result}
 
 @app.get("/aws/sqs/queues")
-def aws_sqs_queues():
-    result = list_sqs_queues()
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
-    return {"sqs_queues": result}
+def aws_sqs_queues(region: str = ""):
+    import boto3 as _b3, os as _os
+    _region = region or _os.getenv("AWS_REGION", "us-east-1")
+    try:
+        sqs = _b3.client("sqs", region_name=_region)
+        resp = sqs.list_queues()
+        queues = []
+        for url in resp.get("QueueUrls", []):
+            attrs = sqs.get_queue_attributes(QueueUrl=url, AttributeNames=["All"]).get("Attributes", {})
+            queues.append({
+                "url":  url,
+                "name": url.split("/")[-1],
+                "approximate_number_of_messages": attrs.get("ApproximateNumberOfMessages", "0"),
+                "fifo": url.endswith(".fifo"),
+            })
+        return {"queues": queues, "count": len(queues), "region": _region}
+    except Exception as e:
+        return {"queues": [], "count": 0, "note": str(e), "region": _region}
 
 @app.get("/aws/dynamodb/tables")
-def aws_dynamodb_tables():
-    result = list_dynamodb_tables()
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
-    return {"dynamodb_tables": result}
+def aws_dynamodb_tables(region: str = ""):
+    import boto3 as _b3, os as _os
+    _region = region or _os.getenv("AWS_REGION", "us-east-1")
+    try:
+        ddb = _b3.client("dynamodb", region_name=_region)
+        paginator = ddb.get_paginator("list_tables")
+        tables = []
+        for page in paginator.paginate():
+            for name in page.get("TableNames", []):
+                desc = ddb.describe_table(TableName=name).get("Table", {})
+                tables.append({
+                    "name":   name,
+                    "status": desc.get("TableStatus", "ACTIVE"),
+                    "items":  desc.get("ItemCount", 0),
+                    "size_bytes": desc.get("TableSizeBytes", 0),
+                })
+        return {"tables": tables, "count": len(tables), "region": _region}
+    except Exception as e:
+        return {"tables": [], "count": 0, "note": str(e), "region": _region}
 
 @app.get("/aws/route53/healthchecks")
 def aws_route53_healthchecks():
@@ -3362,9 +4628,11 @@ def incident_war_room():
     return {"war_room": result}
 
 @app.post("/incident/jira")
-def incident_jira():
-    result = create_incident()
-    return {"jira_incident": result}
+def incident_jira(summary: str = "AI DevOps Incident", description: str = "Created via NexusOps"):
+    result = create_incident(summary=summary, description=description)
+    if "error" in result:
+        return {"jira_incident": result, "ok": False}
+    return {"jira_incident": result, "ok": True}
 
 @app.post("/incident/opsgenie")
 def incident_opsgenie():
@@ -3951,7 +5219,7 @@ _ACTION_CATALOGUE = {
     "get_ec2_info": {
         "desc": "Get full details for a specific EC2 instance",
         "params": ["instance_id", "region"],
-        "handler": lambda p: get_ec2_instance_info(p["instance_id"]),
+        "handler": lambda p: get_ec2_instance_info(p.get("instance_id", "")),
     },
     "get_ec2_status": {
         "desc": "Get system and instance status checks for EC2",
@@ -3961,17 +5229,17 @@ _ACTION_CATALOGUE = {
     "start_ec2": {
         "desc": "Start a stopped EC2 instance",
         "params": ["instance_id", "region"],
-        "handler": lambda p: start_ec2_instance(p["instance_id"], region=p.get("region", "")),
+        "handler": lambda p: start_ec2_instance(p.get("instance_id", ""), region=p.get("region", "")),
     },
     "stop_ec2": {
         "desc": "Stop a running EC2 instance",
         "params": ["instance_id", "region"],
-        "handler": lambda p: stop_ec2_instance(p["instance_id"], region=p.get("region", "")),
+        "handler": lambda p: stop_ec2_instance(p.get("instance_id", ""), region=p.get("region", "")),
     },
     "reboot_ec2": {
         "desc": "Reboot an EC2 instance",
         "params": ["instance_id", "region"],
-        "handler": lambda p: reboot_ec2_instance(p["instance_id"], region=p.get("region", "")),
+        "handler": lambda p: reboot_ec2_instance(p.get("instance_id", ""), region=p.get("region", "")),
     },
 
     # ════════════════════════════════════════════════════════════
@@ -4173,6 +5441,13 @@ _ACTION_CATALOGUE = {
             aws_config={}, k8s_config={}, auto_remediate=True,
         ),
     },
+    "estimate_cost": {
+        "desc": "Estimate monthly and annual AWS cost for a resource description",
+        "params": ["description", "region"],
+        "handler": lambda p: __import__('app.cost.pricing', fromlist=['estimate_from_description']).estimate_from_description(
+            p.get("description", ""), p.get("region", __import__('os').getenv("AWS_REGION", "us-east-1"))
+        ),
+    },
 }
 
 _INTENT_SYSTEM = """You are an intent classifier for a DevOps automation platform.
@@ -4253,9 +5528,13 @@ INCIDENTS / PIPELINE:
 - notify_oncall: message, priority (P1/P2/P3)
 - debug_and_fix: service, error_description
 
+COST ESTIMATION:
+- estimate_cost: description (natural language, e.g. "3 t3.medium instances", "linux t3.medium us-west-2"), region (optional)
+
 Rules:
 - Extract params literally from the message
 - REGION: if the user mentions a region (e.g. "us-east-1", "us-east-2", "eu-west-1", "ap-southeast-1", "us-west-2"), always include "region": "<value>" in params. If no region is mentioned, omit the region param (do not default it).
+- COST QUERIES: If the user asks "how much does X cost", "price of X", "estimate cost for X", "how much is t3.medium", etc., ALWAYS use estimate_cost action — never EC2 actions.
 - If a required param (like instance_id) is missing and cannot be inferred, output {"intent": "question"} instead
 - Output ONLY valid JSON, no markdown, nothing else"""
 
@@ -4881,18 +6160,30 @@ def aws_route53_health_alias():
 
 @app.get("/aws/cost/summary")
 def aws_cost_summary():
-    """Approximate cost summary from resource counts (AWS Cost Explorer requires separate permission)."""
+    """Cost summary: actual spend from Cost Explorer + resource inventory fallback."""
+    from app.cost.pricing import get_cost_explorer_summary
+    ce = get_cost_explorer_summary(days=30)
+    if "error" not in ce:
+        return ce
+    # Fallback: resource counts with note
     ec2 = list_ec2_instances()
     rds = list_rds_instances()
     lam = list_lambda_functions()
     ecs = list_ecs_services()
     return {
-        "note": "Resource inventory — configure AWS Cost Explorer for billing data",
+        "note": ce.get("error", "Cost Explorer unavailable — showing resource inventory"),
         "ec2_count": len(ec2.get("instances", [])) if ec2.get("success") else "unavailable",
         "rds_count": len(rds.get("instances", [])) if rds.get("success") else "unavailable",
         "lambda_count": len(lam.get("functions", [])) if lam.get("success") else "unavailable",
         "ecs_services": len(ecs.get("services", [])) if ecs.get("success") else "unavailable",
     }
+
+
+@app.get("/cost/explorer", tags=["cost"])
+def cost_explorer(days: int = 30):
+    """Real AWS spend breakdown by service from Cost Explorer."""
+    from app.cost.pricing import get_cost_explorer_summary
+    return get_cost_explorer_summary(days=days)
 
 # Grafana — full implementation
 @app.get("/grafana/alerts")
@@ -5182,7 +6473,9 @@ def generate_post_mortem_endpoint(
     """Generate an AI-written blameless post-mortem for a resolved incident."""
     try:
         from app.incident.post_mortem import generate_post_mortem, format_as_markdown, save_post_mortem
-        state = {
+
+        # Build state — try to enrich with stored incident data from vector memory
+        state: dict = {
             "incident_id":    incident_id,
             "description":    req.description or "",
             "root_cause":     req.root_cause or "",
@@ -5193,6 +6486,27 @@ def generate_post_mortem_endpoint(
             "validation":     req.validation or {},
             "errors":         req.errors or [],
         }
+
+        # Enrich from vector memory if description/root_cause are empty
+        if not state["description"] or not state["root_cause"]:
+            try:
+                from app.memory.vector_db import search_similar_incidents
+                hits = search_similar_incidents(incident_id, n_results=5)
+                if hits and isinstance(hits[0], list):
+                    hits = hits[0]
+                for hit in hits:
+                    meta = hit.get("metadata", hit) if isinstance(hit, dict) else {}
+                    if str(meta.get("incident_id", "")) == str(incident_id):
+                        state.setdefault("description",   meta.get("description", state["description"]) or state["description"])
+                        state.setdefault("root_cause",    meta.get("root_cause", "") or meta.get("rca", ""))
+                        state.setdefault("severity",      meta.get("severity", state["severity"]))
+                        state.setdefault("actions_taken", meta.get("actions_taken", []) or meta.get("executed_actions", []))
+                        state.setdefault("started_at",    meta.get("started_at", "") or meta.get("created_at", ""))
+                        state.setdefault("resolved_at",   meta.get("resolved_at", "") or meta.get("completed_at", ""))
+                        break
+            except Exception:
+                pass
+
         pm       = generate_post_mortem(state)
         markdown = format_as_markdown(pm)
         result   = {
@@ -5226,6 +6540,22 @@ def list_chat_sessions(auth: AuthContext = Depends(require_viewer)):
         return {"sessions": list_sessions()}
     except Exception as e:
         return {"sessions": [], "error": str(e)}
+
+
+@app.get("/chat/history/{session_id}", tags=["chat"])
+def get_chat_history(session_id: str, auth: AuthContext = Depends(require_viewer)):
+    """Return stored conversation history for a session (used to restore chat on new tab)."""
+    try:
+        from app.chat.memory import get_history
+        msgs = get_history(session_id, max_messages=50)
+        history = []
+        for m in msgs:
+            role = getattr(m, "role", "user")
+            content = getattr(m, "content", str(m))
+            history.append({"role": role, "content": content})
+        return {"session_id": session_id, "messages": history}
+    except Exception as e:
+        return {"session_id": session_id, "messages": [], "error": str(e)}
 
 # ── Webhook receivers ─────────────────────────────────────────────────────────
 
@@ -5276,6 +6606,39 @@ async def analyze_costs_endpoint(req: CostAnalysisRequest, auth: AuthContext = D
     except Exception as e:
         return {"report": None, "formatted": f"Cost analysis unavailable: {e}", "error": str(e)}
 
+class TerraformCostRequest(BaseModel):
+    plan_json: Dict[str, Any]
+    region: Optional[str] = None
+
+@app.post("/cost/terraform", tags=["cost"])
+async def terraform_cost_endpoint(req: TerraformCostRequest, auth: AuthContext = Depends(require_viewer)):
+    """Estimate monthly cost from a Terraform plan JSON output."""
+    try:
+        from app.cost.pricing import estimate_terraform_plan_cost
+        region = req.region or os.getenv("AWS_REGION", "us-east-1")
+        result = estimate_terraform_plan_cost(req.plan_json)
+        return result
+    except Exception as e:
+        return {"error": str(e), "total_monthly_usd": 0.0, "resources": []}
+
+class PriceEstimateRequest(BaseModel):
+    description: str
+    region: Optional[str] = None
+
+@app.post("/cost/estimate", tags=["cost"])
+async def price_estimate_endpoint(req: PriceEstimateRequest, auth: AuthContext = Depends(require_viewer)):
+    """Estimate AWS cost from a natural language description.
+
+    Examples: '3 t3.medium instances', 'db.r5.large postgres multi-az', 'lambda 512mb 5M invocations'
+    """
+    try:
+        from app.cost.pricing import estimate_from_description
+        region = req.region or os.getenv("AWS_REGION", "us-east-1")
+        result = estimate_from_description(req.description, region)
+        return result
+    except Exception as e:
+        return {"error": str(e), "total_monthly_usd": 0.0, "resources": []}
+
 @app.get("/cost/dashboard", tags=["cost"])
 async def cost_dashboard_endpoint(auth: AuthContext = Depends(require_viewer)):
     """Full cost dashboard: MTD spend, forecast, service breakdown, 6-month trend."""
@@ -5286,3 +6649,137 @@ async def cost_dashboard_endpoint(auth: AuthContext = Depends(require_viewer)):
         return {"available": False, "error": str(e), "current_monthly_spend": 0.0,
                 "last_month_spend": 0.0, "forecast_month_end": 0.0,
                 "service_breakdown": [], "monthly_trend": []}
+
+
+@app.get("/cost/resources", tags=["cost"])
+async def cost_resources_endpoint(auth: AuthContext = Depends(require_viewer)):
+    """List all AWS resources with estimated monthly cost (EC2, RDS, Lambda, ECS)."""
+    import datetime
+    resources = []
+
+    def _boto(svc):
+        import boto3
+        return boto3.client(
+            svc,
+            region_name=os.getenv("AWS_REGION", "us-east-1"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
+        )
+
+    # ── EC2 instances ──────────────────────────────────────────────────────
+    try:
+        ec2 = _boto("ec2")
+        paginator = ec2.get_paginator("describe_instances")
+        # On-demand hourly rates (us-east-1 approximate, updated 2025)
+        EC2_RATES = {
+            "t2.micro":0.0116,"t2.small":0.023,"t2.medium":0.0464,"t2.large":0.0928,
+            "t3.micro":0.0104,"t3.small":0.0208,"t3.medium":0.0416,"t3.large":0.0832,
+            "t3.xlarge":0.1664,"t3.2xlarge":0.3328,
+            "m5.large":0.096,"m5.xlarge":0.192,"m5.2xlarge":0.384,"m5.4xlarge":0.768,
+            "m6i.large":0.096,"m6i.xlarge":0.192,"m6i.2xlarge":0.384,
+            "c5.large":0.085,"c5.xlarge":0.17,"c5.2xlarge":0.34,"c5.4xlarge":0.68,
+            "r5.large":0.126,"r5.xlarge":0.252,"r5.2xlarge":0.504,"r5.4xlarge":1.008,
+        }
+        for page in paginator.paginate():
+            for res in page["Reservations"]:
+                for inst in res["Instances"]:
+                    if inst.get("State", {}).get("Name") not in ("running", "stopped"):
+                        continue
+                    itype = inst.get("InstanceType", "")
+                    name = next((t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"), "")
+                    hourly = EC2_RATES.get(itype, 0.05)
+                    monthly = hourly * 730
+                    resources.append({
+                        "service": "EC2",
+                        "resource_id": inst["InstanceId"],
+                        "name": name,
+                        "region": os.getenv("AWS_REGION", "us-east-1"),
+                        "instance_type": itype,
+                        "details": inst.get("State", {}).get("Name", ""),
+                        "monthly_usd": round(monthly, 2),
+                    })
+    except Exception:
+        pass
+
+    # ── RDS instances ──────────────────────────────────────────────────────
+    try:
+        rds = _boto("rds")
+        RDS_RATES = {
+            "db.t3.micro":0.017,"db.t3.small":0.034,"db.t3.medium":0.068,"db.t3.large":0.136,
+            "db.m5.large":0.171,"db.m5.xlarge":0.342,"db.m5.2xlarge":0.684,
+            "db.r5.large":0.24,"db.r5.xlarge":0.48,"db.r5.2xlarge":0.96,"db.r5.4xlarge":1.92,
+        }
+        for db in rds.describe_db_instances().get("DBInstances", []):
+            itype = db.get("DBInstanceClass", "")
+            hourly = RDS_RATES.get(itype, 0.1)
+            multi_az = db.get("MultiAZ", False)
+            monthly = hourly * 730 * (2 if multi_az else 1)
+            resources.append({
+                "service": "RDS",
+                "resource_id": db["DBInstanceIdentifier"],
+                "name": db["DBInstanceIdentifier"],
+                "region": os.getenv("AWS_REGION", "us-east-1"),
+                "instance_type": itype,
+                "details": f"{db.get('Engine','')} {'Multi-AZ' if multi_az else 'Single-AZ'}",
+                "monthly_usd": round(monthly, 2),
+            })
+    except Exception:
+        pass
+
+    # ── Lambda functions ───────────────────────────────────────────────────
+    try:
+        lam = _boto("lambda")
+        paginator = lam.get_paginator("list_functions")
+        for page in paginator.paginate():
+            for fn in page["Functions"]:
+                mem_mb = fn.get("MemorySize", 128)
+                # Estimate: assume 1M invocations/month, 500ms avg duration
+                gb_seconds = (mem_mb / 1024) * 0.5 * 1_000_000
+                compute_cost = gb_seconds * 0.0000166667
+                request_cost = 1_000_000 * 0.0000002
+                monthly = round(compute_cost + request_cost, 4)
+                resources.append({
+                    "service": "Lambda",
+                    "resource_id": fn["FunctionArn"].split(":")[-1],
+                    "name": fn["FunctionName"],
+                    "region": os.getenv("AWS_REGION", "us-east-1"),
+                    "instance_type": f"{mem_mb}MB",
+                    "details": fn.get("Runtime", ""),
+                    "monthly_usd": monthly,
+                })
+    except Exception:
+        pass
+
+    # ── ECS services ───────────────────────────────────────────────────────
+    try:
+        ecs = _boto("ecs")
+        clusters = ecs.list_clusters().get("clusterArns", [])
+        for cluster_arn in clusters[:5]:
+            svc_arns = ecs.list_services(cluster=cluster_arn).get("serviceArns", [])
+            if not svc_arns:
+                continue
+            for svc in ecs.describe_services(cluster=cluster_arn, services=svc_arns[:10]).get("services", []):
+                tasks = svc.get("runningCount", 0)
+                # Fargate estimate: 0.5 vCPU, 1GB per task
+                monthly = tasks * (0.5 * 0.04048 + 1 * 0.004445) * 730
+                resources.append({
+                    "service": "ECS",
+                    "resource_id": svc["serviceArn"].split("/")[-1],
+                    "name": svc["serviceName"],
+                    "region": os.getenv("AWS_REGION", "us-east-1"),
+                    "instance_type": f"{tasks} tasks",
+                    "details": svc.get("launchType", "FARGATE"),
+                    "monthly_usd": round(monthly, 2),
+                })
+    except Exception:
+        pass
+
+    if not resources:
+        return {"resources": [], "error": "No resources found — check AWS credentials and region configuration"}
+
+    resources.sort(key=lambda x: x["monthly_usd"], reverse=True)
+    total = sum(r["monthly_usd"] for r in resources)
+    return {"resources": resources, "total_monthly_usd": round(total, 2), "count": len(resources)}
+
+

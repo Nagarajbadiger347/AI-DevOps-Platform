@@ -270,15 +270,54 @@ def _estimate_k8s_scale(action: dict) -> ActionCost:
     current_replicas = int(action.get("current_replicas", 1))
     target_replicas  = int(action.get("replicas", action.get("target_replicas", current_replicas)))
     delta_replicas   = target_replicas - current_replicas
+    # Try real Fargate pricing if this is a Fargate workload
     vcpu = float(action.get("vcpu_per_replica", _DEFAULT_VCPU_PER_REPLICA))
     gb   = float(action.get("memory_gb_per_replica", _DEFAULT_GB_PER_REPLICA))
-    monthly_delta = delta_replicas * (vcpu * _VCPU_HOUR_USD + gb * _GB_HOUR_USD) * _HOURS_PER_MONTH
+    try:
+        from app.cost.pricing import estimate_fargate_cost
+        if delta_replicas != 0:
+            est   = estimate_fargate_cost(vcpu, gb, abs(delta_replicas))
+            delta = est["total_monthly_usd"] * (1 if delta_replicas > 0 else -1)
+            notes = f"Delta: ${delta:+.2f}/month — {abs(delta_replicas)} Fargate task(s) × {vcpu}vCPU {gb}GB. Source: {est['source']}"
+        else:
+            delta = 0.0
+            notes = "No replica change — no cost delta."
+    except Exception:
+        delta = delta_replicas * (vcpu * _VCPU_HOUR_USD + gb * _GB_HOUR_USD) * _HOURS_PER_MONTH
+        notes = f"Delta: ${delta:+.2f}/month ({abs(delta_replicas)} replica(s) × {vcpu}vCPU + {gb:.2f}GB). Source: fallback rates."
     direction = "up" if delta_replicas > 0 else "down"
     return ActionCost(
         action_type="k8s_scale",
         description=f"Scale {action.get('deployment','deployment')} {direction}: {current_replicas}→{target_replicas} replicas",
+        monthly_delta_usd=delta,
+        notes=notes,
+    )
+
+
+def _estimate_aws_scale(action: dict) -> ActionCost:
+    """Estimate cost for scaling an EC2 ASG or ECS service."""
+    current = int(action.get("current_count", action.get("current_replicas", 1)))
+    target  = int(action.get("desired_count", action.get("replicas", current)))
+    delta   = target - current
+    itype   = action.get("instance_type", "t3.medium")
+    region  = action.get("region", os.getenv("AWS_REGION", "us-east-1"))
+    try:
+        from app.cost.pricing import estimate_ec2_cost
+        if delta != 0:
+            est = estimate_ec2_cost(itype, count=abs(delta), region=region)
+            monthly_delta = est["monthly_usd"] * (1 if delta > 0 else -1)
+            notes = f"${monthly_delta:+.2f}/month — {abs(delta)} × {itype} @ ${est['price_per_hour']}/hr. Source: {est['source']}"
+        else:
+            monthly_delta = 0.0
+            notes = "No count change."
+    except Exception:
+        monthly_delta = delta * 0.096 * _HOURS_PER_MONTH  # m5.large fallback
+        notes = f"${monthly_delta:+.2f}/month (fallback estimate for {itype})"
+    return ActionCost(
+        action_type="aws_scale",
+        description=f"Scale {action.get('service', action.get('cluster', 'service'))}: {current}→{target}",
         monthly_delta_usd=monthly_delta,
-        notes=f"Delta: ${monthly_delta:+.2f}/month ({abs(delta_replicas)} replica(s) × {vcpu} vCPU + {gb:.2f}GB).",
+        notes=notes,
     )
 
 
@@ -286,12 +325,23 @@ def _estimate_aws_reboot(action: dict) -> ActionCost:
     revenue_per_hour = float(action.get("revenue_per_hour_usd", 0.0))
     downtime_mins    = float(action.get("estimated_downtime_minutes", 5.0))
     downtime_cost    = revenue_per_hour * (downtime_mins / 60.0)
+    itype = action.get("instance_type", "")
+    region = action.get("region", os.getenv("AWS_REGION", "us-east-1"))
+    price_note = ""
+    if itype:
+        try:
+            from app.cost.pricing import get_ec2_price_per_hour
+            p = get_ec2_price_per_hour(itype, region)
+            price_note = f" {itype} costs ${p['price_per_hour']:.4f}/hr on-demand."
+        except Exception:
+            pass
     return ActionCost(
         action_type="aws_reboot",
         description=f"Reboot {action.get('instance_id', action.get('resource_id', 'AWS resource'))}",
         monthly_delta_usd=0.0,
         one_time_usd=downtime_cost,
-        notes=f"~{downtime_mins:.0f} min downtime. Revenue impact: ${downtime_cost:.2f}." if revenue_per_hour else f"~{downtime_mins:.0f} min downtime.",
+        notes=(f"~{downtime_mins:.0f} min downtime. Revenue impact: ${downtime_cost:.2f}." if revenue_per_hour
+               else f"~{downtime_mins:.0f} min downtime. No persistent cost change.") + price_note,
     )
 
 
@@ -314,13 +364,17 @@ def _estimate_generic(action: dict) -> ActionCost:
 
 
 _ESTIMATORS = {
-    "k8s_scale":   _estimate_k8s_scale,
-    "aws_reboot":  _estimate_aws_reboot,
-    "aws_restart": _estimate_aws_reboot,
-    "k8s_restart": _estimate_k8s_restart,
-    "create_pr":   _estimate_generic,
+    "k8s_scale":    _estimate_k8s_scale,
+    "aws_scale":    _estimate_aws_scale,
+    "aws_reboot":   _estimate_aws_reboot,
+    "aws_restart":  _estimate_aws_reboot,
+    "k8s_restart":  _estimate_k8s_restart,
+    "create_pr":    _estimate_generic,
     "slack_notify": _estimate_generic,
-    "investigate": _estimate_generic,
+    "investigate":  _estimate_generic,
+    "start_ec2":    _estimate_generic,
+    "stop_ec2":     _estimate_generic,
+    "reboot_ec2":   _estimate_aws_reboot,
 }
 
 
@@ -400,14 +454,75 @@ def analyze_action_costs(
     )
 
 
+def _fetch_accounts_by_linked(days: int = 30) -> list[dict]:
+    """Fetch cost grouped by linked account from Cost Explorer.
+
+    Returns a list of {account_id, account_name, amount_usd} dicts sorted
+    by spend descending.  Returns [] on any error (single-account setups,
+    access denied, etc.).
+    """
+    if not _BOTO3_AVAILABLE:
+        return []
+    try:
+        end   = datetime.date.today()
+        start = end - datetime.timedelta(days=days)
+        ce = boto3.client(
+            "ce",
+            region_name="us-east-1",
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
+        )
+        resp = ce.get_cost_and_usage(
+            TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
+            Granularity="MONTHLY",
+            Metrics=["UnblendedCost"],
+            GroupBy=[{"Type": "DIMENSION", "Key": "LINKED_ACCOUNT"}],
+        )
+        totals: dict[str, float] = {}
+        for result in resp.get("ResultsByTime", []):
+            for group in result.get("Groups", []):
+                acct_id = group["Keys"][0]
+                amount  = float(group["Metrics"]["UnblendedCost"]["Amount"])
+                totals[acct_id] = totals.get(acct_id, 0.0) + amount
+
+        # Enrich with friendly names from AWS Organizations (best-effort)
+        names: dict[str, str] = {}
+        try:
+            org = boto3.client(
+                "organizations",
+                region_name="us-east-1",
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
+            )
+            paginator = org.get_paginator("list_accounts")
+            for page in paginator.paginate():
+                for a in page["Accounts"]:
+                    names[a["Id"]] = a["Name"]
+        except Exception:
+            pass
+
+        return sorted(
+            [{"account_id": k, "account_name": names.get(k, k), "amount_usd": round(v, 2)}
+             for k, v in totals.items()],
+            key=lambda x: x["amount_usd"],
+            reverse=True,
+        )
+    except Exception:
+        return []
+
+
 def fetch_cost_dashboard(aws_cfg: dict = None) -> dict:
     """Fetch full cost dashboard data — called directly by the UI endpoint.
 
     Returns a plain dict ready for JSON serialisation.
+    Includes an ``accounts`` list for multi-account / Organizations views.
     """
     aws_cfg = aws_cfg or {}
     try:
         live = _fetch_all_cost_data(aws_cfg)
+        accounts = _fetch_accounts_by_linked(days=30)
         return {
             "available": True,
             "current_monthly_spend": live["current_monthly_spend"],
@@ -421,6 +536,7 @@ def fetch_cost_dashboard(aws_cfg: dict = None) -> dict:
                 {"month": m.month, "amount_usd": m.amount_usd}
                 for m in live["monthly_trend"]
             ],
+            "accounts": accounts,
         }
     except Exception as exc:
         logger.warning("cost_dashboard_unavailable", extra={"error": str(exc)})
@@ -432,6 +548,7 @@ def fetch_cost_dashboard(aws_cfg: dict = None) -> dict:
             "forecast_month_end":    0.0,
             "service_breakdown":     [],
             "monthly_trend":         [],
+            "accounts":              [],
         }
 
 

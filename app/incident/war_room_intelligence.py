@@ -84,9 +84,63 @@ class WarRoomSession:
 
 
 # ---------------------------------------------------------------------------
-# In-memory store
+# Persistent store — JSON file backed, survives restarts
 # ---------------------------------------------------------------------------
+import os as _os
+import pathlib as _pathlib
+
+_WR_STORE_PATH = _pathlib.Path(
+    _os.getenv("WAR_ROOM_STORE_PATH", "") or
+    _pathlib.Path(__file__).resolve().parents[2] / "data" / "war_rooms.json"
+)
+
 _war_rooms: dict[str, WarRoomSession] = {}
+
+
+def _wr_save() -> None:
+    """Persist all war rooms to disk."""
+    try:
+        _WR_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            wr_id: {
+                "war_room_id":          wr.war_room_id,
+                "incident_id":          wr.incident_id,
+                "incident_description": wr.incident_description,
+                "pipeline_state":       wr.pipeline_state,
+                "slack_channel":        wr.slack_channel,
+                "created_at":           wr.created_at,
+                "participants":         wr.participants,
+            }
+            for wr_id, wr in _war_rooms.items()
+        }
+        tmp = _WR_STORE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, default=str))
+        tmp.replace(_WR_STORE_PATH)
+    except Exception:
+        pass
+
+
+def _wr_load() -> None:
+    """Load war rooms from disk on startup."""
+    try:
+        with open(_WR_STORE_PATH) as f:
+            data = json.load(f)
+        for wr_id, d in data.items():
+            wr = WarRoomSession(
+                war_room_id          = d["war_room_id"],
+                incident_id          = d["incident_id"],
+                incident_description = d["incident_description"],
+                pipeline_state       = d.get("pipeline_state", {}),
+                slack_channel        = d.get("slack_channel", ""),
+                created_at           = d.get("created_at", ""),
+                participants         = d.get("participants", []),
+            )
+            _war_rooms[wr_id] = wr
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+
+_wr_load()  # load on import
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +229,7 @@ def create_war_room_session(
         slack_channel=slack_channel,
     )
     _war_rooms[war_room_id] = wr
+    _wr_save()  # persist immediately
 
     # Pre-seed the memory session with an incident summary system message
     if _MEMORY_AVAILABLE:

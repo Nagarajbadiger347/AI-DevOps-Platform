@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import re
 from typing import Optional
 
@@ -216,6 +217,15 @@ TOOLS = [
         },
     },
     {
+        "name": "list_github_repos",
+        "description": (
+            "List all GitHub repositories accessible with the configured token. "
+            "Use this when the user asks 'list my repos', 'what repos do I have', "
+            "'show my GitHub repositories', 'what's on my GitHub', etc."
+        ),
+        "parameters": {},
+    },
+    {
         "name": "query_github_recent",
         "description": "Get recent commits and pull requests from the configured GitHub repository.",
         "parameters": {
@@ -244,8 +254,22 @@ TOOLS = [
     },
     {
         "name": "list_ec2_instances",
-        "description": "List all EC2 instances and their current state (running/stopped/etc).",
-        "parameters": {},
+        "description": "List all EC2 instances and their current state (running/stopped/etc). Supports region filtering.",
+        "parameters": {
+            "region": "AWS region code (e.g. us-east-1, ap-southeast-1). Leave empty for default region.",
+        },
+    },
+    {
+        "name": "list_aws_resources",
+        "description": (
+            "List ALL AWS resources (EC2, ECS, RDS, Lambda, S3, SQS, DynamoDB) in a given region or set of regions. "
+            "Use this when the user asks 'what do I have in Asia', 'show all resources in eu-west-1', "
+            "'what AWS services are running in us-west-2', 'list everything in Singapore', etc. "
+            "Covers: EC2, ECS, RDS, Lambda, S3, SQS, DynamoDB."
+        ),
+        "parameters": {
+            "region": "AWS region code or region group keyword: 'asia', 'eu', 'europe', 'us', 'all', or specific code like 'ap-southeast-1'. Defaults to all regions.",
+        },
     },
     {
         "name": "start_ec2_instance",
@@ -387,6 +411,37 @@ TOOLS = [
         "description": "List recent open pull requests from GitHub.",
         "parameters": {"hours": "How many hours back to look (default: 48)"},
     },
+    # ── Cost Estimation ──────────────────────────────────────────────────────
+    {
+        "name": "estimate_aws_cost",
+        "description": (
+            "Estimate the monthly and annual AWS cost for any resource or infrastructure description. "
+            "Uses the official AWS Pricing API for live prices. "
+            "Use when the user asks: 'how much will it cost', 'what is the price of', "
+            "'estimate cost for', 'how much does X instance cost', 'compare pricing', "
+            "or asks about any AWS service pricing. "
+            "Supports EC2, RDS, Lambda, ECS Fargate, S3 — with real AWS on-demand rates."
+        ),
+        "parameters": {
+            "description": "Natural language description of the resource(s) to estimate. "
+                           "Examples: '3 t3.medium instances', 'db.r5.large postgres 200gb multi-az', "
+                           "'lambda 512mb 10 million invocations', 'fargate 2 vcpu 4gb 5 tasks', '500gb s3'",
+            "region": "AWS region code (default: us-east-1). E.g. us-west-2, eu-west-1.",
+        },
+    },
+    {
+        "name": "estimate_terraform_cost",
+        "description": (
+            "Estimate monthly cost from a Terraform plan JSON. "
+            "Use when the user shares Terraform code or asks about cost impact of infrastructure-as-code changes. "
+            "Parses aws_instance, aws_db_instance, aws_lambda_function, aws_ecs_service, etc."
+        ),
+        "parameters": {
+            "plan_json": "Terraform plan JSON string (output of 'terraform show -json')",
+            "region":    "AWS region code (default: us-east-1)",
+        },
+    },
+
     # ── CloudTrail ───────────────────────────────────────────────────────────
     {
         "name": "get_cloudtrail_events",
@@ -473,6 +528,12 @@ def execute_tool(tool_name: str, params: dict, session_id: str = "") -> str:
             )
             return json.dumps(result, default=str)[:2000]
 
+        elif tool_name == "list_github_repos":
+            if not _GITHUB_AVAILABLE:
+                return "GitHub integration not available."
+            result = github_ops.list_repos()
+            return json.dumps(result, default=str)[:3000]
+
         elif tool_name == "query_github_recent":
             if not _GITHUB_AVAILABLE:
                 return "GitHub integration not available."
@@ -499,11 +560,128 @@ def execute_tool(tool_name: str, params: dict, session_id: str = "") -> str:
         elif tool_name == "list_ec2_instances":
             if not _AWS_AVAILABLE:
                 return "AWS integration not available."
-            result = aws_ops.list_ec2_instances()
+            region = params.get("region", "")
+            result = aws_ops.list_ec2_instances(region=region) if region else aws_ops.list_ec2_instances()
             result_str = json.dumps(result, default=str)[:2000]
             if session_id:
                 _cache_ec2_instances(session_id, result_str)
             return result_str
+
+        elif tool_name == "list_aws_resources":
+            if not _AWS_AVAILABLE:
+                return "AWS integration not available."
+            import boto3 as _boto3
+            region_input = (params.get("region") or "").lower().strip()
+
+            # Resolve region groups to specific region codes
+            _REGION_GROUPS = {
+                "asia":      ["ap-southeast-1","ap-southeast-2","ap-northeast-1","ap-northeast-2","ap-south-1"],
+                "apac":      ["ap-southeast-1","ap-southeast-2","ap-northeast-1","ap-northeast-2","ap-south-1"],
+                "singapore": ["ap-southeast-1"],
+                "tokyo":     ["ap-northeast-1"],
+                "sydney":    ["ap-southeast-2"],
+                "mumbai":    ["ap-south-1"],
+                "seoul":     ["ap-northeast-2"],
+                "eu":        ["eu-west-1","eu-west-2","eu-central-1","eu-north-1","eu-west-3"],
+                "europe":    ["eu-west-1","eu-west-2","eu-central-1","eu-north-1","eu-west-3"],
+                "ireland":   ["eu-west-1"],
+                "frankfurt": ["eu-central-1"],
+                "london":    ["eu-west-2"],
+                "us":        ["us-east-1","us-east-2","us-west-1","us-west-2"],
+                "virginia":  ["us-east-1"],
+                "oregon":    ["us-west-2"],
+                "all":       ["us-east-1","us-east-2","us-west-1","us-west-2",
+                               "eu-west-1","eu-west-2","eu-central-1",
+                               "ap-southeast-1","ap-southeast-2","ap-northeast-1","ap-south-1"],
+            }
+            if region_input in _REGION_GROUPS:
+                regions = _REGION_GROUPS[region_input]
+            elif region_input:
+                regions = [region_input]
+            else:
+                regions = [os.getenv("AWS_REGION", "us-east-1")]
+
+            summary_lines = []
+            for r in regions:
+                parts = [f"**{r}**:"]
+                # EC2
+                try:
+                    ec2_r = aws_ops.list_ec2_instances(region=r)
+                    insts = ec2_r.get("instances", [])
+                    if insts:
+                        running = sum(1 for i in insts if i.get("state") == "running")
+                        parts.append(f"EC2 {running}/{len(insts)} running")
+                except Exception:
+                    pass
+                # RDS
+                try:
+                    rds_cl = _boto3.client("rds", region_name=r)
+                    rds_resp = rds_cl.describe_db_instances()
+                    dbs = rds_resp.get("DBInstances", [])
+                    if dbs:
+                        parts.append(f"RDS {len(dbs)} db")
+                except Exception:
+                    pass
+                # Lambda
+                try:
+                    lam_cl = _boto3.client("lambda", region_name=r)
+                    lam_resp = lam_cl.list_functions(MaxItems=20)
+                    fns = lam_resp.get("Functions", [])
+                    if fns:
+                        parts.append(f"Lambda {len(fns)}+ functions")
+                except Exception:
+                    pass
+                # ECS
+                try:
+                    ecs_cl = _boto3.client("ecs", region_name=r)
+                    cls_resp = ecs_cl.list_clusters()
+                    if cls_resp.get("clusterArns"):
+                        total_svcs = 0
+                        for carn in cls_resp["clusterArns"]:
+                            svc_r = ecs_cl.list_services(cluster=carn.split("/")[-1])
+                            total_svcs += len(svc_r.get("serviceArns", []))
+                        if total_svcs:
+                            parts.append(f"ECS {total_svcs} services")
+                except Exception:
+                    pass
+                # SQS
+                try:
+                    sqs_cl = _boto3.client("sqs", region_name=r)
+                    sqs_resp = sqs_cl.list_queues()
+                    queues = sqs_resp.get("QueueUrls", [])
+                    if queues:
+                        parts.append(f"SQS {len(queues)} queues")
+                except Exception:
+                    pass
+                # DynamoDB
+                try:
+                    ddb_cl = _boto3.client("dynamodb", region_name=r)
+                    ddb_resp = ddb_cl.list_tables()
+                    tables = ddb_resp.get("TableNames", [])
+                    if tables:
+                        parts.append(f"DynamoDB {len(tables)} tables")
+                except Exception:
+                    pass
+
+                if len(parts) > 1:
+                    summary_lines.append(" — ".join(parts))
+                else:
+                    summary_lines.append(f"**{r}**: no resources found")
+
+            # S3 is global — list once
+            try:
+                s3_cl = _boto3.client("s3", region_name="us-east-1")
+                s3_resp = s3_cl.list_buckets()
+                buckets = s3_resp.get("Buckets", [])
+                if buckets:
+                    summary_lines.append(f"**S3 (global)**: {len(buckets)} buckets")
+            except Exception:
+                pass
+
+            if not summary_lines:
+                return f"No AWS resources found in the requested region(s): {', '.join(regions)}"
+            header = f"AWS Resources across {', '.join(regions)}:\n"
+            return header + "\n".join(f"  • {l}" for l in summary_lines)
 
         elif tool_name == "start_ec2_instance":
             if not _AWS_AVAILABLE:
@@ -747,6 +925,89 @@ def execute_tool(tool_name: str, params: dict, session_id: str = "") -> str:
             result = github_ops.get_recent_prs(hours=hours)
             return json.dumps(result, default=str)[:2000]
 
+        elif tool_name == "estimate_aws_cost":
+            from app.cost.pricing import estimate_from_description
+            description = params.get("description", "")
+            region      = params.get("region", os.getenv("AWS_REGION", "us-east-1"))
+            if not description:
+                return "Please provide a description of the resource(s) to estimate (e.g. '3 t3.medium instances')."
+            result = estimate_from_description(description, region)
+            # If no instance type specified, show a full pricing menu so user can pick
+            if not result.get("resources") or any("defaulted" in w for w in result.get("warnings", [])):
+                # Fetch live prices for common types
+                from app.cost.pricing import estimate_ec2_cost
+                tiers = [
+                    ("t3.nano",    "0.5 GB",  "Dev / scratch"),
+                    ("t3.micro",   "1 GB",    "Dev / low traffic"),
+                    ("t3.small",   "2 GB",    "Light workload"),
+                    ("t3.medium",  "4 GB",    "Small web app"),
+                    ("t3.large",   "8 GB",    "Medium workload"),
+                    ("m5.large",   "8 GB",    "General production"),
+                    ("m5.xlarge",  "16 GB",   "Heavier production"),
+                    ("c5.large",   "4 GB",    "CPU-intensive"),
+                    ("c5.xlarge",  "8 GB",    "High-compute"),
+                    ("r5.large",   "16 GB",   "Memory-intensive"),
+                ]
+                lines = [f"Sure! Here are common EC2 instance prices for **{region}** (Linux, on-demand):", ""]
+                lines.append("| Instance | RAM | Use Case | Monthly | Annual |")
+                lines.append("|---|---|---|---|---|")
+                for itype, ram, use in tiers:
+                    try:
+                        est = estimate_ec2_cost(itype, count=1, region=region)
+                        mo  = est["monthly_usd"]
+                        yr  = mo * 12
+                        lines.append(f"| **{itype}** | {ram} | {use} | ${mo:,.2f} | ${yr:,.2f} |")
+                    except Exception:
+                        pass
+                lines.append("")
+                lines.append("Which size works for you? Just tell me (e.g. **t3.medium**) and I'll give you the exact price — including how many you need and whether you want reserved pricing (saves up to 70%).")
+                return "\n".join(lines)
+            # Determine data source label
+            sources = {r.get("source","") for r in result.get("resources", [])}
+            if any("aws_pricing_api" in s for s in sources):
+                src_label = "✅ Live data from AWS Pricing API (your account)"
+            elif any("aws_public_pricing_json" in s for s in sources):
+                src_label = "✅ Live data from AWS public pricing endpoint (official, no credentials needed)"
+            else:
+                src_label = "📋 Reference prices from aws.amazon.com/ec2/pricing (2025 official rates). Connect valid AWS credentials for real-time API data."
+            lines  = [f"💰 AWS Cost Estimate — {region}",
+                      f"   Monthly:  ${result['total_monthly_usd']:,.2f}",
+                      f"   Annual:   ${result['total_annual_usd']:,.2f}",
+                      f"   Source:   {src_label}",
+                      ""]
+            for r in result.get("resources", []):
+                lines.append(f"   • {r['type']} {r['details']}: ${r['monthly_usd']:,.2f}/mo")
+            if result.get("warnings"):
+                lines.append("")
+                lines.extend(f"   ⚠ {w}" for w in result["warnings"])
+            lines.append("")
+            lines.append("   Note: On-demand pricing. Reserved Instances save 30-70%. Savings Plans also available.")
+            return "\n".join(lines)
+
+        elif tool_name == "estimate_terraform_cost":
+            from app.cost.pricing import estimate_terraform_plan_cost
+            import json as _json
+            plan_raw = params.get("plan_json", "")
+            region   = params.get("region", os.getenv("AWS_REGION", "us-east-1"))
+            if not plan_raw:
+                return "Please provide Terraform plan JSON."
+            try:
+                plan_json = _json.loads(plan_raw) if isinstance(plan_raw, str) else plan_raw
+            except Exception:
+                return "Could not parse Terraform plan JSON. Make sure it's valid JSON from 'terraform show -json'."
+            result = estimate_terraform_plan_cost(plan_json)
+            lines  = [f"🏗️ Terraform Cost Estimate",
+                      f"   Resources:     {result['resource_count']}",
+                      f"   Monthly total: ${result['total_monthly_usd']:,.2f}",
+                      f"   Annual total:  ${result['total_annual_usd']:,.2f}",
+                      ""]
+            for r in result.get("resources", []):
+                lines.append(f"   • {r['address']}: ${r['monthly_usd']:,.2f}/mo  ({r['details']})")
+            if result.get("warnings"):
+                lines.append("")
+                lines.extend(f"   ⚠ {w}" for w in result["warnings"])
+            return "\n".join(lines)
+
         elif tool_name == "get_cloudtrail_events":
             if not _AWS_AVAILABLE:
                 return "AWS integration not available."
@@ -841,7 +1102,11 @@ Rules:
 - You may chain up to 3 tool calls per message.
 - After receiving tool results, give a direct plain-English answer using the real values. No raw JSON, no field names.
 - If a tool returns an error, explain it simply and suggest what to check.
-- Never make up metric values.{incident_section}
+- Never make up metric values.
+- REGION QUERIES: When user asks about resources in a specific region or geography (e.g. "what's in Asia", "resources in Singapore", "show eu-west-1", "everything in us-west-2"), ALWAYS call list_aws_resources with the region parameter. Supported region keywords: "asia", "eu", "europe", "us", "all", specific region codes like "ap-southeast-1", city names like "singapore", "tokyo", "frankfurt", "london".
+- COST QUERIES: When user asks about pricing or costs, ALWAYS call estimate_aws_cost — never EC2 status tools.
+- GITHUB REPOS: When user asks "list my repos", "what repos do I have", "show GitHub repos", "what's on my GitHub" — call list_github_repos immediately. No confirmation needed.
+- INFRA OVERVIEW: When user asks "how does my infra look", "what's my infrastructure", "overview of my setup" — call list_ec2_instances AND list_aws_resources (region="all") together.{incident_section}
 """
 
 
@@ -914,7 +1179,13 @@ def _prefetch_context(message: str, session_id: str) -> str:
         "can't connect", "cannot connect", "restart", "reboot", "start", "stop",
         "running", "stopped", "terminate", "crashed", "slow", "unresponsive",
     }
-    if _AWS_AVAILABLE and any(k in msg for k in ec2_keywords):
+    # Skip EC2 prefetch if this is clearly a cost/pricing query or multi-region resource query
+    _cost_query_words = {"cost", "price", "pricing", "estimate", "how much", "billing", "per month", "per hour", "monthly", "annual"}
+    _region_query_words = {"asia", "apac", "europe", "eu-", "ap-", "singapore", "tokyo", "sydney", "mumbai",
+                           "frankfurt", "ireland", "london", "all regions", "every region", "resources in"}
+    _is_cost_query   = any(k in msg for k in _cost_query_words)
+    _is_region_query = any(k in msg for k in _region_query_words)
+    if _AWS_AVAILABLE and any(k in msg for k in ec2_keywords) and not _is_cost_query and not _is_region_query:
         try:
             # Use TTL-aware cache; fetch fresh if expired/missing
             instances = _get_cached_instances(session_id)

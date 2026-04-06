@@ -46,7 +46,10 @@ except ImportError:
 
 
 def _app_secret() -> bytes:
-    secret = os.getenv("JWT_SECRET_KEY", "change-me-in-production-use-openssl-rand-hex-32")
+    # Use APP_SECRET_KEY (dedicated to password hashing) so that rotating
+    # JWT_SECRET_KEY (for token signing) does NOT invalidate password hashes.
+    # Falls back to a hardcoded stable value — NOT JWT_SECRET_KEY.
+    secret = os.getenv("APP_SECRET_KEY", "nexusops-pw-hmac-stable-fallback-v1")
     return secret.encode()
 
 
