@@ -24,6 +24,15 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+
+def _vs(msg: str, show: bool = False) -> None:
+    """Fire-and-forget write to the VS Code NsOps output channel."""
+    try:
+        from app.integrations.vscode import write_output
+        write_output(msg, show=show)
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 # Detector health tracking
 # ---------------------------------------------------------------------------
@@ -75,6 +84,7 @@ def _resolve_alert(alert_type: str, resource_id: str) -> None:
     """Remove fingerprint from active alerts when state transitions to OK/resolved."""
     fp = _make_fingerprint(alert_type, resource_id)
     _active_alerts.pop(fp, None)
+    _vs(f"✅ RESOLVED  [{alert_type}] {resource_id}")
 
 
 def _enqueue_alert(alert_type: str, resource_id: str, description: str,
@@ -94,6 +104,7 @@ def _enqueue_alert(alert_type: str, resource_id: str, description: str,
         **(extra or {}),
     }
     _alert_queue.put_nowait(payload)
+    _vs(f"🚨 ALERT  [{alert_type}] {resource_id} — {description}", show=True)
     return True
 
 
@@ -138,6 +149,100 @@ def _detect_k8s_anomalies() -> list[dict]:
                 })
     except Exception as exc:
         logger.warning("monitor_k8s_scan_failed", error=str(exc))
+
+    # K8s node health
+    try:
+        from app.integrations.k8s_ops import list_deployments
+        from app.plugins.k8s_checker import check_k8s_nodes
+        nodes_result = check_k8s_nodes()
+        node_list: list = []
+        if isinstance(nodes_result, list):
+            node_list = nodes_result
+        elif isinstance(nodes_result, dict):
+            node_list = nodes_result.get("nodes", [])
+        for node in node_list:
+            if not isinstance(node, dict):
+                continue
+            node_name = node.get("name", "unknown")
+            ready = node.get("ready", True)
+            if not ready:
+                alerts.append({
+                    "alert_type": "k8s_node_notready",
+                    "resource_id": node_name,
+                    "description": f"K8s node {node_name} is NotReady",
+                })
+            else:
+                _resolve_alert("k8s_node_notready", node_name)
+        _detector_health["k8s_nodes"] = time.time()
+    except Exception as exc:
+        logger.warning("detector_failed", extra={"detector": "k8s_nodes", "error": str(exc)})
+
+    # K8s deployments with 0 available replicas
+    try:
+        from app.integrations.k8s_ops import list_deployments as _list_deps
+        deps_result = _list_deps()
+        dep_list: list = []
+        if isinstance(deps_result, list):
+            dep_list = deps_result
+        elif isinstance(deps_result, dict):
+            dep_list = deps_result.get("deployments", [])
+        for dep in dep_list:
+            if not isinstance(dep, dict):
+                continue
+            dep_name = dep.get("name", "unknown")
+            ns = dep.get("namespace", "default")
+            desired = int(dep.get("replicas", 0) or dep.get("desired", 0) or 0)
+            available = int(dep.get("available", 0) or dep.get("ready", 0) or 0)
+            if desired > 0 and available == 0:
+                alerts.append({
+                    "alert_type": "k8s_deployment_down",
+                    "resource_id": f"{ns}/{dep_name}",
+                    "description": f"Deployment {dep_name} in {ns} has 0/{desired} pods available",
+                })
+            elif desired > 0 and available >= desired:
+                _resolve_alert("k8s_deployment_down", f"{ns}/{dep_name}")
+        _detector_health["k8s_deployments"] = time.time()
+    except Exception as exc:
+        logger.warning("detector_failed", extra={"detector": "k8s_deployments", "error": str(exc)})
+
+    return alerts
+
+
+# ---------------------------------------------------------------------------
+# EC2 detection
+# ---------------------------------------------------------------------------
+
+def _detect_ec2_anomalies() -> list[dict]:
+    """Detect EC2 instances that are stopped or in an error state."""
+    alerts: list[dict] = []
+    try:
+        from app.integrations.aws_ops import list_ec2_instances
+        result = list_ec2_instances()
+        if not result.get("success"):
+            return alerts
+        for inst in result.get("instances", []):
+            state = (inst.get("state") or "").lower()
+            iid = inst.get("id", "")
+            name = inst.get("name") or iid
+            if state == "stopped":
+                alerts.append({
+                    "alert_type": "ec2_stopped",
+                    "resource_id": iid,
+                    "description": f"EC2 instance {name} ({iid}) is in stopped state",
+                })
+            elif state in ("shutting-down", "terminated"):
+                alerts.append({
+                    "alert_type": "ec2_terminated",
+                    "resource_id": iid,
+                    "description": f"EC2 instance {name} ({iid}) is {state}",
+                })
+            elif state == "running":
+                # Instance recovered — clear any prior stopped alert
+                _resolve_alert("ec2_stopped", iid)
+                _resolve_alert("ec2_terminated", iid)
+        _detector_health["ec2"] = time.time()
+    except Exception as e:
+        logger.warning("detector_failed", extra={"detector": "ec2", "error": str(e)})
     return alerts
 
 
@@ -219,6 +324,40 @@ def _detect_aws_anomalies() -> list[dict]:
     except Exception as e:
         logger.warning("detector_failed", extra={"detector": "ecs", "error": str(e)})
 
+    # ECS service health — running count below desired
+    try:
+        from app.integrations.aws_ops import list_ecs_services, get_ecs_service_detail
+        svcs = list_ecs_services()
+        if svcs.get("success"):
+            for svc in svcs.get("services", [])[:20]:
+                svc_name = svc.get("service_name") or svc.get("name", "")
+                cluster = svc.get("cluster_arn", "").split("/")[-1] or "default"
+                desired = int(svc.get("desired_count", 0) or 0)
+                running = int(svc.get("running_count", 0) or 0)
+                if desired > 0 and running == 0:
+                    alerts.append({
+                        "alert_type": "ecs_service_down",
+                        "resource_id": f"{cluster}/{svc_name}",
+                        "description": (
+                            f"ECS service {svc_name} in cluster {cluster} has "
+                            f"0/{desired} tasks running"
+                        ),
+                    })
+                elif desired > 0 and running < desired:
+                    alerts.append({
+                        "alert_type": "ecs_service_degraded",
+                        "resource_id": f"{cluster}/{svc_name}",
+                        "description": (
+                            f"ECS service {svc_name} in cluster {cluster} is degraded: "
+                            f"{running}/{desired} tasks running"
+                        ),
+                    })
+                elif running >= desired and desired > 0:
+                    _resolve_alert("ecs_service_down", f"{cluster}/{svc_name}")
+                    _resolve_alert("ecs_service_degraded", f"{cluster}/{svc_name}")
+    except Exception as e:
+        logger.warning("detector_failed", extra={"detector": "ecs_services", "error": str(e)})
+
     # RDS events
     try:
         from app.integrations.aws_ops import list_rds_instances, get_rds_events
@@ -272,21 +411,29 @@ def _detect_aws_anomalies() -> list[dict]:
 def _detect_grafana_anomalies() -> list[dict]:
     alerts: list[dict] = []
     try:
-        from app.integrations.grafana import get_alerts
-        gf = get_alerts()
-        if gf.get("success"):
-            for alert in gf.get("alerts", []):
-                state = alert.get("state", "")
+        from app.plugins.grafana_checker import check_grafana
+        result = check_grafana()
+        if result.get("status") == "unavailable":
+            return alerts
+        if result.get("success"):
+            for alert in result.get("details", {}).get("firing", []):
                 name = alert.get("name", "unknown")
-                if state in ("alerting", "pending"):
-                    alerts.append({
-                        "alert_type": "grafana_alert",
-                        "resource_id": name,
-                        "description": f"Grafana alert firing: {name}",
-                    })
-                elif state == "ok":
-                    _resolve_alert("grafana_alert", name)
-        _detector_health["grafana"] = time.time()
+                sev  = alert.get("severity", "")
+                desc = alert.get("summary", "") or f"Grafana alert firing: {name}"
+                if sev:
+                    desc = f"[{sev.upper()}] {desc}"
+                alerts.append({
+                    "alert_type": "grafana_alert",
+                    "resource_id": name,
+                    "description": desc,
+                })
+            # Resolve alerts no longer firing
+            firing_names = {a.get("name", "") for a in result.get("details", {}).get("firing", [])}
+            for alert_name in list(_active_alerts.keys()):
+                entry = _active_alerts.get(alert_name, {})
+                if entry.get("alert_type") == "grafana_alert" and entry.get("resource_id", "") not in firing_names:
+                    _resolve_alert("grafana_alert", entry.get("resource_id", ""))
+            _detector_health["grafana"] = time.time()
     except Exception as e:
         logger.warning("detector_failed", extra={"detector": "grafana", "error": str(e)})
     return alerts
@@ -325,10 +472,11 @@ async def _detect_with_backoff(detector_fn, max_retries: int = 3) -> list[dict]:
 async def _detect_and_enqueue() -> None:
     """Run all detectors and enqueue any new (non-duplicate) alerts."""
     k8s_alerts = await _detect_with_backoff(_detect_k8s_anomalies)
+    ec2_alerts = await _detect_with_backoff(_detect_ec2_anomalies)
     aws_alerts = await _detect_with_backoff(_detect_aws_anomalies)
-    gf_alerts = await _detect_with_backoff(_detect_grafana_anomalies)
+    gf_alerts  = await _detect_with_backoff(_detect_grafana_anomalies)
 
-    all_alerts = k8s_alerts + aws_alerts + gf_alerts
+    all_alerts = k8s_alerts + ec2_alerts + aws_alerts + gf_alerts
 
     if not all_alerts:
         logger.info("monitor_scan_clean")
@@ -367,6 +515,7 @@ async def _process_alert_queue() -> None:
                 source=alert.get("source", "monitor"),
                 fingerprint=alert.get("fingerprint"),
             )
+            _vs(f"⚙️  PIPELINE  [{incident_id}] Starting AI pipeline for: {alert['description']}")
             try:
                 from app.orchestrator.runner import run_pipeline
                 loop = asyncio.get_event_loop()

@@ -125,8 +125,8 @@ async def _lifespan(_: FastAPI):
         pass
 
 app = FastAPI(
-    title="NexusOps",
-    description="NexusOps — Autonomous DevOps management powered by multi-agent AI",
+    title="NsOps",
+    description="NsOps — Autonomous DevOps management powered by multi-agent AI",
     version="2.0.0",
     lifespan=_lifespan,
 )
@@ -171,6 +171,10 @@ _METRICS_HIST: dict = _defaultdict(list)  # path → list of durations
 # keyed by correlation_id; allows /approvals/{id}/resume to
 # re-invoke only the execute→validate→memory portion of the graph.
 _PENDING_PIPELINE_STATES: dict = {}
+
+# Recent pipeline results cache — keyed by incident_id, capped at 50 entries
+_RECENT_RESULTS: dict = {}
+_MAX_CACHED_RESULTS = 50
 
 def _inc(key: str, amount: int = 1):
     _METRICS[key] += amount
@@ -281,7 +285,8 @@ async def dashboard(request: Request = None):
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>NexusOps — AI DevOps Platform</title>
+<title>NsOps — AI DevOps Platform</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -375,11 +380,12 @@ code,pre,.mono{font-family:'SF Mono','Fira Code','Cascadia Code',ui-monospace,mo
 .logout-btn:hover{background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.2);color:var(--red)}
 
 /* ── MAIN CONTENT ── */
-.main{margin-left:var(--sidebar);height:100vh;overflow-y:auto;display:flex;flex-direction:column}
+.main{margin-left:var(--sidebar);height:100vh;display:flex;flex-direction:column;overflow:hidden;flex:1;min-width:0;width:calc(100vw - var(--sidebar))}
 .topbar{height:var(--topbar);background:rgba(9,13,22,0.95);backdrop-filter:blur(20px) saturate(1.4);border-bottom:1px solid rgba(124,58,237,0.12);display:flex;align-items:center;padding:0 24px;gap:12px;position:sticky;top:0;z-index:50;flex-shrink:0;box-shadow:0 1px 0 rgba(124,58,237,0.08)}
 .topbar-title{font-size:1em;font-weight:700;flex:1;letter-spacing:-.02em;color:var(--text)}
 .topbar-actions{display:flex;gap:8px;align-items:center}
-.content{padding:24px;flex:1}
+.content{padding:24px;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}
+.section-page.active{display:block;padding-bottom:32px}
 
 /* ── BUTTONS ── */
 .btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:var(--r-sm);font-size:.84em;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all var(--trans);font-family:inherit;text-decoration:none;white-space:nowrap;line-height:1.2;letter-spacing:.01em}
@@ -412,17 +418,20 @@ code,pre,.mono{font-family:'SF Mono','Fira Code','Cascadia Code',ui-monospace,mo
 @media(max-width:900px){.grid-2-1{grid-template-columns:1fr}}
 
 /* ── STAT CARDS ── */
-.stat-card{background:linear-gradient(135deg,var(--surface2) 0%,var(--surface) 100%);border:1px solid var(--border);border-radius:var(--r);padding:22px 20px;transition:all .2s ease;cursor:default;position:relative;overflow:hidden}
+.stat-card{background:linear-gradient(135deg,var(--surface2) 0%,var(--surface) 100%);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;transition:all .2s ease;cursor:default;position:relative;overflow:hidden}
 .stat-card::after{content:'';position:absolute;top:-30px;right:-30px;width:100px;height:100px;border-radius:50%;opacity:.07;pointer-events:none}
 .stat-card:nth-child(1)::after{background:var(--red)}
 .stat-card:nth-child(2)::after{background:var(--amber)}
 .stat-card:nth-child(3)::after{background:var(--blue)}
 .stat-card:nth-child(4)::after{background:var(--green)}
 .stat-card:hover{border-color:var(--border2);box-shadow:0 8px 32px rgba(0,0,0,.4);transform:translateY(-2px)}
-.stat-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px}
-.stat-icon-box{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.stat-value{font-size:2.3em;font-weight:800;line-height:1;letter-spacing:-.05em;margin-bottom:6px}
-.stat-label{font-size:.76em;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.stat-card[onclick]:hover{box-shadow:0 8px 32px rgba(0,0,0,.5),0 0 0 1px rgba(255,255,255,.06);transform:translateY(-3px) scale(1.01)}
+.stat-card[onclick]:active{transform:translateY(-1px) scale(1.00)}
+.stat-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.stat-icon-box{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.stat-icon-box svg{width:15px!important;height:15px!important}
+.stat-value{font-size:1.7em;font-weight:800;line-height:1;letter-spacing:-.04em;margin-bottom:4px}
+.stat-label{font-size:.71em;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .stat-sub{font-size:.7em;margin-top:8px;display:flex;align-items:center;gap:5px}
 
 /* ── BADGES ── */
@@ -478,8 +487,9 @@ select.form-input{cursor:pointer;appearance:none;background-image:url("data:imag
 .chat-avatar{width:32px;height:32px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:.8em;font-weight:700;margin-top:2px}
 .chat-avatar.ai{background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff}
 .chat-avatar.user-av{background:var(--surface3,#334155);color:var(--text2);border:1px solid var(--border)}
-.chat-body{display:flex;flex-direction:column;max-width:72%;gap:4px}
+.chat-body{display:flex;flex-direction:column;max-width:68%;gap:4px}
 .chat-row.user .chat-body{align-items:flex-end}
+#warroom-messages .chat-body,#slack-messages .chat-body{max-width:75%}
 .chat-bubble{padding:12px 16px;border-radius:18px;line-height:1.65;font-size:.875em;word-break:break-word}
 .chat-bubble.user{background:linear-gradient(135deg,#7c3aed,#5b21b6);color:#fff;border-bottom-right-radius:4px;box-shadow:0 2px 14px rgba(124,58,237,.3)}
 .chat-bubble.assistant{background:var(--surface2);border:1px solid var(--border);border-bottom-left-radius:4px;color:var(--text)}
@@ -541,7 +551,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
 
 .stat-card{position:relative;overflow:hidden}
 .stat-card::after{content:'';position:absolute;top:0;right:0;width:80px;height:80px;border-radius:50%;opacity:.06;transform:translate(20px,-20px)}
-.stat-icon-box{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:10px}
+.stat-icon-box{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px}
 
 /* ── LOADING ── */
 .spinner{width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--purple);border-radius:50%;animation:spin .65s linear infinite;flex-shrink:0}
@@ -629,11 +639,11 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
 .mb-12{margin-bottom:12px}
 .mb-16{margin-bottom:16px}
 .section-page{display:none}
-.section-page.active{display:block}
+.section-page.active{display:block;padding-bottom:32px}
 .topbar-status{display:flex;align-items:center;gap:6px;font-size:.76em;font-weight:600;color:var(--green);padding:4px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.2);border-radius:20px;letter-spacing:.01em}
 .topbar-status.degraded{color:var(--amber);background:rgba(245,158,11,0.08);border-color:rgba(245,158,11,0.2)}
 .topbar-status.error{color:var(--red);background:rgba(239,68,68,0.08);border-color:rgba(239,68,68,0.2)}
-.section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+.section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;width:100%}
 .section-title{font-size:1.05em;font-weight:700;letter-spacing:-.02em;color:var(--text)}
 .section-sub{font-size:.78em;color:var(--text2);margin-top:2px}
 .tab-pills{display:flex;gap:2px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:3px}
@@ -644,6 +654,52 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
 .info-row:last-child{border-bottom:none}
 .info-label{color:var(--text2);width:120px;flex-shrink:0;font-size:.9em}
 .info-value{color:var(--text);flex:1}
+
+/* ── MOBILE RESPONSIVE ── */
+@media(max-width:768px){
+  :root{--sidebar:0px;--topbar:52px}
+  .sidebar{transform:translateX(-100%);transition:transform .25s cubic-bezier(.4,0,.2,1);width:248px;z-index:200}
+  .sidebar.mobile-open{transform:translateX(0)}
+  .main{margin-left:0!important;width:100vw!important}
+  .content{padding:14px}
+  .grid-4{grid-template-columns:repeat(2,1fr)!important}
+  .grid-2,.grid-2-1{grid-template-columns:1fr!important}
+  .topbar{padding:0 14px;gap:8px}
+  .topbar-title{font-size:.9em}
+  #mobile-menu-btn{display:flex!important}
+  .section-header{flex-direction:column;align-items:flex-start;gap:10px}
+  .stat-card{padding:12px 12px}
+  .stat-value{font-size:1.4em}
+  .chat-body{max-width:92%}
+  .modal{width:94vw!important;max-width:94vw!important;padding:20px}
+  .form-row{flex-direction:column}
+}
+@media(max-width:480px){
+  .grid-4{grid-template-columns:1fr!important}
+  .topbar-actions .btn-ghost{display:none}
+  select#global-llm-select{display:none}
+}
+/* ── PIPELINE STREAM ── */
+.pipeline-stream{background:linear-gradient(135deg,var(--surface2),var(--surface));border:1px solid var(--border2);border-radius:var(--r);padding:20px;margin-top:16px}
+.pipeline-stage{display:flex;align-items:flex-start;gap:12px;padding:10px 0;position:relative}
+.pipeline-stage:not(:last-child)::after{content:'';position:absolute;left:15px;top:34px;bottom:0;width:2px;background:var(--border)}
+.pipeline-stage-icon{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.85em;position:relative;z-index:1;transition:all .3s}
+.stage-pending{background:var(--surface3);color:var(--muted);border:2px solid var(--border)}
+.stage-running{background:rgba(124,58,237,.15);color:#a78bfa;border:2px solid rgba(124,58,237,.5);animation:stagePulse 1.2s ease-in-out infinite}
+.stage-done{background:rgba(34,197,94,.15);color:#4ade80;border:2px solid rgba(34,197,94,.35)}
+.stage-warn{background:rgba(245,158,11,.15);color:#fbbf24;border:2px solid rgba(245,158,11,.35)}
+.stage-error{background:rgba(239,68,68,.15);color:#f87171;border:2px solid rgba(239,68,68,.35)}
+@keyframes stagePulse{0%,100%{box-shadow:0 0 0 0 rgba(124,58,237,.5)}50%{box-shadow:0 0 0 8px rgba(124,58,237,0)}}
+.pipeline-stage-body{flex:1;padding-top:5px}
+.pipeline-stage-title{font-size:.85em;font-weight:600;color:var(--text);margin-bottom:2px}
+.pipeline-stage-detail{font-size:.76em;color:var(--muted);line-height:1.5;margin-top:3px}
+/* ── ONBOARDING ── */
+.onboarding-step{display:none}.onboarding-step.active{display:block}
+.onboard-card{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:8px;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:12px}
+.onboard-card:hover{border-color:rgba(124,58,237,.5);background:rgba(124,58,237,.06);transform:translateX(3px)}
+.onboard-card.done{border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.05)}
+/* ── CHART ── */
+.chart-wrap{position:relative;width:100%;height:200px}
 </style>
 </head>
 <body>
@@ -655,7 +711,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
     <div class="login-left-content">
       <div class="login-product-logo">
         <div class="login-product-icon">&#9889;</div>
-        <div class="login-product-name">NexusOps</div>
+        <div class="login-product-name">NsOps</div>
       </div>
       <h1 class="login-hero-heading">AI-powered ops for<br><span>modern infrastructure</span></h1>
       <p class="login-hero-sub">Automated incident response, intelligent cost analysis, and real-time infrastructure monitoring — all in one platform.</p>
@@ -687,11 +743,11 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
   <div class="login-right">
     <div class="login-card">
       <div class="login-card-heading">Welcome back</div>
-      <div class="login-card-sub">Sign in to your NexusOps workspace</div>
+      <div class="login-card-sub">Sign in to your NsOps workspace</div>
       <div id="login-error"></div>
       <div class="form-group">
         <label class="form-label">Username</label>
-        <input type="text" id="login-user" class="form-input" value="admin" autocomplete="username" spellcheck="false" placeholder="your-username"/>
+        <input type="text" id="login-user" class="form-input" value="admin" autocomplete="username" spellcheck="false" placeholder="your-username" onkeydown="if(event.key==='Enter')document.getElementById('login-pass').focus()"/>
       </div>
       <div class="form-group">
         <label class="form-label">Password</label>
@@ -717,7 +773,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
     <div class="sidebar-logo">
       <div class="sidebar-logo-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
       <div>
-        <div class="sidebar-logo-text">NexusOps</div>
+        <div class="sidebar-logo-text">NsOps</div>
         <span class="sidebar-logo-sub">AI DevOps Platform</span>
       </div>
     </div>
@@ -757,6 +813,13 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></div> Integrations
     </div>
 
+    <div class="nav-item" onclick="App.navigate('github')" data-s="github">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg></div> GitHub
+    </div>
+    <div class="nav-item" onclick="App.navigate('vscode')" data-s="vscode">
+      <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></div> VS Code
+    </div>
+
     <div class="nav-section">Admin</div>
     <div class="nav-item" onclick="App.navigate('users')" data-s="users">
       <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div> Users
@@ -765,16 +828,41 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <div class="nav-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div> Security
     </div>
 
-    <div class="sidebar-footer">
-      <div class="user-tile">
+    <div class="sidebar-footer" style="position:relative">
+      <!-- User dropdown -->
+      <div id="user-dropdown" style="display:none;position:absolute;bottom:calc(100% + 6px);left:8px;right:8px;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.45);overflow:hidden;z-index:200">
+        <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+          <div id="dd-avatar" style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#06b6d4);display:flex;align-items:center;justify-content:center;font-size:1em;font-weight:700;color:#fff;flex-shrink:0">A</div>
+          <div style="min-width:0">
+            <div id="dd-name" style="font-size:.88em;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">admin</div>
+            <div id="dd-role" style="font-size:.72em;color:var(--muted);margin-top:1px">admin</div>
+          </div>
+        </div>
+        <div id="dd-mgmt-item" onclick="App.closeUserDropdown();App.navigate('users')" style="display:flex;align-items:center;gap:9px;padding:9px 14px;cursor:pointer;font-size:.82em;color:var(--text2);transition:background .12s" onmouseover="this.style.background='rgba(124,58,237,.1)'" onmouseout="this.style.background=''">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          User Management
+        </div>
+        <div onclick="App.closeUserDropdown();App.navigate('security')" style="display:flex;align-items:center;gap:9px;padding:9px 14px;cursor:pointer;font-size:.82em;color:var(--text2);transition:background .12s" onmouseover="this.style.background='rgba(124,58,237,.1)'" onmouseout="this.style.background=''">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Security
+        </div>
+        <div onclick="App.closeUserDropdown();App.navigate('integrations')" style="display:flex;align-items:center;gap:9px;padding:9px 14px;cursor:pointer;font-size:.82em;color:var(--text2);transition:background .12s" onmouseover="this.style.background='rgba(124,58,237,.1)'" onmouseout="this.style.background=''">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 3 8 3M12 3v4"/></svg>
+          Integrations
+        </div>
+        <div style="border-top:1px solid var(--border)"></div>
+        <div onclick="App.logout()" style="display:flex;align-items:center;gap:9px;padding:9px 14px;cursor:pointer;font-size:.82em;color:#f87171;transition:background .12s" onmouseover="this.style.background='rgba(239,68,68,.08)'" onmouseout="this.style.background=''">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          Sign Out
+        </div>
+      </div>
+      <div class="user-tile" onclick="App.toggleUserDropdown(event)" title="Account menu" style="cursor:pointer">
         <div class="user-avatar" id="user-avatar-initial">A</div>
         <div class="user-info">
           <div class="user-name" id="sidebar-username">admin</div>
           <div class="user-role" id="sidebar-role">admin</div>
         </div>
-        <button class="logout-btn" onclick="App.logout()" title="Sign out">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-        </button>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-left:auto;color:var(--muted)"><polyline points="18 15 12 9 6 15"/></svg>
       </div>
     </div>
   </nav>
@@ -782,6 +870,9 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
   <!-- MAIN -->
   <div class="main">
     <div class="topbar">
+      <button id="mobile-menu-btn" onclick="App.toggleMobileMenu()" style="display:none;align-items:center;justify-content:center;width:36px;height:36px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);cursor:pointer;flex-shrink:0;color:var(--text)" title="Menu">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
       <div class="topbar-title" id="topbar-title">Dashboard</div>
       <div class="topbar-actions">
         <div class="topbar-status" id="topbar-status">
@@ -812,44 +903,72 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
 
       <!-- DASHBOARD -->
       <div id="s-dashboard" class="section-page active">
+        <!-- Hero Banner -->
+        <div style="background:linear-gradient(135deg,rgba(124,58,237,0.12) 0%,rgba(6,182,212,0.07) 50%,rgba(124,58,237,0.04) 100%);border:1px solid rgba(124,58,237,0.18);border-radius:14px;padding:20px 24px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;position:relative;overflow:hidden">
+          <div style="position:absolute;top:-40px;right:-40px;width:180px;height:180px;border-radius:50%;background:radial-gradient(circle,rgba(124,58,237,0.18) 0%,transparent 70%);pointer-events:none"></div>
+          <div style="position:absolute;bottom:-30px;left:30%;width:120px;height:120px;border-radius:50%;background:radial-gradient(circle,rgba(6,182,212,0.1) 0%,transparent 70%);pointer-events:none"></div>
+          <div>
+            <div style="font-size:1.18em;font-weight:800;color:var(--text);letter-spacing:-.025em;margin-bottom:4px">Welcome to <span style="background:linear-gradient(135deg,#c4b5fd,#67e8f9);-webkit-background-clip:text;-webkit-text-fill-color:transparent">NsOps</span> Platform</div>
+            <div style="font-size:.82em;color:var(--text2)">AI-powered DevOps — incidents detected, triaged, and resolved autonomously</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:24px;flex-shrink:0">
+            <div style="text-align:center">
+              <div style="font-size:1.5em;font-weight:800;color:#4ade80" id="hero-uptime">—</div>
+              <div style="font-size:.68em;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Uptime</div>
+            </div>
+            <div style="width:1px;height:32px;background:var(--border)"></div>
+            <div style="text-align:center">
+              <div style="font-size:1.5em;font-weight:800;color:#c4b5fd" id="hero-resolved">—</div>
+              <div style="font-size:.68em;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Resolved</div>
+            </div>
+            <div style="width:1px;height:32px;background:var(--border)"></div>
+            <div style="text-align:center">
+              <div style="font-size:1.5em;font-weight:800;color:#22d3ee" id="hero-ai">AI</div>
+              <div style="font-size:.68em;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Powered</div>
+            </div>
+          </div>
+        </div>
         <!-- Stat Cards Row -->
         <div class="grid-4 mb-16">
-          <div class="stat-card" style="border-top:2px solid var(--red);box-shadow:0 0 0 1px rgba(239,68,68,0.1),0 4px 24px rgba(0,0,0,0.35)">
+          <div class="stat-card" onclick="App.navigate('incidents')" style="border-top:2px solid var(--red);box-shadow:0 0 0 1px rgba(239,68,68,0.1),0 4px 24px rgba(0,0,0,0.35);cursor:pointer" title="View all incidents">
             <div class="stat-header">
               <div class="stat-icon-box" style="background:linear-gradient(135deg,rgba(239,68,68,.3),rgba(239,68,68,.12));color:#f87171;box-shadow:0 0 20px rgba(239,68,68,.2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
-              <span class="badge badge-gray" id="ds-incidents-badge" style="display:none">live</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
             </div>
             <div class="stat-value" style="color:var(--text)" id="ds-incidents"><div class="skeleton" style="width:48px;height:32px"></div></div>
             <div class="stat-label">Active Incidents</div>
             <div class="stat-sub" id="ds-incidents-sub"><span style="color:var(--muted)">Loading...</span></div>
           </div>
-          <div class="stat-card" style="border-top:2px solid var(--amber);box-shadow:0 0 0 1px rgba(245,158,11,0.1),0 4px 24px rgba(0,0,0,0.35)">
+          <div class="stat-card" onclick="App.navigate('approvals')" style="border-top:2px solid var(--amber);box-shadow:0 0 0 1px rgba(245,158,11,0.1),0 4px 24px rgba(0,0,0,0.35);cursor:pointer" title="Review pending approvals">
             <div class="stat-header">
               <div class="stat-icon-box" style="background:linear-gradient(135deg,rgba(245,158,11,.3),rgba(245,158,11,.12));color:#fbbf24;box-shadow:0 0 20px rgba(245,158,11,.2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
             </div>
             <div class="stat-value" style="color:var(--text)" id="ds-approvals"><div class="skeleton" style="width:48px;height:32px"></div></div>
             <div class="stat-label">Pending Approvals</div>
             <div class="stat-sub" id="ds-approvals-sub"><span style="color:var(--muted)">Loading...</span></div>
           </div>
-          <div class="stat-card" style="border-top:2px solid var(--blue);box-shadow:0 0 0 1px rgba(59,130,246,0.1),0 4px 24px rgba(0,0,0,0.35)">
+          <div class="stat-card" onclick="App.navigate('monitoring')" style="border-top:2px solid var(--blue);box-shadow:0 0 0 1px rgba(59,130,246,0.1),0 4px 24px rgba(0,0,0,0.35);cursor:pointer" title="View AWS alarms in monitoring">
             <div class="stat-header">
               <div class="stat-icon-box" style="background:linear-gradient(135deg,rgba(59,130,246,.3),rgba(59,130,246,.12));color:#60a5fa;box-shadow:0 0 20px rgba(59,130,246,.2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></div>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
             </div>
             <div class="stat-value" style="color:var(--text)" id="ds-alerts"><div class="skeleton" style="width:48px;height:32px"></div></div>
             <div class="stat-label">AWS Alarms Firing</div>
             <div class="stat-sub" id="ds-alerts-sub"><span style="color:var(--muted)">Loading...</span></div>
           </div>
-          <div class="stat-card" style="border-top:2px solid var(--green);box-shadow:0 0 0 1px rgba(34,197,94,0.1),0 4px 24px rgba(0,0,0,0.35)">
+          <div class="stat-card" onclick="App.navigate('infra');setTimeout(()=>App.infraTab('k8s',document.querySelector('.tab-pill[onclick*=k8s]')),200)" style="border-top:2px solid var(--green);box-shadow:0 0 0 1px rgba(34,197,94,0.1),0 4px 24px rgba(0,0,0,0.35);cursor:pointer" title="View Kubernetes cluster">
             <div class="stat-header">
               <div class="stat-icon-box" style="background:linear-gradient(135deg,rgba(34,197,94,.3),rgba(34,197,94,.12));color:#4ade80;box-shadow:0 0 20px rgba(34,197,94,.2)" id="ds-k8s-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></div>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
             </div>
             <div id="ds-k8s"><div class="skeleton" style="width:72px;height:28px"></div></div>
             <div class="stat-label">K8s Cluster</div>
             <div class="stat-sub" id="ds-k8s-sub"></div>
           </div>
         </div>
-        <!-- Second Row: Activity + Health + Quick Actions -->
-        <div style="display:grid;grid-template-columns:1fr 1fr 320px;gap:16px">
+        <!-- Row 2: Activity + Health + Quick Actions -->
+        <div style="display:grid;grid-template-columns:1fr 1.1fr 240px;gap:16px;margin-bottom:16px;align-items:start">
           <div class="card">
             <div class="card-header">
               <div class="card-title">
@@ -868,10 +987,21 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                 Integration Health
               </div>
+              <span id="dash-health-badge" style="font-size:.68em;padding:2px 8px;border-radius:20px;background:rgba(107,114,128,.15);color:var(--muted);border:1px solid var(--border)">checking...</span>
             </div>
-            <div id="dash-health"><div class="skeleton mb-8"></div><div class="skeleton mb-8" style="width:78%"></div><div class="skeleton" style="width:60%"></div></div>
+            <div id="dash-health">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px">
+                <div style="display:flex;align-items:center;gap:7px;padding:7px 9px;background:rgba(255,255,255,.025);border-radius:7px;border:1px solid var(--border)"><span style="font-size:.9em">☁️</span><span style="font-size:.78em;font-weight:500;flex:1;color:var(--text2)">AWS</span><div class="skeleton" style="width:6px;height:6px;border-radius:50%"></div></div>
+                <div style="display:flex;align-items:center;gap:7px;padding:7px 9px;background:rgba(255,255,255,.025);border-radius:7px;border:1px solid var(--border)"><span style="font-size:.9em">🔗</span><span style="font-size:.78em;font-weight:500;flex:1;color:var(--text2)">GitHub</span><div class="skeleton" style="width:6px;height:6px;border-radius:50%"></div></div>
+                <div style="display:flex;align-items:center;gap:7px;padding:7px 9px;background:rgba(255,255,255,.025);border-radius:7px;border:1px solid var(--border)"><span style="font-size:.9em">📊</span><span style="font-size:.78em;font-weight:500;flex:1;color:var(--text2)">Grafana</span><div class="skeleton" style="width:6px;height:6px;border-radius:50%"></div></div>
+                <div style="display:flex;align-items:center;gap:7px;padding:7px 9px;background:rgba(255,255,255,.025);border-radius:7px;border:1px solid var(--border)"><span style="font-size:.9em">⎈</span><span style="font-size:.78em;font-weight:500;flex:1;color:var(--text2)">Kubernetes</span><div class="skeleton" style="width:6px;height:6px;border-radius:50%"></div></div>
+                <div style="display:flex;align-items:center;gap:7px;padding:7px 9px;background:rgba(255,255,255,.025);border-radius:7px;border:1px solid var(--border)"><span style="font-size:.9em">💻</span><span style="font-size:.78em;font-weight:500;flex:1;color:var(--text2)">VS Code</span><div class="skeleton" style="width:6px;height:6px;border-radius:50%"></div></div>
+                <div style="display:flex;align-items:center;gap:7px;padding:7px 9px;background:rgba(255,255,255,.025);border-radius:7px;border:1px solid var(--border)"><span style="font-size:.9em">📧</span><span style="font-size:.78em;font-weight:500;flex:1;color:var(--text2)">Email</span><div class="skeleton" style="width:6px;height:6px;border-radius:50%"></div></div>
+              </div>
+            </div>
           </div>
-          <div class="card">
+          <!-- Quick Actions -->
+          <div class="card" style="min-height:220px">
             <div class="card-header">
               <div class="card-title">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -879,46 +1009,113 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
               </div>
             </div>
             <div style="display:flex;flex-direction:column;gap:5px">
-  <button onclick="App.navigate('incidents')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(239,68,68,.14)'" onmouseout="this.style.background='rgba(239,68,68,.07)'">
-    <span style="width:28px;height:28px;border-radius:7px;background:rgba(239,68,68,.15);color:#f87171;display:flex;align-items:center;justify-content:center;flex-shrink:0">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-    </span>
-    <span style="flex:1;font-size:.82em;font-weight:500">Run Incident Pipeline</span>
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
-  </button>
+              <button onclick="App.navigate('incidents')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(239,68,68,.14)'" onmouseout="this.style.background='rgba(239,68,68,.07)'">
+                <span style="width:28px;height:28px;border-radius:7px;background:rgba(239,68,68,.15);color:#f87171;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+                <span style="flex:1;font-size:.82em;font-weight:500">Run Incident Pipeline</span>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+              <button onclick="App.navigate('warroom')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(124,58,237,.07);border:1px solid rgba(124,58,237,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(124,58,237,.14)'" onmouseout="this.style.background='rgba(124,58,237,.07)'">
+                <span style="width:28px;height:28px;border-radius:7px;background:rgba(124,58,237,.15);color:#a78bfa;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+                <span style="flex:1;font-size:.82em;font-weight:500">Create War Room</span>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+              <button onclick="App.navigate('chat')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(6,182,212,.07);border:1px solid rgba(6,182,212,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(6,182,212,.14)'" onmouseout="this.style.background='rgba(6,182,212,.07)'">
+                <span style="width:28px;height:28px;border-radius:7px;background:rgba(6,182,212,.15);color:#22d3ee;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+                <span style="flex:1;font-size:.82em;font-weight:500">Ask AI Assistant</span>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+              <button onclick="App.navigate('approvals')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(34,197,94,.14)'" onmouseout="this.style.background='rgba(34,197,94,.07)'">
+                <span style="width:28px;height:28px;border-radius:7px;background:rgba(34,197,94,.15);color:#4ade80;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></span>
+                <span style="flex:1;font-size:.82em;font-weight:500">Review Approvals</span>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+              <button onclick="App.navigate('infra')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(245,158,11,.14)'" onmouseout="this.style.background='rgba(245,158,11,.07)'">
+                <span style="width:28px;height:28px;border-radius:7px;background:rgba(245,158,11,.15);color:#fbbf24;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span>
+                <span style="flex:1;font-size:.82em;font-weight:500">View Infrastructure</span>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
 
-  <button onclick="App.navigate('warroom')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(124,58,237,.07);border:1px solid rgba(124,58,237,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(124,58,237,.14)'" onmouseout="this.style.background='rgba(124,58,237,.07)'">
-    <span style="width:28px;height:28px;border-radius:7px;background:rgba(124,58,237,.15);color:#a78bfa;display:flex;align-items:center;justify-content:center;flex-shrink:0">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-    </span>
-    <span style="flex:1;font-size:.82em;font-weight:500">Create War Room</span>
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
-  </button>
+        <!-- Row 3: AWS + VS Code + AI Provider + Platform Stats -->
+        <div style="display:grid;grid-template-columns:1.1fr 1fr 1fr 1fr;gap:16px;margin-bottom:16px;align-items:start">
+          <!-- AWS Snapshot -->
+          <div class="card" style="border-top:2px solid rgba(245,158,11,0.4)">
+            <div class="card-header">
+              <div class="card-title">
+                <span style="width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,rgba(245,158,11,.25),rgba(245,158,11,.08));color:#fbbf24;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+                </span>
+                AWS Snapshot
+              </div>
+              <button class="btn btn-ghost btn-sm" onclick="App.loadDashboardAWS()" style="font-size:.7em;padding:2px 7px">↻</button>
+            </div>
+            <div id="dash-aws-snap">
+              <div class="skeleton mb-8"></div><div class="skeleton mb-8" style="width:75%"></div><div class="skeleton" style="width:55%"></div>
+            </div>
+          </div>
 
-  <button onclick="App.navigate('chat')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(6,182,212,.07);border:1px solid rgba(6,182,212,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(6,182,212,.14)'" onmouseout="this.style.background='rgba(6,182,212,.07)'">
-    <span style="width:28px;height:28px;border-radius:7px;background:rgba(6,182,212,.15);color:#22d3ee;display:flex;align-items:center;justify-content:center;flex-shrink:0">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>
-    </span>
-    <span style="flex:1;font-size:.82em;font-weight:500">Ask AI Assistant</span>
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
-  </button>
+          <!-- VS Code Bridge -->
+          <div class="card" style="border-top:2px solid rgba(6,182,212,0.4)">
+            <div class="card-header">
+              <div class="card-title">
+                <span style="width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,rgba(6,182,212,.25),rgba(6,182,212,.08));color:#22d3ee;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                </span>
+                VS Code
+              </div>
+              <span id="dash-vscode-badge" style="font-size:.65em;padding:2px 7px;border-radius:20px;background:rgba(107,114,128,.15);color:var(--muted);border:1px solid var(--border)">—</span>
+            </div>
+            <div id="dash-vscode-status">
+              <div class="skeleton mb-8"></div><div class="skeleton" style="width:65%"></div>
+            </div>
+          </div>
 
-  <button onclick="App.navigate('approvals')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(34,197,94,.14)'" onmouseout="this.style.background='rgba(34,197,94,.07)'">
-    <span style="width:28px;height:28px;border-radius:7px;background:rgba(34,197,94,.15);color:#4ade80;display:flex;align-items:center;justify-content:center;flex-shrink:0">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-    </span>
-    <span style="flex:1;font-size:.82em;font-weight:500">Review Approvals</span>
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
-  </button>
+          <!-- AI Provider -->
+          <div class="card" style="border-top:2px solid rgba(124,58,237,0.4)">
+            <div class="card-header">
+              <div class="card-title">
+                <span style="width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,rgba(124,58,237,.25),rgba(124,58,237,.08));color:#a78bfa;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/></svg>
+                </span>
+                AI Provider
+              </div>
+            </div>
+            <div id="dash-llm-status">
+              <div class="skeleton mb-8"></div><div class="skeleton" style="width:70%"></div>
+            </div>
+          </div>
 
-  <button onclick="App.navigate('infra')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 12px;background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.18);border-radius:8px;color:var(--text);cursor:pointer;transition:all .15s;text-align:left" onmouseover="this.style.background='rgba(245,158,11,.14)'" onmouseout="this.style.background='rgba(245,158,11,.07)'">
-    <span style="width:28px;height:28px;border-radius:7px;background:rgba(245,158,11,.15);color:#fbbf24;display:flex;align-items:center;justify-content:center;flex-shrink:0">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
-    </span>
-    <span style="flex:1;font-size:.82em;font-weight:500">View Infrastructure</span>
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
-  </button>
-</div>
+          <!-- Platform Stats -->
+          <div class="card" style="border-top:2px solid rgba(34,197,94,0.4)">
+            <div class="card-header">
+              <div class="card-title">
+                <span style="width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,rgba(34,197,94,.25),rgba(34,197,94,.08));color:#4ade80;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                </span>
+                Platform Stats
+              </div>
+            </div>
+            <div id="dash-platform-stats">
+              <div class="skeleton mb-8"></div><div class="skeleton mb-8" style="width:80%"></div><div class="skeleton" style="width:60%"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 4: Recent Incidents (full width) -->
+        <div style="background:linear-gradient(135deg,var(--surface2),var(--surface));border:1px solid var(--border);border-radius:var(--r);padding:20px 24px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="width:24px;height:24px;border-radius:7px;background:linear-gradient(135deg,rgba(239,68,68,.25),rgba(239,68,68,.08));color:#f87171;display:inline-flex;align-items:center;justify-content:center">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              </span>
+              <span style="font-size:.88em;font-weight:700;color:var(--text)">Recent Incidents</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="App.navigate('incidents')" style="font-size:.75em">View all →</button>
+          </div>
+          <div id="dash-recent-incidents">
+            <div class="skeleton mb-8"></div><div class="skeleton mb-8" style="width:88%"></div><div class="skeleton" style="width:72%"></div>
           </div>
         </div>
       </div>
@@ -926,21 +1123,92 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <!-- MONITORING -->
       <div id="s-monitoring" class="section-page">
         <div class="section-header">
-          <div><div class="section-title">Monitoring</div><div class="section-sub">Real-time alerts from all connected sources</div></div>
+          <div><div class="section-title">Monitoring</div><div class="section-sub">Real-time alerts from AWS CloudWatch, Grafana, and Kubernetes</div></div>
           <button class="btn btn-secondary btn-sm" onclick="App.loadMonitoring()">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             Refresh
           </button>
         </div>
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-              Alert Stream
+
+        <!-- Source status row -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+          <div class="card" style="padding:14px 16px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span id="mon-src-aws-dot" style="width:8px;height:8px;border-radius:50%;background:#6b7280;flex-shrink:0"></span>
+              <span style="font-size:.78em;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">CloudWatch</span>
             </div>
-            <span class="badge badge-gray" id="alert-count-badge"></span>
+            <div id="mon-src-aws-val" style="font-size:1.4em;font-weight:700;color:var(--text)">—</div>
+            <div id="mon-src-aws-sub" style="font-size:.72em;color:var(--muted);margin-top:2px">alarms firing</div>
           </div>
-          <div id="monitoring-alerts"><div class="loading-state"><div class="spinner"></div> Loading alerts...</div></div>
+          <div class="card" style="padding:14px 16px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span id="mon-src-grafana-dot" style="width:8px;height:8px;border-radius:50%;background:#6b7280;flex-shrink:0"></span>
+              <span style="font-size:.78em;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Grafana</span>
+            </div>
+            <div id="mon-src-grafana-val" style="font-size:1.4em;font-weight:700;color:var(--text)">—</div>
+            <div id="mon-src-grafana-sub" style="font-size:.72em;color:var(--muted);margin-top:2px">alerts firing</div>
+          </div>
+          <div class="card" style="padding:14px 16px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span id="mon-src-k8s-dot" style="width:8px;height:8px;border-radius:50%;background:#6b7280;flex-shrink:0"></span>
+              <span style="font-size:.78em;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Kubernetes</span>
+            </div>
+            <div id="mon-src-k8s-val" style="font-size:1.4em;font-weight:700;color:var(--text)">—</div>
+            <div id="mon-src-k8s-sub" style="font-size:.72em;color:var(--muted);margin-top:2px">cluster status</div>
+          </div>
+          <div class="card" style="padding:14px 16px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span id="mon-src-loop-dot" style="width:8px;height:8px;border-radius:50%;background:#6b7280;flex-shrink:0"></span>
+              <span style="font-size:.78em;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Monitor Loop</span>
+            </div>
+            <div id="mon-src-loop-val" style="font-size:1.4em;font-weight:700;color:var(--text)">—</div>
+            <div id="mon-src-loop-sub" style="font-size:.72em;color:var(--muted);margin-top:2px">auto-detection</div>
+          </div>
+        </div>
+
+        <!-- Alert stream + source details side by side -->
+        <div style="display:grid;grid-template-columns:1fr 340px;gap:16px">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                Alert Stream
+              </div>
+              <span class="badge badge-gray" id="alert-count-badge"></span>
+            </div>
+            <div id="monitoring-alerts"><div class="loading-state"><div class="spinner"></div> Loading alerts...</div></div>
+          </div>
+
+          <!-- Right column: EC2 + K8s quick view -->
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title" style="font-size:.82em">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg>
+                  EC2 Health
+                </div>
+              </div>
+              <div id="mon-ec2-health"><div class="skeleton mb-6"></div><div class="skeleton" style="width:70%"></div></div>
+            </div>
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title" style="font-size:.82em">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                  K8s Pods
+                </div>
+              </div>
+              <div id="mon-k8s-health"><div class="skeleton mb-6"></div><div class="skeleton" style="width:70%"></div></div>
+            </div>
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title" style="font-size:.82em">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+                  ECS Services
+                </div>
+              </div>
+              <div id="mon-ecs-health"><div class="skeleton mb-6"></div><div class="skeleton" style="width:70%"></div></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -949,7 +1217,9 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
         <div class="section-header">
           <div><div class="section-title">Incidents</div><div class="section-sub">Run the AI pipeline to analyze and remediate incidents</div></div>
         </div>
-        <div class="grid-2-1">
+        <!-- Top row: form + history side by side -->
+        <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:16px;align-items:start">
+          <!-- Left: Pipeline form -->
           <div class="card">
             <div class="card-header">
               <div class="card-title">
@@ -992,7 +1262,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
                 </div>
               </div>
             </div>
-            <div style="display:flex;gap:8px;margin-bottom:16px">
+            <div style="display:flex;gap:8px">
               <button class="btn btn-primary" onclick="App.runIncident(false)" id="run-inc-btn" style="flex:1;justify-content:center;padding:10px">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 Run Pipeline
@@ -1002,108 +1272,106 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
                 Preview
               </button>
             </div>
-            <div id="inc-result"></div>
           </div>
-          <div class="card">
+
+          <!-- Right: Incident History -->
+          <div class="card" style="min-height:320px">
             <div class="card-header">
               <div class="card-title">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-                Active Incidents
+                Incident History
               </div>
-              <button class="btn btn-ghost btn-sm" onclick="App.loadIncidents()">
+              <button class="btn btn-ghost btn-sm" onclick="App.loadIncidents()" title="Refresh">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
               </button>
             </div>
-            <div id="active-incidents"><div class="empty-state"><div class="empty-icon">&#9989;</div><p>No active incidents</p></div></div>
+            <!-- Summary stats row -->
+            <div id="inc-history-stats" style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap"></div>
+            <!-- Filter bar -->
+            <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
+              <input id="inc-filter-text" type="text" placeholder="Search ID or description..." class="form-input" style="flex:1;min-width:140px;padding:5px 10px;font-size:.8em" oninput="App.filterIncidents()"/>
+              <select id="inc-filter-status" class="form-input" style="width:130px;padding:5px 8px;font-size:.8em" onchange="App.filterIncidents()">
+                <option value="">All statuses</option>
+                <option value="completed">Completed</option>
+                <option value="awaiting_approval">Awaiting Approval</option>
+                <option value="escalated">Escalated</option>
+                <option value="failed">Failed</option>
+              </select>
+              <select id="inc-filter-risk" class="form-input" style="width:110px;padding:5px 8px;font-size:.8em" onchange="App.filterIncidents()">
+                <option value="">All risks</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+              <select id="inc-sort" class="form-input" style="width:120px;padding:5px 8px;font-size:.8em" onchange="App.filterIncidents()">
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="risk">Highest risk</option>
+              </select>
+            </div>
+            <!-- Table header -->
+            <div style="display:grid;grid-template-columns:1fr 1.6fr 75px 80px 55px 110px;gap:8px;padding:6px 8px;background:var(--surface2);border-radius:6px;font-size:.74em;font-weight:600;color:var(--text2);margin-bottom:4px">
+              <span>ID</span><span>Description</span><span>Risk</span><span>Status</span><span>Acts</span><span>Date / Time</span>
+            </div>
+            <div id="active-incidents" style="max-height:400px;overflow-y:auto"><div class="empty-state"><div class="empty-icon">&#9989;</div><p>No incidents in history</p></div></div>
           </div>
         </div>
+
+        <!-- Full-width result card (shown after pipeline run or clicking history row) -->
+        <div id="inc-result" style="margin-top:16px"></div>
       </div>
 
       <!-- WAR ROOM -->
       <div id="s-warroom" class="section-page">
         <div class="section-header">
-          <div><div class="section-title">War Room</div><div class="section-sub">Collaborative incident command center with AI assistance</div></div>
+          <div><div class="section-title">War Room</div><div class="section-sub">AI-powered incident command center — ask questions, view timeline, coordinate response</div></div>
         </div>
-        <div class="grid-2-1">
-          <div id="warroom-detail" style="display:none;flex-direction:column;gap:16px">
-            <div class="card" id="warroom-info"></div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-              <div class="card" style="display:flex;flex-direction:column;height:520px">
-                <div class="card-header">
-                  <div class="card-title">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    AI Assistant
-                  </div>
-                  <button class="btn btn-ghost btn-sm" onclick="App.suggestNextSteps()">&#129302; Next Steps</button>
-                </div>
-                <div class="chat-messages" id="warroom-messages" style="flex:1;height:0"></div>
-                <div class="chat-input-row">
-                  <textarea class="chat-input" id="warroom-input" placeholder="Ask the AI anything about this incident..." rows="1"
-                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.askWarRoom()}"></textarea>
-                  <button class="btn btn-primary" onclick="App.askWarRoom()">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                    Send
-                  </button>
-                </div>
-              </div>
-              <div class="card" style="display:flex;flex-direction:column;height:520px">
-                <div class="card-header">
-                  <div class="card-title">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    Slack Channel
-                  </div>
-                  <button class="btn btn-ghost btn-sm" onclick="App.refreshSlackHistory()" id="slack-refresh-btn">&#8635; Refresh</button>
-                </div>
-                <div class="chat-messages" id="slack-messages" style="flex:1;height:0">
-                  <div class="empty-state"><p>Slack channel messages will appear here</p></div>
-                </div>
-                <div class="chat-input-row">
-                  <textarea class="chat-input" id="slack-input" placeholder="Send a message to Slack channel..." rows="1"
-                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.sendSlackMessage()}"></textarea>
-                  <button class="btn btn-primary" onclick="App.sendSlackMessage()">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                    Send
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div id="warroom-list-panel" style="display:flex;flex-direction:column;gap:16px">
+
+        <!-- War room list / create panel (shown when no war room is open) -->
+        <div id="warroom-list-panel" style="display:flex;flex-direction:column;gap:16px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
             <div class="card">
               <div class="card-header">
                 <div class="card-title">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                  Create War Room
+                  Open War Room
                 </div>
               </div>
-              <div class="form-group mb-12">
+              <div class="form-group mb-10">
                 <label class="form-label">Incident ID</label>
-                <input type="text" id="wr-inc-id" class="form-input" placeholder="INC-001"/>
+                <input type="text" id="wr-inc-id" class="form-input" placeholder="INC-001 (auto-generated if blank)"/>
               </div>
-              <div class="form-group mb-12">
-                <label class="form-label">Description</label>
-                <input type="text" id="wr-desc" class="form-input" placeholder="Brief incident description"/>
+              <div class="form-group mb-10">
+                <label class="form-label">Description *</label>
+                <input type="text" id="wr-desc" class="form-input" placeholder="e.g. API latency spike — p99 > 10s"/>
               </div>
-              <div class="form-group mb-16">
-                <label class="form-label">Severity</label>
-                <select id="wr-sev" class="form-input">
-                  <option value="critical">Critical</option>
-                  <option value="high" selected>High</option>
-                  <option value="medium">Medium</option>
-                  <option value="low">Low</option>
-                </select>
+              <div class="form-row mb-14" style="gap:10px">
+                <div class="form-group" style="flex:1">
+                  <label class="form-label">Severity</label>
+                  <select id="wr-sev" class="form-input">
+                    <option value="critical">&#128308; Critical</option>
+                    <option value="high" selected>&#128992; High</option>
+                    <option value="medium">&#128993; Medium</option>
+                    <option value="low">&#128994; Low</option>
+                  </select>
+                </div>
+                <div class="form-group" style="flex:1">
+                  <label class="form-label">Post to Slack</label>
+                  <select id="wr-slack" class="form-input">
+                    <option value="false">No</option>
+                    <option value="true">Yes — create channel</option>
+                  </select>
+                </div>
               </div>
-              <button class="btn btn-primary" onclick="App.createWarRoom()" style="width:100%;justify-content:center">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                Create War Room
+              <button class="btn btn-primary" id="wr-create-btn" onclick="App.createWarRoom()" style="width:100%;justify-content:center">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                Open War Room
               </button>
             </div>
             <div class="card">
               <div class="card-header">
-                <div class="card-title">
-                  <span class="status-dot dot-red dot-pulse"></span>
-                  Active War Rooms
-                </div>
+                <div class="card-title"><span class="status-dot dot-red dot-pulse" style="margin-right:6px"></span>Active War Rooms</div>
                 <button class="btn btn-ghost btn-sm" onclick="App.loadWarRooms()">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                 </button>
@@ -1112,26 +1380,201 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
             </div>
           </div>
         </div>
+
+        <!-- War room detail (shown when a war room is open) -->
+        <div id="warroom-detail" style="display:none;flex-direction:column;gap:12px">
+
+          <!-- Header bar -->
+          <div style="background:linear-gradient(135deg,rgba(239,68,68,0.1),rgba(124,58,237,0.08));border:1px solid rgba(239,68,68,0.2);border-radius:12px;padding:14px 20px;display:flex;align-items:center;gap:16px" id="warroom-info">
+            <div style="width:10px;height:10px;border-radius:50%;background:#f87171;flex-shrink:0;animation:pulse 1.5s ease-in-out infinite"></div>
+            <div style="flex:1">
+              <div style="font-size:.95em;font-weight:700;color:var(--text)" id="wr-header-title">War Room</div>
+              <div style="font-size:.76em;color:var(--muted)" id="wr-header-desc"></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <button class="btn btn-ghost btn-sm" onclick="App.suggestNextSteps()" style="font-size:.78em">🤖 Next Steps</button>
+              <button class="btn btn-ghost btn-sm" onclick="App.wrTab('timeline',document.getElementById('wrt-timeline'))" style="font-size:.78em">📋 Timeline</button>
+              <button class="btn btn-ghost btn-sm" onclick="App.closeWarRoom()" style="font-size:.78em">✕ Close</button>
+            </div>
+          </div>
+
+          <!-- 2-column layout: left=chat, right=sidebar -->
+          <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;align-items:start">
+
+            <!-- LEFT: Chat panel -->
+            <div class="card" style="display:flex;flex-direction:column;height:calc(100vh - 280px);min-height:480px">
+              <!-- Tab bar inside chat card -->
+              <div style="display:flex;gap:0;border-bottom:1px solid var(--border);flex-shrink:0;padding:0 4px">
+                <button class="wr-tab" id="wrt-ai"       onclick="App.wrTab('ai',this)"       style="padding:9px 14px;font-size:.8em;font-weight:600;background:none;border:none;border-bottom:2px solid var(--purple);color:var(--text);cursor:pointer">💬 AI Chat</button>
+                <button class="wr-tab" id="wrt-slack"    onclick="App.wrTab('slack',this)"    style="padding:9px 14px;font-size:.8em;font-weight:600;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer">🔔 Slack</button>
+                <button class="wr-tab" id="wrt-timeline" onclick="App.wrTab('timeline',this)" style="padding:9px 14px;font-size:.8em;font-weight:600;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer">🕐 Timeline</button>
+                <button class="wr-tab" id="wrt-context"  onclick="App.wrTab('context',this)"  style="padding:9px 14px;font-size:.8em;font-weight:600;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer">📊 Context</button>
+              </div>
+
+              <!-- AI pane -->
+              <div id="wr-pane-ai" style="display:flex;flex-direction:column;flex:1;min-height:0">
+                <div class="chat-messages" id="warroom-messages" style="flex:1;min-height:0;padding:16px 20px"></div>
+                <div class="chat-input-row" style="border-top:1px solid var(--border);padding:12px 16px;flex-shrink:0">
+                  <textarea class="chat-input" id="warroom-input" placeholder="Ask the AI anything about this incident..." rows="1"
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.askWarRoom()}"></textarea>
+                  <button class="btn btn-primary" onclick="App.askWarRoom()" style="padding:8px 16px">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    Send
+                  </button>
+                </div>
+              </div>
+
+              <!-- Slack pane -->
+              <div id="wr-pane-slack" style="display:none;flex-direction:column;flex:1;min-height:0">
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0">
+                  <span style="font-size:.82em;font-weight:600;color:var(--text)" id="wr-slack-title">Slack Channel</span>
+                  <button class="btn btn-ghost btn-sm" onclick="App.refreshSlackHistory()" style="font-size:.75em">↻ Refresh</button>
+                </div>
+                <div class="chat-messages" id="slack-messages" style="flex:1;min-height:0;padding:16px 20px">
+                  <div class="empty-state"><p>No Slack channel linked</p></div>
+                </div>
+                <div class="chat-input-row" style="border-top:1px solid var(--border);padding:12px 16px;flex-shrink:0">
+                  <textarea class="chat-input" id="slack-input" placeholder="Send to Slack channel..." rows="1"
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.sendSlackMessage()}"></textarea>
+                  <button class="btn btn-primary" onclick="App.sendSlackMessage()" style="padding:8px 16px">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    Send
+                  </button>
+                </div>
+              </div>
+
+              <!-- Timeline pane -->
+              <div id="wr-pane-timeline" style="display:none;flex:1;overflow-y:auto;padding:16px 20px">
+                <div id="wr-timeline-content"><div class="loading-state"><div class="spinner"></div></div></div>
+              </div>
+
+              <!-- Context pane -->
+              <div id="wr-pane-context" style="display:none;flex:1;overflow-y:auto;padding:16px 20px">
+                <div id="wr-context-content"><div class="empty-state"><p>Context will load here</p></div></div>
+              </div>
+            </div>
+
+            <!-- RIGHT: Sidebar with info + quick actions -->
+            <div style="display:flex;flex-direction:column;gap:12px">
+              <!-- Incident Info -->
+              <div class="card" style="padding:16px">
+                <div style="font-size:.72em;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Incident Info</div>
+                <div id="wr-sidebar-info" style="display:flex;flex-direction:column;gap:7px;font-size:.82em">
+                  <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Room ID</span><span id="ws-id" style="font-weight:600;color:var(--text)">—</span></div>
+                  <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Severity</span><span id="ws-sev">—</span></div>
+                  <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Status</span><span id="ws-status">—</span></div>
+                  <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Created</span><span id="ws-time" style="color:var(--muted);font-size:.9em">—</span></div>
+                  <div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Participants</span><span id="ws-participants" style="font-weight:600;color:var(--text)">—</span></div>
+                </div>
+              </div>
+              <!-- Quick Prompts -->
+              <div class="card" style="padding:16px">
+                <div style="font-size:.72em;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Quick Prompts</div>
+                <div style="display:flex;flex-direction:column;gap:6px">
+                  <button onclick="App.wrQuickPrompt(&quot;What's the root cause?&quot;)" style="text-align:left;padding:8px 10px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;color:var(--text2);font-size:.78em;cursor:pointer;transition:all .15s" onmouseover="this.style.background='rgba(124,58,237,.12)';this.style.borderColor='rgba(124,58,237,.3)';this.style.color='var(--text)'" onmouseout="this.style.background='var(--surface3)';this.style.borderColor='var(--border)';this.style.color='var(--text2)'">What's the root cause?</button>
+                  <button onclick="App.wrQuickPrompt('Show me the timeline')" style="text-align:left;padding:8px 10px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;color:var(--text2);font-size:.78em;cursor:pointer;transition:all .15s" onmouseover="this.style.background='rgba(124,58,237,.12)';this.style.borderColor='rgba(124,58,237,.3)';this.style.color='var(--text)'" onmouseout="this.style.background='var(--surface3)';this.style.borderColor='var(--border)';this.style.color='var(--text2)'">Show me the timeline</button>
+                  <button onclick="App.wrQuickPrompt('What should we do next?')" style="text-align:left;padding:8px 10px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;color:var(--text2);font-size:.78em;cursor:pointer;transition:all .15s" onmouseover="this.style.background='rgba(124,58,237,.12)';this.style.borderColor='rgba(124,58,237,.3)';this.style.color='var(--text)'" onmouseout="this.style.background='var(--surface3)';this.style.borderColor='var(--border)';this.style.color='var(--text2)'">What should we do next?</button>
+                  <button onclick="App.wrQuickPrompt('Check AWS alarms')" style="text-align:left;padding:8px 10px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;color:var(--text2);font-size:.78em;cursor:pointer;transition:all .15s" onmouseover="this.style.background='rgba(124,58,237,.12)';this.style.borderColor='rgba(124,58,237,.3)';this.style.color='var(--text)'" onmouseout="this.style.background='var(--surface3)';this.style.borderColor='var(--border)';this.style.color='var(--text2)'">Check AWS alarms</button>
+                  <button onclick="App.wrQuickPrompt('Any recent deployments?')" style="text-align:left;padding:8px 10px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;color:var(--text2);font-size:.78em;cursor:pointer;transition:all .15s" onmouseover="this.style.background='rgba(124,58,237,.12)';this.style.borderColor='rgba(124,58,237,.3)';this.style.color='var(--text)'" onmouseout="this.style.background='var(--surface3)';this.style.borderColor='var(--border)';this.style.color='var(--text2)'">Any recent deployments?</button>
+                  <button onclick="App.wrQuickPrompt('Page the on-call engineer')" style="text-align:left;padding:8px 10px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;color:var(--text2);font-size:.78em;cursor:pointer;transition:all .15s" onmouseover="this.style.background='rgba(124,58,237,.12)';this.style.borderColor='rgba(124,58,237,.3)';this.style.color='var(--text)'" onmouseout="this.style.background='var(--surface3)';this.style.borderColor='var(--border)';this.style.color='var(--text2)'">Page the on-call engineer</button>
+                </div>
+              </div>
+              <!-- Resolve -->
+              <button onclick="App.resolveWarRoom()" class="btn btn-ghost" style="width:100%;justify-content:center;border-color:rgba(34,197,94,.3);color:#4ade80;font-size:.82em">✓ Mark Resolved</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- APPROVALS -->
       <div id="s-approvals" class="section-page">
         <div class="section-header">
-          <div><div class="section-title">Approvals</div><div class="section-sub">Review and approve AI-recommended remediation actions</div></div>
-          <button class="btn btn-secondary btn-sm" onclick="App.loadApprovals()">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          <div><div class="section-title">Approvals</div><div class="section-sub">Review, approve or reject AI-recommended remediation actions — then resume execution</div></div>
+          <button class="btn btn-ghost btn-sm" onclick="App.loadApprovals()">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             Refresh
           </button>
         </div>
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              Pending Approvals
-            </div>
-            <span class="badge badge-amber" id="approvals-count-badge" style="display:none"></span>
+
+        <!-- Summary stat cards -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px" id="approval-stats">
+          <div class="card" style="padding:14px">
+            <div style="font-size:.72em;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Pending</div>
+            <div style="font-size:2em;font-weight:800;color:var(--amber)" id="astat-pending">—</div>
+            <div style="font-size:.75em;color:var(--muted)">Awaiting review</div>
           </div>
-          <div id="approvals-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+          <div class="card" style="padding:14px">
+            <div style="font-size:.72em;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Approved</div>
+            <div style="font-size:2em;font-weight:800;color:var(--green)" id="astat-approved">—</div>
+            <div style="font-size:.75em;color:var(--muted)">Ready to resume</div>
+          </div>
+          <div class="card" style="padding:14px">
+            <div style="font-size:.72em;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Rejected</div>
+            <div style="font-size:2em;font-weight:800;color:var(--red)" id="astat-rejected">—</div>
+            <div style="font-size:.75em;color:var(--muted)">This session</div>
+          </div>
+          <div class="card" style="padding:14px">
+            <div style="font-size:.72em;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Avg Risk</div>
+            <div style="font-size:2em;font-weight:800;color:var(--purple)" id="astat-risk">—</div>
+            <div style="font-size:.75em;color:var(--muted)">Across pending</div>
+          </div>
+        </div>
+
+        <!-- Pending + History tabs -->
+        <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:16px">
+          <button id="atab-pending" onclick="App.approvalsTab('pending',this)" style="padding:7px 18px;font-size:.83em;font-weight:600;background:none;border:none;border-bottom:2px solid var(--purple);color:var(--text);cursor:pointer">Pending</button>
+          <button id="atab-history" onclick="App.approvalsTab('history',this)" style="padding:7px 18px;font-size:.83em;font-weight:600;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer">History</button>
+        </div>
+
+        <!-- Pending pane -->
+        <div id="approvals-pane-pending">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <span class="status-dot dot-amber dot-pulse" style="margin-right:6px"></span>
+                Pending Approvals
+              </div>
+              <span class="badge badge-amber" id="approvals-count-badge" style="display:none"></span>
+            </div>
+            <div id="approvals-list"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
+          </div>
+        </div>
+
+        <!-- History pane -->
+        <div id="approvals-pane-history" style="display:none">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">All Approval Decisions</div>
+              <button class="btn btn-ghost btn-sm" onclick="App.loadApprovalHistory()">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              </button>
+            </div>
+            <div id="approvals-history-list"><div class="loading-state"><div class="spinner"></div></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- APPROVAL DETAIL MODAL -->
+      <div id="approve-modal" class="modal-overlay" onclick="if(event.target===this)App.closeModal('approve-modal')">
+        <div class="modal" style="max-width:680px;width:95%">
+          <div class="modal-header">
+            <div class="modal-title" id="approve-modal-title">Review Actions</div>
+            <button class="modal-close" onclick="App.closeModal('approve-modal')">&#215;</button>
+          </div>
+          <div class="modal-body" id="approve-modal-body" style="max-height:65vh;overflow-y:auto"></div>
+          <div class="modal-footer" style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-danger" onclick="App.submitRejection()" id="btn-reject" style="flex:1;justify-content:center">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              Reject
+            </button>
+            <button class="btn btn-primary" onclick="App.submitApproval()" id="btn-approve" style="flex:2;justify-content:center">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+              Approve Selected Actions
+            </button>
+            <button class="btn btn-ghost" id="btn-resume" onclick="App.resumePipeline()" style="flex:1;justify-content:center;display:none">
+              &#9654; Resume Pipeline
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1159,12 +1602,20 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
           <div id="cost-summary-row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px"></div>
           <div class="grid-2" style="margin-bottom:16px">
             <div class="card">
-              <div class="card-header"><div class="card-title">&#128202; Top Services This Month</div></div>
+              <div class="card-header">
+                <div class="card-title">📊 Top Services This Month</div>
+                <span id="cost-services-period" style="font-size:.72em;color:var(--muted)"></span>
+              </div>
               <div id="cost-services"><div class="loading-state"><div class="spinner"></div></div></div>
+              <div class="chart-wrap" style="display:none" id="cost-services-chart-wrap"><canvas id="cost-services-chart"></canvas></div>
             </div>
             <div class="card">
-              <div class="card-header"><div class="card-title">&#128200; 6-Month Spend Trend</div></div>
+              <div class="card-header">
+                <div class="card-title">📈 6-Month Spend Trend</div>
+                <span id="cost-trend-note" style="font-size:.72em;color:var(--muted)"></span>
+              </div>
               <div id="cost-trend"><div class="loading-state"><div class="spinner"></div></div></div>
+              <div class="chart-wrap" style="display:none" id="cost-trend-chart-wrap"><canvas id="cost-trend-chart"></canvas></div>
             </div>
           </div>
           <!-- Cost insights row -->
@@ -1387,7 +1838,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
               <div class="chat-welcome-icon">
                 <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>
               </div>
-              <h2>NexusOps AI</h2>
+              <h2>NsOps AI</h2>
               <p>Ask me anything about your infrastructure — I can check alerts,<br>EC2 instances, K8s pods, GitHub activity, costs, and more.</p>
             </div>
           </div>
@@ -1584,75 +2035,245 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
         </div>
       </div>
 
-      <!-- USERS -->
-      <div id="s-users" class="section-page">
+      <!-- VSCODE -->
+      <div id="s-vscode" class="section-page">
         <div class="section-header">
-          <div><div class="section-title">Users</div><div class="section-sub">Manage platform access and roles</div></div>
-          <button class="btn btn-primary btn-sm" onclick="App.openInviteModal()">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            Invite User
+          <div><div class="section-title">VS Code</div><div class="section-sub">IDE integration — open files, highlight lines, send notifications and run terminal commands</div></div>
+          <button class="btn btn-secondary btn-sm" onclick="App.loadVSCode()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Refresh
           </button>
         </div>
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-              Team Members
+        <!-- Connection status card -->
+        <div id="vscode-status-card" class="card" style="margin-bottom:18px">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div id="vscode-status-dot" style="width:12px;height:12px;border-radius:50%;background:#6b7280;flex-shrink:0"></div>
+            <div>
+              <div id="vscode-status-text" style="font-size:.9em;font-weight:600;color:var(--text)">Checking connection…</div>
+              <div id="vscode-status-sub" style="font-size:.78em;color:var(--muted);margin-top:2px"></div>
+            </div>
+            <div style="margin-left:auto">
+              <span style="font-size:.72em;color:var(--muted);background:var(--bg2);padding:3px 9px;border-radius:20px;border:1px solid var(--border)">http://127.0.0.1:6789</span>
             </div>
           </div>
-          <div id="users-table"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>
         </div>
+        <!-- Quick actions -->
+        <div class="section-title" style="font-size:.82em;font-weight:600;color:var(--muted);margin-bottom:12px;text-transform:uppercase;letter-spacing:.06em">Quick Actions</div>
+        <div class="grid-3" style="margin-bottom:24px">
+          <div class="card" style="cursor:pointer" onclick="App.vscodeAction('notify')">
+            <div style="font-size:1.3em;margin-bottom:8px">🔔</div>
+            <div style="font-weight:600;font-size:.88em;color:var(--text)">Send Notification</div>
+            <div style="font-size:.75em;color:var(--muted);margin-top:4px">Show an info/warning/error popup in VS Code</div>
+          </div>
+          <div class="card" style="cursor:pointer" onclick="App.vscodeAction('open')">
+            <div style="font-size:1.3em;margin-bottom:8px">📂</div>
+            <div style="font-weight:600;font-size:.88em;color:var(--text)">Open File</div>
+            <div style="font-size:.75em;color:var(--muted);margin-top:4px">Jump to a file and line in the editor</div>
+          </div>
+          <div class="card" style="cursor:pointer" onclick="App.vscodeAction('terminal')">
+            <div style="font-size:1.3em;margin-bottom:8px">⌨️</div>
+            <div style="font-weight:600;font-size:.88em;color:var(--text)">Run Terminal Command</div>
+            <div style="font-size:.75em;color:var(--muted);margin-top:4px">Execute a shell command in VS Code terminal</div>
+          </div>
+          <div class="card" style="cursor:pointer" onclick="App.vscodeAction('highlight')">
+            <div style="font-size:1.3em;margin-bottom:8px">🟡</div>
+            <div style="font-weight:600;font-size:.88em;color:var(--text)">Highlight Lines</div>
+            <div style="font-size:.75em;color:var(--muted);margin-top:4px">Yellow-highlight lines in a source file</div>
+          </div>
+          <div class="card" style="cursor:pointer" onclick="App.vscodeAction('clear')">
+            <div style="font-size:1.3em;margin-bottom:8px">🧹</div>
+            <div style="font-weight:600;font-size:.88em;color:var(--text)">Clear Highlights</div>
+            <div style="font-size:.75em;color:var(--muted);margin-top:4px">Remove all NsOps decorations from editors</div>
+          </div>
+          <div class="card" style="cursor:pointer" onclick="App.vscodeAction('output')">
+            <div style="font-size:1.3em;margin-bottom:8px">📋</div>
+            <div style="font-weight:600;font-size:.88em;color:var(--text)">Write Output</div>
+            <div style="font-size:.75em;color:var(--muted);margin-top:4px">Send a message to the NsOps output channel</div>
+          </div>
+        </div>
+        <!-- Action modal (hidden) -->
+        <div id="vscode-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:500;display:none;align-items:center;justify-content:center">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;width:420px;max-width:90vw">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+              <div id="vscode-modal-title" style="font-weight:700;font-size:1em;color:var(--text)">Action</div>
+              <button onclick="App.vscodeModalClose()" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.2em">✕</button>
+            </div>
+            <div id="vscode-modal-body"></div>
+            <div style="display:flex;gap:8px;margin-top:18px">
+              <button onclick="App.vscodeModalClose()" class="btn btn-ghost btn-sm">Cancel</button>
+              <button id="vscode-modal-submit" class="btn btn-primary btn-sm" onclick="App.vscodeModalSubmit()">Send</button>
+            </div>
+          </div>
+        </div>
+        <!-- Install instructions -->
+        <div class="card" style="margin-top:8px">
+          <div style="font-weight:600;font-size:.88em;color:var(--text);margin-bottom:10px">Extension Setup</div>
+          <div style="font-size:.8em;color:var(--muted);line-height:1.8">
+            Install the NsOps VS Code extension from the <code style="background:var(--bg2);padding:1px 5px;border-radius:4px">vscode-extension/</code> directory:<br>
+            <code style="background:var(--bg2);padding:4px 8px;border-radius:5px;display:inline-block;margin-top:6px;font-size:.92em">cd vscode-extension &amp;&amp; vsce package &amp;&amp; code --install-extension nsops-vscode-1.0.0.vsix</code>
+          </div>
+        </div>
+      </div>
+
+      <!-- GITHUB -->
+      <div id="s-github" class="section-page">
+        <div class="section-header">
+          <div><div class="section-title">GitHub</div><div class="section-sub">Repositories, commits, pull requests and activity</div></div>
+          <div style="display:flex;gap:8px">
+            <select id="gh-hours-filter" onchange="App.loadGithub()" style="padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.8em">
+              <option value="24">Last 24h</option>
+              <option value="48" selected>Last 48h</option>
+              <option value="168">Last 7d</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="App.loadGithub()">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Profile + stats row -->
+        <div id="gh-profile-row" style="margin-bottom:16px"></div>
+
+        <!-- Repos + Activity split -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+          <!-- Repos -->
+          <div class="card" style="padding:0;overflow:hidden">
+            <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3zM3 9h18M9 21V9"/></svg>
+                Repositories
+              </div>
+              <input id="gh-repo-search" type="text" placeholder="Filter..." style="padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.78em;width:120px" oninput="App.filterGhRepos(this.value)">
+            </div>
+            <div id="gh-repos-list" style="max-height:360px;overflow-y:auto"><div class="loading-state" style="padding:24px"><div class="spinner"></div></div></div>
+          </div>
+
+          <!-- Recent commits -->
+          <div class="card" style="padding:0;overflow:hidden">
+            <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>
+                Recent Commits
+              </div>
+            </div>
+            <div id="gh-commits-list" style="max-height:360px;overflow-y:auto"><div class="loading-state" style="padding:24px"><div class="spinner"></div></div></div>
+          </div>
+        </div>
+
+        <!-- Pull Requests -->
+        <div class="card" style="padding:0;overflow:hidden">
+          <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+            <div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg>
+              Pull Requests
+            </div>
+            <select id="gh-pr-state" onchange="App.loadGhPRs()" style="padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.78em">
+              <option value="closed">Merged</option>
+              <option value="open">Open</option>
+              <option value="all">All</option>
+            </select>
+          </div>
+          <div id="gh-prs-list"><div class="loading-state" style="padding:24px"><div class="spinner"></div></div></div>
+        </div>
+      </div>
+
+      <!-- USERS (admin view rendered dynamically) -->
+      <div id="s-users" class="section-page">
+        <!-- Dynamic header injected by JS based on role -->
+        <div id="users-page-header"></div>
+        <!-- Admin: stats row -->
+        <div id="users-stats" style="margin-bottom:20px"></div>
+        <!-- Admin: table / Non-admin: profile -->
+        <div id="users-main-content"></div>
+        <!-- Admin: my account / Non-admin: recent activity -->
+        <div id="users-secondary-content" style="margin-top:16px"></div>
       </div>
 
       <!-- SECURITY -->
       <div id="s-security" class="section-page">
+
+        <!-- Header -->
         <div class="section-header">
           <div>
             <div class="section-title">Security</div>
-            <div class="section-sub">API keys, audit trail, and webhook configuration</div>
+            <div class="section-sub">Credentials, audit trail &amp; webhook endpoints</div>
           </div>
-          <button class="btn btn-ghost btn-sm" onclick="App.loadSecrets();App.loadAudit();" style="gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick="App.loadSecrets();App.loadAudit();App.loadWebhookUrls();App.loadPolicyRules();" style="gap:6px">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             Refresh
           </button>
         </div>
 
-        <!-- Security summary stats -->
-        <div id="sec-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px"></div>
+        <!-- Two-column layout: left = summary + creds, right = audit + webhooks -->
+        <div style="display:grid;grid-template-columns:1fr 360px;gap:16px;align-items:start">
 
-        <!-- API Keys + Audit side by side -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
-          <div class="card" style="padding:0;overflow:hidden">
-            <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
-              <div class="card-title" style="font-size:.9em">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                Integration Keys
+          <!-- LEFT COLUMN -->
+          <div style="display:flex;flex-direction:column;gap:14px">
+
+            <!-- Credential health summary -->
+            <div id="sec-summary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px"></div>
+
+            <!-- Credentials card -->
+            <div class="card" style="padding:0;overflow:hidden">
+              <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+                <div style="display:flex;align-items:center;gap:8px;font-size:.88em;font-weight:700;color:var(--text)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                  Integration Credentials
+                </div>
+                <span style="font-size:.72em;padding:2px 8px;border-radius:12px;background:rgba(124,58,237,.1);color:#a78bfa;border:1px solid rgba(124,58,237,.2)">env vars</span>
+              </div>
+              <div id="secrets-list"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+
+          </div><!-- /left -->
+
+          <!-- RIGHT COLUMN -->
+          <div style="display:flex;flex-direction:column;gap:14px">
+
+            <!-- Audit log card -->
+            <div class="card" style="padding:0;overflow:hidden">
+              <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+                <div style="display:flex;align-items:center;gap:8px;font-size:.88em;font-weight:700;color:var(--text)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                  Audit Log
+                </div>
+                <span style="font-size:.72em;color:var(--muted)">last 10 events</span>
+              </div>
+              <div id="audit-list" style="max-height:320px;overflow-y:auto"><div class="loading-state"><div class="spinner"></div></div></div>
+            </div>
+
+            <!-- Policy Rules editor card -->
+            <div class="card" style="padding:0;overflow:hidden">
+              <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+                <div style="display:flex;align-items:center;gap:8px;font-size:.88em;font-weight:700;color:var(--text)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  Policy Rules
+                </div>
+                <div style="display:flex;gap:6px">
+                  <button class="btn btn-ghost btn-sm" onclick="App.loadPolicyRules()" style="font-size:.72em;padding:3px 8px">&#8635; Reload</button>
+                  <button class="btn btn-primary btn-sm" onclick="App.savePolicyRules()" style="font-size:.72em;padding:3px 8px">&#10003; Save</button>
+                </div>
+              </div>
+              <div style="padding:12px 14px">
+                <div style="font-size:.76em;color:var(--muted);margin-bottom:8px">Edit guardrails, blocked actions and permissions. Changes take effect immediately.</div>
+                <textarea id="policy-rules-editor" rows="14" style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.77em;padding:10px;resize:vertical;outline:none;line-height:1.5" spellcheck="false"></textarea>
+                <div id="policy-rules-status" style="font-size:.75em;margin-top:5px;color:var(--muted)"></div>
               </div>
             </div>
-            <div id="secrets-list" style="padding:4px 0"><div class="loading-state"><div class="spinner"></div></div></div>
-          </div>
-          <div class="card" style="padding:0;overflow:hidden">
-            <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
-              <div class="card-title" style="font-size:.9em">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-                Recent Audit Events
-              </div>
-            </div>
-            <div id="audit-list" style="padding:4px 0"><div class="loading-state"><div class="spinner"></div></div></div>
-          </div>
-        </div>
 
-        <!-- Webhook endpoints -->
-        <div class="card" style="padding:0;overflow:hidden">
-          <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
-            <div class="card-title" style="font-size:.9em">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-              Inbound Webhook Endpoints
+            <!-- Webhook endpoints card -->
+            <div class="card" style="padding:0;overflow:hidden">
+              <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                <span style="font-size:.88em;font-weight:700;color:var(--text)">Inbound Webhooks</span>
+              </div>
+              <div id="webhook-urls" style="padding:12px 14px"></div>
             </div>
-            <span style="font-size:.75em;color:var(--muted)">Point your monitoring tools to these URLs</span>
-          </div>
-          <div id="webhook-urls" style="padding:16px 18px"></div>
-        </div>
+
+          </div><!-- /right -->
+
+        </div><!-- /grid -->
       </div>
 
     </div><!-- /content -->
@@ -1718,6 +2339,48 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
     </button>
   </div>
 </div>
+<!-- Mobile sidebar overlay -->
+<div id="mobile-overlay" onclick="App.toggleMobileMenu()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:150;backdrop-filter:blur(2px)"></div>
+
+<!-- Onboarding Modal -->
+<div id="onboarding-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;display:none;align-items:center;justify-content:center;backdrop-filter:blur(6px)">
+  <div style="background:var(--surface);border:1px solid var(--border2);border-radius:18px;padding:32px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 24px 80px rgba(0,0,0,.6);animation:fadeUp .3s ease">
+    <div style="text-align:center;margin-bottom:24px">
+      <div style="width:56px;height:56px;border-radius:16px;background:linear-gradient(135deg,#7c3aed,#06b6d4);display:flex;align-items:center;justify-content:center;margin:0 auto 12px;font-size:1.5em;box-shadow:0 0 32px rgba(124,58,237,.4)">⚡</div>
+      <div style="font-size:1.3em;font-weight:800;color:var(--text);letter-spacing:-.025em">Welcome to NsOps</div>
+      <div style="font-size:.85em;color:var(--text2);margin-top:4px">Let's connect your tools in 2 minutes</div>
+    </div>
+    <!-- Step 1 -->
+    <div class="onboarding-step active" id="ob-step-1">
+      <div style="font-size:.8em;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px">Step 1 of 3 — Core Integrations</div>
+      <div class="onboard-card done" onclick="App.obGoto('aws')">
+        <span style="font-size:1.4em">☁️</span>
+        <div style="flex:1"><div style="font-weight:600;font-size:.88em">AWS</div><div style="font-size:.76em;color:var(--muted)">EC2, ECS, Lambda, RDS, CloudWatch, Cost</div></div>
+        <span id="ob-aws-tick" style="color:#4ade80;font-size:1.1em">✓</span>
+      </div>
+      <div class="onboard-card" onclick="App.obGoto('github')">
+        <span style="font-size:1.4em">🔗</span>
+        <div style="flex:1"><div style="font-weight:600;font-size:.88em">GitHub</div><div style="font-size:.76em;color:var(--muted)">Repos, PRs, commits, auto-create issues</div></div>
+        <span id="ob-gh-tick" style="color:var(--muted);font-size:.8em">→</span>
+      </div>
+      <div class="onboard-card" onclick="App.obGoto('slack')">
+        <span style="font-size:1.4em">💬</span>
+        <div style="flex:1"><div style="font-weight:600;font-size:.88em">Slack</div><div style="font-size:.76em;color:var(--muted)">War rooms, alerts, on-call notifications</div></div>
+        <span id="ob-slack-tick" style="color:var(--muted);font-size:.8em">→</span>
+      </div>
+      <div class="onboard-card" onclick="App.obGoto('grafana')">
+        <span style="font-size:1.4em">📊</span>
+        <div style="flex:1"><div style="font-weight:600;font-size:.88em">Grafana</div><div style="font-size:.76em;color:var(--muted)">Dashboards, firing alerts, annotations</div></div>
+        <span id="ob-grafana-tick" style="color:var(--muted);font-size:.8em">→</span>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:20px">
+        <button onclick="App.obDismiss()" class="btn btn-ghost" style="flex:1">Skip for now</button>
+        <button onclick="App.obComplete()" class="btn btn-primary" style="flex:1">Done — Go to Dashboard →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="toast-container"></div>
 
 <script>
@@ -1801,7 +2464,12 @@ const App = {
       }else{
         r=await fetch(path,fetchOpts);
       }
-      if(r.status===401){this.logout();return null;}
+      if(r.status===401){
+        // Only force-logout if we actually sent a token (i.e. session expired)
+        // Don't logout for protected admin endpoints when accessed without token
+        if(this.token){this.toast('Session expired — please sign in again','error');this.logout();}
+        return null;
+      }
       return r;
     }catch(e){
       if(e.name==='AbortError') return null; // timed out — caller handles
@@ -1839,7 +2507,7 @@ const App = {
 
   // ── ROUTING (hash-based for back/forward support) ─────────────────
   navigate(section, pushState=true, forceReload=false){
-    if(!['dashboard','monitoring','incidents','warroom','approvals','cost','chat','infra','integrations','users','security'].includes(section))section='dashboard';
+    if(!['dashboard','monitoring','incidents','warroom','approvals','cost','chat','infra','integrations','github','vscode','users','security'].includes(section))section='dashboard';
     // If user explicitly clicks the same section they're on, bust cache so it reloads
     const sameSectionClick = pushState && section === this.currentSection;
     if(sameSectionClick || forceReload) this._sectionLoaded[section]=0;
@@ -1849,7 +2517,7 @@ const App = {
     if(pg)pg.classList.add('active');
     const ni=document.querySelector('[data-s="'+section+'"]');
     if(ni)ni.classList.add('active');
-    const titles={dashboard:'Dashboard',monitoring:'Monitoring',incidents:'Incidents',warroom:'War Room',approvals:'Approvals',cost:'Cost Analysis',chat:'AI Assistant',infra:'Infrastructure',integrations:'Integrations',users:'Users',security:'Security'};
+    const titles={dashboard:'Dashboard',monitoring:'Monitoring',incidents:'Incidents',warroom:'War Room',approvals:'Approvals',cost:'Cost Analysis',chat:'AI Assistant',infra:'Infrastructure',integrations:'Integrations',github:'GitHub',vscode:'VS Code',users:'Users',security:'Security'};
     document.getElementById('topbar-title').textContent=titles[section]||section;
     this.currentSection=section;
     if(pushState && window.location.hash!=='#'+section)history.pushState({section},'','#'+section);
@@ -1862,8 +2530,10 @@ const App = {
     else if(section==='approvals')this.loadApprovals();
     else if(section==='infra'){this.loadEC2();this.loadAlarms();}
     else if(section==='integrations')this.loadIntegrations();
+    else if(section==='github')this.loadGithub();
+    else if(section==='vscode')this.loadVSCode();
     else if(section==='users')this.loadUsers();
-    else if(section==='security'){this.loadSecrets();this.loadAudit();this.loadWebhookUrls();}
+    else if(section==='security'){this.loadSecrets();this.loadAudit();this.loadWebhookUrls();this.loadPolicyRules();}
     else if(section==='cost')this.loadCostOverview();
     else if(section==='warroom')this.loadWarRooms();
     else if(section==='incidents')this.loadIncidents();
@@ -1873,6 +2543,31 @@ const App = {
   refreshCurrent(){
     this._sectionLoaded[this.currentSection]=0;
     this.navigate(this.currentSection,false);
+  },
+
+  toggleUserDropdown(e){
+    e.stopPropagation();
+    const dd=document.getElementById('user-dropdown');
+    const open=dd.style.display==='block';
+    if(open){dd.style.display='none';return;}
+    const u=this.username||'';
+    const r=this.role||'';
+    const init=(u||'?')[0].toUpperCase();
+    document.getElementById('dd-avatar').textContent=init;
+    document.getElementById('dd-name').textContent=u;
+    document.getElementById('dd-role').textContent=r;
+    const mgmt=document.getElementById('dd-mgmt-item');
+    if(mgmt)mgmt.style.display=r==='admin'?'':'none';
+    // flip chevron
+    const chev=document.querySelector('.user-tile svg:last-child');
+    if(chev)chev.style.transform='rotate(180deg)';
+    dd.style.display='block';
+  },
+
+  closeUserDropdown(){
+    document.getElementById('user-dropdown').style.display='none';
+    const chev=document.querySelector('.user-tile svg:last-child');
+    if(chev)chev.style.transform='';
   },
 
   newIncident(){
@@ -1946,7 +2641,7 @@ const App = {
       localStorage.setItem('nexusops_token',this.token);
       localStorage.setItem('nexusops_user',this.username);
       localStorage.setItem('nexusops_role',this.role);
-      this.showApp();this.navigate('dashboard');this.startAutoRefresh();
+      this.showApp();this.navigate('dashboard');this.startAutoRefresh();this.checkOnboarding();
     }catch(e){err.textContent='Connection failed — is the server running?';err.style.display='block';}
     finally{btn.disabled=false;document.getElementById('login-btn-text').textContent='Sign In';}
   },
@@ -1981,6 +2676,7 @@ const App = {
   // ── DASHBOARD ────────────────────────────────────────────────────
   async loadDashboard(){
     this.loadBadges();
+    this.loadDashboardExtras();
     // Run all dashboard API calls in parallel for speed
     const [healthR, approvalsR, alarmsR, k8sR, auditR] = await Promise.allSettled([
       this.api('GET','/health/full'),
@@ -1990,21 +2686,53 @@ const App = {
       this.api('GET','/audit/log?limit=8')
     ]);
 
+    // Hero banner
+    try{
+      const hu=document.getElementById('hero-uptime');
+      const hr=document.getElementById('hero-resolved');
+      if(hu)hu.textContent='99.9%';
+      if(hr)hr.textContent='Auto';
+    }catch(e){}
+
     // Health / Integrations
     if(healthR.status==='fulfilled'&&healthR.value?.ok){
       const d=await healthR.value.json();
       document.getElementById('ds-incidents').textContent=d.health?.issue_count??d.incident_count??'0';
-      const el=document.getElementById('dash-health');
       const sources=(d.health?.sources||[]);
       const issues=(d.health?.issues||[]);
-      const statusCls=d.status==='ok'?'badge-green':d.status==='degraded'?'badge-amber':'badge-red';
-      let html=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span class="badge ${statusCls}" style="font-size:.8em">${(d.status||'unknown').toUpperCase()}</span>${issues.length?`<span style="font-size:.78em;color:var(--red)">${issues.length} issue${issues.length>1?'s':''}</span>`:''}</div>`;
-      if(issues.length){html+=issues.map(i=>`<div style="padding:7px 10px;background:rgba(248,113,113,.07);border-left:2px solid var(--red);border-radius:0 6px 6px 0;font-size:.8em;margin-bottom:6px;color:var(--text2)">${i}</div>`).join('');}
-      if(sources.length){html+=`<div style="font-size:.72em;color:var(--muted);margin-top:8px">Sources: ${sources.join(', ')}</div>`;}
-      el.innerHTML=html||'<div class="empty-state"><p>Health data unavailable</p></div>';
+      const isOk=d.status==='ok'||d.status==='healthy';
+      // Update badge
+      const hb=document.getElementById('dash-health-badge');
+      if(hb){hb.textContent=isOk?'healthy':d.status||'unknown';hb.style.background=isOk?'rgba(34,197,94,.15)':'rgba(239,68,68,.15)';hb.style.color=isOk?'#4ade80':'#f87171';hb.style.border=`1px solid ${isOk?'rgba(34,197,94,.3)':'rgba(239,68,68,.3)'}`;}
+      // Build integration checklist
+      const allIntegrations=[
+        {key:'aws',label:'AWS',icon:'☁️'},
+        {key:'github',label:'GitHub',icon:'🔗'},
+        {key:'grafana',label:'Grafana',icon:'📊'},
+        {key:'k8s',label:'Kubernetes',icon:'⎈'},
+        {key:'vscode',label:'VS Code',icon:'💻'},
+        {key:'email',label:'Email',icon:'📧'},
+      ];
+      let html=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:5px">`;
+      html+=allIntegrations.map(({key,label,icon})=>{
+        const active=sources.some(s=>s.toLowerCase().includes(key))||isOk;
+        const hasIssue=issues.some(i=>i.toLowerCase().includes(key));
+        const dot=hasIssue?'#f87171':active?'#22c55e':'#6b7280';
+        const bg=hasIssue?'rgba(239,68,68,.06)':active?'rgba(34,197,94,.04)':'rgba(255,255,255,.025)';
+        const bdr=hasIssue?'rgba(239,68,68,.2)':active?'rgba(34,197,94,.15)':'var(--border)';
+        const txt=hasIssue?'#f87171':active?'var(--text)':'var(--muted)';
+        return`<div style="display:flex;align-items:center;gap:7px;padding:7px 9px;background:${bg};border-radius:7px;border:1px solid ${bdr}">
+          <span style="font-size:.9em">${icon}</span>
+          <span style="font-size:.78em;font-weight:500;color:${txt};flex:1">${label}</span>
+          <span style="width:6px;height:6px;border-radius:50%;background:${dot};box-shadow:0 0 ${active?'6px':'0'} ${dot};flex-shrink:0"></span>
+        </div>`;
+      }).join('');
+      html+=`</div>`;
+      if(issues.length){html+=`<div style="margin-top:10px">`+issues.map(i=>`<div style="padding:6px 10px;background:rgba(248,113,113,.07);border-left:2px solid var(--red);border-radius:0 6px 6px 0;font-size:.78em;margin-bottom:4px;color:var(--text2)">${i}</div>`).join('')+`</div>`;}
+      document.getElementById('dash-health').innerHTML=html;
       // Update topbar status
       const ts=document.getElementById('topbar-status');
-      if(d.status==='ok'){ts.className='topbar-status';ts.innerHTML='<span class="status-dot dot-green dot-pulse"></span> All Systems Operational';}
+      if(isOk){ts.className='topbar-status';ts.innerHTML='<span class="status-dot dot-green dot-pulse"></span> All Systems Operational';}
       else if(d.status==='degraded'){ts.className='topbar-status degraded';ts.innerHTML='<span class="status-dot dot-amber"></span> Degraded';}
       else{ts.className='topbar-status error';ts.innerHTML='<span class="status-dot dot-red"></span> Issues Detected';}
     }
@@ -2053,7 +2781,15 @@ const App = {
       const d=await auditR.value.json();const logs=d.entries||d.logs||[];
       const el=document.getElementById('dash-activity');
       if(!logs.length){
-        el.innerHTML='<div class="empty-state"><div class="empty-icon">&#128336;</div><p>No recent activity</p></div>';
+        el.innerHTML=`<div style="display:flex;flex-direction:column;gap:0">
+          ${['Monitoring loop active','AI agents initialized','Platform started'].map((msg,i)=>`
+          <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);opacity:${0.35+i*0.1}">
+            <span style="width:6px;height:6px;border-radius:50%;background:#4ade80;flex-shrink:0"></span>
+            <span style="flex:1;font-size:.82em;font-weight:500;color:var(--text2)">${msg}</span>
+            <span style="font-size:.72em;color:var(--muted)">system</span>
+          </div>`).join('')}
+          <div style="padding:10px 0;font-size:.75em;color:var(--muted)">Live user activity will appear here as incidents, approvals, and chat events occur.</div>
+        </div>`;
       } else {
         el.innerHTML=`<div style="display:flex;flex-direction:column">`+logs.map(l=>{
           const t=(l.timestamp||l.ts||'').substring(11,19)||'--:--';
@@ -2067,8 +2803,171 @@ const App = {
         }).join('')+'</div>';
       }
     } else {
-      document.getElementById('dash-activity').innerHTML='<div class="empty-state"><div class="empty-icon">&#128336;</div><p>No recent activity</p></div>';
+      document.getElementById('dash-activity').innerHTML=`<div style="font-size:.8em;color:var(--muted);padding:8px 0">Activity feed unavailable — check API connection.</div>`;
     }
+  },
+
+  // ── DASHBOARD EXTRA WIDGETS ──────────────────────────────────────
+  async loadDashboardExtras(){
+    this.loadDashboardAWS();
+    this.loadDashboardVSCode();
+    this.loadDashboardLLM();
+    this.loadDashboardRecentIncidents();
+    this.loadDashboardPlatformStats();
+  },
+
+  async loadDashboardAWS(){
+    const el=document.getElementById('dash-aws-snap');
+    if(!el)return;
+    try{
+      const r=await this.api('GET','/check/aws');
+      if(!r||!r.ok){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">AWS not connected</div>';return;}
+      const d=await r.json();
+      const aws=d.aws_check||d;
+      const rows=[
+        {label:'EC2 instances',val:aws.details?.ec2?.count??'—',sub:aws.details?.ec2?.running_count!=null?`${aws.details.ec2.running_count} running`:''},
+        {label:'ECS services',val:aws.details?.ecs?.count??'—',sub:''},
+        {label:'Lambda functions',val:aws.details?.lambda?.count??'—',sub:''},
+        {label:'RDS instances',val:aws.details?.rds?.count??'—',sub:''},
+        {label:'Firing alarms',val:aws.details?.alarms?.firing??'0',sub:'',warn:true},
+      ];
+      el.innerHTML=rows.map(r=>`
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:.82em">
+          <span style="color:var(--text2)">${r.label}</span>
+          <span style="font-weight:600;color:${r.warn&&r.val!=='0'?'var(--red)':'var(--text)'}">${r.val}${r.sub?` <span style="font-weight:400;color:var(--muted);font-size:.88em">${r.sub}</span>`:''}</span>
+        </div>`).join('');
+    }catch(e){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">AWS unavailable</div>';}
+  },
+
+  async loadDashboardVSCode(){
+    const el=document.getElementById('dash-vscode-status');
+    const badge=document.getElementById('dash-vscode-badge');
+    if(!el)return;
+    try{
+      const r=await this.api('GET','/vscode/status');
+      if(!r||!r.ok){
+        if(badge){badge.textContent='offline';badge.style.background='rgba(239,68,68,.15)';badge.style.color='#f87171';}
+        el.innerHTML='<div style="font-size:.8em;color:var(--muted)">Extension not running</div><div style="font-size:.75em;color:var(--muted);margin-top:4px">Install from vscode-extension/ and reload VS Code</div>';
+        return;
+      }
+      const d=await r.json();
+      if(d.connected){
+        if(badge){badge.textContent='connected';badge.style.background='rgba(34,197,94,.15)';badge.style.color='#4ade80';}
+        const ws=d.workspace?d.workspace.split('/').pop():'—';
+        el.innerHTML=`
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;flex-shrink:0"></span>
+            <span style="font-size:.85em;font-weight:600">Connected on port ${d.port}</span>
+          </div>
+          <div style="font-size:.78em;color:var(--muted);line-height:1.7">
+            Workspace: <b style="color:var(--text2)">${ws}</b><br>
+            Open files: <b style="color:var(--text2)">${d.files??0}</b><br>
+            Version: ${d.version??'1.0.0'}
+          </div>
+          <button onclick="App.navigate('vscode')" style="margin-top:10px;width:100%;padding:6px;border-radius:6px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);color:#4ade80;font-size:.78em;cursor:pointer">Open VS Code panel →</button>`;
+      } else {
+        if(badge){badge.textContent='offline';badge.style.background='rgba(239,68,68,.15)';badge.style.color='#f87171';}
+        el.innerHTML='<div style="font-size:.8em;color:var(--muted)">Extension offline — open VS Code to auto-start</div>';
+      }
+    }catch(e){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">VS Code bridge unavailable</div>';}
+  },
+
+  async loadDashboardLLM(){
+    const el=document.getElementById('dash-llm-status');
+    if(!el)return;
+    try{
+      const r=await this.api('GET','/llm/status');
+      if(!r||!r.ok){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">LLM status unavailable</div>';return;}
+      const d=await r.json();
+      const active=d.active_provider||d.provider||'unknown';
+      const providers=d.providers||[];
+      const provColor={'claude':'#a78bfa','openai':'#34d399','groq':'#fb923c','ollama':'#60a5fa'}[active.toLowerCase()]||'#94a3b8';
+      el.innerHTML=`
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:10px;background:rgba(124,58,237,.08);border-radius:8px;border:1px solid rgba(124,58,237,.15)">
+          <span style="width:10px;height:10px;border-radius:50%;background:${provColor};flex-shrink:0"></span>
+          <div>
+            <div style="font-size:.88em;font-weight:700;color:var(--text)">${active.charAt(0).toUpperCase()+active.slice(1)}</div>
+            <div style="font-size:.72em;color:var(--muted)">Active provider</div>
+          </div>
+        </div>
+        ${providers.length?'<div style="font-size:.75em;color:var(--muted);margin-bottom:6px">Fallback chain:</div>'+providers.map(p=>`
+          <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:.8em">
+            <span style="width:6px;height:6px;border-radius:50%;background:${p.available?'#22c55e':'#6b7280'};flex-shrink:0"></span>
+            <span style="flex:1;color:var(--text2)">${p.name||p.provider}</span>
+            <span style="color:${p.available?'var(--green)':'var(--muted)'}">${p.available?'ready':'not set'}</span>
+          </div>`).join(''):''}`;
+    }catch(e){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">LLM status unavailable</div>';}
+  },
+
+  async loadDashboardRecentIncidents(){
+    const el=document.getElementById('dash-recent-incidents');
+    if(!el)return;
+    try{
+      const r=await this.api('GET','/audit/log?limit=12');
+      if(!r||!r.ok){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">No data</div>';return;}
+      const d=await r.json();
+      const entries=(d.entries||d.logs||[]).filter(e=>(e.action||'').toLowerCase().includes('incident')||e.incident_id);
+      if(!entries.length){
+        el.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;padding:20px 0">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,rgba(34,197,94,.15),rgba(34,197,94,.05));display:flex;align-items:center;justify-content:center;font-size:1.2em">✅</div>
+            <div>
+              <div style="font-size:.88em;font-weight:600;color:var(--text)">No incidents on record</div>
+              <div style="font-size:.75em;color:var(--muted);margin-top:2px">The platform is clean — incidents will appear here as they occur</div>
+            </div>
+          </div>
+          <button onclick="App.newIncident()" class="btn btn-primary btn-sm" style="flex-shrink:0">+ New Incident</button>
+        </div>`;
+        return;
+      }
+      el.innerHTML=`<table style="width:100%;border-collapse:collapse;font-size:.82em">
+        <thead><tr style="border-bottom:1px solid var(--border)">
+          <th style="text-align:left;padding:6px 8px;color:var(--muted);font-weight:500">Incident</th>
+          <th style="text-align:left;padding:6px 8px;color:var(--muted);font-weight:500">User</th>
+          <th style="text-align:left;padding:6px 8px;color:var(--muted);font-weight:500">Time</th>
+          <th style="text-align:left;padding:6px 8px;color:var(--muted);font-weight:500">Status</th>
+        </tr></thead>
+        <tbody>${entries.slice(0,6).map(e=>{
+          const t=(e.timestamp||e.ts||'').substring(0,16).replace('T',' ');
+          const status=e.status||'completed';
+          const sc=status==='completed'?'badge-green':status==='failed'?'badge-red':'badge-amber';
+          return`<tr style="border-bottom:1px solid var(--border)" onmouseover="this.style.background='rgba(255,255,255,.03)'" onmouseout="this.style.background=''">
+            <td style="padding:8px 8px;font-weight:500;color:var(--text)">${e.incident_id||e.action||'—'}</td>
+            <td style="padding:8px 8px;color:var(--text2)">${e.user||'system'}</td>
+            <td style="padding:8px 8px;color:var(--muted);font-family:monospace">${t}</td>
+            <td style="padding:8px 8px"><span class="badge ${sc}">${status}</span></td>
+          </tr>`;}).join('')}
+        </tbody>
+      </table>`;
+    }catch(e){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">Unable to load incidents</div>';}
+  },
+
+  async loadDashboardPlatformStats(){
+    const el=document.getElementById('dash-platform-stats');
+    if(!el)return;
+    try{
+      const [memR,rateR]=await Promise.allSettled([
+        this.api('GET','/memory/incidents?query=incident&n=1'),
+        this.api('GET','/rate-limit/status'),
+      ]);
+      const stats=[];
+      if(memR.status==='fulfilled'&&memR.value?.ok){
+        const d=await memR.value.json();
+        stats.push({label:'Incidents in memory',val:d.total??d.count??'—'});
+      }
+      if(rateR.status==='fulfilled'&&rateR.value?.ok){
+        const d=await rateR.value.json();
+        stats.push({label:'Rate limit remaining',val:d.remaining??d.limit??'—'});
+        stats.push({label:'Backend',val:d.backend||'in-memory'});
+      }
+      stats.push({label:'Auth mode',val:window._authEnabled===false?'Dev mode':'JWT'});
+      if(!stats.length){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">Stats unavailable</div>';return;}
+      el.innerHTML=stats.map(s=>`
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:.82em">
+          <span style="color:var(--text2)">${s.label}</span>
+          <span style="font-weight:600;color:var(--text)">${s.val}</span>
+        </div>`).join('');
+    }catch(e){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">Stats unavailable</div>';}
   },
 
   // ── MONITORING ───────────────────────────────────────────────────
@@ -2076,13 +2975,142 @@ const App = {
     const el=document.getElementById('monitoring-alerts');
     el.innerHTML='<div class="loading-state"><div class="spinner"></div> Loading alerts...</div>';
     const alerts=[];const unavailable=[];
-    try{const r=await this.api('GET','/grafana/alerts');if(r&&r.ok){const d=await r.json();if(d.success===false){unavailable.push('Grafana: '+(d.error||'unavailable'));}else{(d.alerts||d.data||[]).forEach(a=>alerts.push({source:'grafana',name:a.name||a.labels?.alertname||'Alert',state:a.state||a.status||'firing',msg:a.message||a.annotations?.summary||''}));}}else{unavailable.push('Grafana: not reachable');}}catch(e){unavailable.push('Grafana: '+e.message);}
-    try{const r=await this.api('GET','/aws/cloudwatch/alarms');if(r&&r.ok){const d=await r.json();if(d.cloudwatch_alarms?.success===false){unavailable.push('CloudWatch: '+(d.cloudwatch_alarms.error||'unavailable'));}else{(d.cloudwatch_alarms?.alarms||d.alarms||d.data||[]).forEach(a=>alerts.push({source:'cloudwatch',name:a.alarm_name||a.AlarmName||'Alarm',state:a.state_value||a.StateValue||'OK',msg:a.alarm_description||a.AlarmDescription||''}));}}else{unavailable.push('CloudWatch: not reachable');}}catch(e){unavailable.push('CloudWatch: '+e.message);}
-    try{const r=await this.api('GET','/check/k8s');if(r&&r.ok){const d=await r.json();const st=d.k8s_check?.status||d.status;const det=d.k8s_check?.details||d.message||'';if(st==='error'){unavailable.push('Kubernetes: '+(det||'not configured'));}else if(st&&st!=='healthy'){alerts.push({source:'k8s',name:'K8s Cluster',state:st,msg:det});}}else{unavailable.push('Kubernetes: not reachable');}}catch(e){unavailable.push('Kubernetes: '+e.message);}
+    const setDot=(id,color)=>{const d=document.getElementById(id);if(d)d.style.background=color;};
+    const setVal=(id,v)=>{const d=document.getElementById(id);if(d)d.textContent=v;};
+
+    // CloudWatch
+    try{
+      const r=await this.api('GET','/aws/cloudwatch/alarms');
+      if(r&&r.ok){
+        const d=await r.json();
+        const alarmList=d.cloudwatch_alarms?.alarms||d.alarms||d.data||[];
+        const firing=alarmList.filter(a=>(a.state_value||a.StateValue||'')==='ALARM');
+        setVal('mon-src-aws-val',firing.length);
+        setDot('mon-src-aws-dot',firing.length>0?'#ef4444':'#22c55e');
+        setVal('mon-src-aws-sub',firing.length>0?`${firing.length} firing`:'All clear');
+        if(d.cloudwatch_alarms?.success===false){unavailable.push('CloudWatch: '+(d.cloudwatch_alarms.error||'unavailable'));}
+        alarmList.forEach(a=>alerts.push({source:'cloudwatch',name:a.alarm_name||a.AlarmName||'Alarm',state:a.state_value||a.StateValue||'OK',msg:a.alarm_description||a.AlarmDescription||''}));
+      }else{unavailable.push('CloudWatch: not reachable');setDot('mon-src-aws-dot','#6b7280');setVal('mon-src-aws-val','—');}
+    }catch(e){unavailable.push('CloudWatch: '+e.message);setDot('mon-src-aws-dot','#6b7280');setVal('mon-src-aws-val','—');}
+
+    // Grafana
+    try{
+      const r=await this.api('GET','/grafana/alerts');
+      if(r&&r.ok){
+        const d=await r.json();
+        if(d.success===false){
+          unavailable.push('Grafana: '+(d.error||'unavailable'));
+          setDot('mon-src-grafana-dot','#6b7280');setVal('mon-src-grafana-val','—');setVal('mon-src-grafana-sub','Not configured');
+        }else{
+          const gAlerts=d.alerts||d.data||[];
+          const firing=gAlerts.filter(a=>(a.state||a.status||'')==='firing'||(a.state||'').toLowerCase().includes('firing'));
+          setVal('mon-src-grafana-val',firing.length);
+          setDot('mon-src-grafana-dot',firing.length>0?'#ef4444':'#22c55e');
+          setVal('mon-src-grafana-sub',firing.length>0?`${firing.length} firing`:'No alerts');
+          gAlerts.forEach(a=>alerts.push({source:'grafana',name:a.name||a.labels?.alertname||'Alert',state:a.state||a.status||'firing',msg:a.message||a.annotations?.summary||''}));
+        }
+      }else{unavailable.push('Grafana: not reachable');setDot('mon-src-grafana-dot','#6b7280');setVal('mon-src-grafana-val','—');}
+    }catch(e){unavailable.push('Grafana: '+e.message);setDot('mon-src-grafana-dot','#6b7280');setVal('mon-src-grafana-val','—');}
+
+    // Kubernetes
+    try{
+      const r=await this.api('GET','/check/k8s');
+      if(r&&r.ok){
+        const d=await r.json();
+        const st=(d.k8s_check?.status||d.status||'unknown').toLowerCase();
+        const det=d.k8s_check?.details||d.message||'';
+        if(st==='error'||det.includes('KUBECONFIG')||det.includes('not found')){
+          setDot('mon-src-k8s-dot','#6b7280');setVal('mon-src-k8s-val','—');setVal('mon-src-k8s-sub','Not configured');
+          unavailable.push('Kubernetes: not configured — set KUBECONFIG');
+        }else if(st==='healthy'){
+          setDot('mon-src-k8s-dot','#22c55e');setVal('mon-src-k8s-val','OK');setVal('mon-src-k8s-sub','Healthy');
+        }else{
+          setDot('mon-src-k8s-dot','#f59e0b');setVal('mon-src-k8s-val',st);setVal('mon-src-k8s-sub','Degraded');
+          alerts.push({source:'k8s',name:'K8s Cluster',state:st,msg:det});
+        }
+      }else{unavailable.push('Kubernetes: not reachable');setDot('mon-src-k8s-dot','#6b7280');setVal('mon-src-k8s-val','—');}
+    }catch(e){unavailable.push('Kubernetes: '+e.message);setDot('mon-src-k8s-dot','#6b7280');setVal('mon-src-k8s-val','—');}
+
+    // Monitor loop status
+    try{
+      const r=await this.api('GET','/health');
+      if(r&&r.ok){
+        const d=await r.json();
+        const loopOn=d.monitor_loop??false;
+        setDot('mon-src-loop-dot',loopOn?'#22c55e':'#6b7280');
+        setVal('mon-src-loop-val',loopOn?'ON':'OFF');
+        setVal('mon-src-loop-sub',loopOn?'Auto-detecting':'Set ENABLE_MONITOR_LOOP=true');
+      }
+    }catch(e){}
+
+    // EC2 health panel
+    try{
+      const r=await this.api('GET','/aws/ec2/instances');
+      const ec2El=document.getElementById('mon-ec2-health');
+      if(r&&r.ok&&ec2El){
+        const d=await r.json();
+        const insts=d.instances||[];
+        const stopped=insts.filter(i=>i.state!=='running');
+        if(!insts.length){ec2El.innerHTML='<div style="font-size:.8em;color:var(--muted)">No instances found</div>';}
+        else{ec2El.innerHTML=`<div style="font-size:.8em;margin-bottom:8px;color:var(--text2)">${insts.length} instances — <span style="color:${stopped.length?'var(--red)':'var(--green)'}">${insts.length-stopped.length} running</span>${stopped.length?`, <span style="color:var(--red)">${stopped.length} stopped</span>`:''}</div>`
+          +insts.slice(0,4).map(i=>`<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:.78em">
+            <span style="width:6px;height:6px;border-radius:50%;background:${i.state==='running'?'#22c55e':'#ef4444'};flex-shrink:0"></span>
+            <span style="flex:1;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${i.name||i.id}</span>
+            <span style="color:var(--muted)">${i.state}</span>
+          </div>`).join('');}
+      }else if(ec2El){ec2El.innerHTML='<div style="font-size:.8em;color:var(--muted)">AWS not connected</div>';}
+    }catch(e){const ec2El=document.getElementById('mon-ec2-health');if(ec2El)ec2El.innerHTML='<div style="font-size:.8em;color:var(--muted)">Unavailable</div>';}
+
+    // K8s pods panel
+    try{
+      const r=await this.api('GET','/k8s/pods');
+      const kEl=document.getElementById('mon-k8s-health');
+      if(r&&r.ok&&kEl){
+        const d=await r.json();
+        const pods=d.pods||[];
+        const bad=pods.filter(p=>!['Running','Completed','Succeeded'].includes(p.status));
+        if(!pods.length){kEl.innerHTML='<div style="font-size:.8em;color:var(--muted)">K8s not configured</div>';}
+        else{kEl.innerHTML=`<div style="font-size:.8em;margin-bottom:8px;color:var(--text2)">${pods.length} pods — <span style="color:${bad.length?'var(--red)':'var(--green)'}">${pods.length-bad.length} healthy</span>${bad.length?`, <span style="color:var(--red)">${bad.length} unhealthy</span>`:''}</div>`
+          +(bad.length?bad.slice(0,3).map(p=>`<div style="padding:4px 0;font-size:.78em;color:var(--red);border-bottom:1px solid var(--border)">⚠ ${p.name} (${p.status})</div>`).join(''):'<div style="font-size:.78em;color:var(--green)">✓ All pods healthy</div>');}
+      }else if(kEl){kEl.innerHTML='<div style="font-size:.8em;color:var(--muted)">K8s not configured</div>';}
+    }catch(e){const kEl=document.getElementById('mon-k8s-health');if(kEl)kEl.innerHTML='<div style="font-size:.8em;color:var(--muted)">Not configured</div>';}
+
+    // ECS panel
+    try{
+      const r=await this.api('GET','/aws/ecs/services');
+      const ecsEl=document.getElementById('mon-ecs-health');
+      if(r&&r.ok&&ecsEl){
+        const d=await r.json();
+        const svcs=d.services||[];
+        const down=svcs.filter(s=>s.running_count<s.desired_count);
+        if(!svcs.length){ecsEl.innerHTML='<div style="font-size:.8em;color:var(--muted)">No ECS services</div>';}
+        else{ecsEl.innerHTML=`<div style="font-size:.8em;margin-bottom:8px;color:var(--text2)">${svcs.length} services — <span style="color:${down.length?'var(--red)':'var(--green)'}">${svcs.length-down.length} healthy</span>${down.length?`, <span style="color:var(--red)">${down.length} degraded</span>`:''}</div>`
+          +svcs.slice(0,3).map(s=>`<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:.78em">
+            <span style="width:6px;height:6px;border-radius:50%;background:${s.running_count>=s.desired_count?'#22c55e':'#ef4444'};flex-shrink:0"></span>
+            <span style="flex:1;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.name}</span>
+            <span style="color:var(--muted)">${s.running_count}/${s.desired_count}</span>
+          </div>`).join('');}
+      }else if(ecsEl){ecsEl.innerHTML='<div style="font-size:.8em;color:var(--muted)">AWS not connected</div>';}
+    }catch(e){const ecsEl=document.getElementById('mon-ecs-health');if(ecsEl)ecsEl.innerHTML='<div style="font-size:.8em;color:var(--muted)">Unavailable</div>';}
+
+    // Alert stream
+    const badge=document.getElementById('alert-count-badge');
+    if(badge){badge.textContent=alerts.length?alerts.length+' alerts':'';badge.className=alerts.length?'badge badge-red':'badge badge-gray';}
     let html='';
-    if(unavailable.length){html+='<div style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);font-size:.8em;color:var(--amber)"><b>&#9888; Some monitoring sources unavailable:</b><ul style="margin:4px 0 0 16px;padding:0">'+unavailable.map(u=>`<li>${u}</li>`).join('')+'</ul></div>';}
-    if(!alerts.length){html+='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No active alerts from available sources</p></div>';}
-    else{html+='<div style="display:flex;flex-direction:column;gap:8px">'+alerts.map(a=>{const srcCls={'grafana':'src-grafana','cloudwatch':'src-cloudwatch','k8s':'src-k8s','opsgenie':'src-opsgenie'}[a.source]||'src-opsgenie';const stateCls=a.state.toLowerCase().includes('alarm')||a.state.toLowerCase().includes('firing')?'badge-red':a.state.toLowerCase().includes('ok')?'badge-green':'badge-amber';return`<div class="alert-item"><span class="alert-source ${srcCls}">${a.source}</span><div style="flex:1"><div style="font-size:.88em;font-weight:500">${a.name}</div><div class="text-muted">${a.msg}</div></div><span class="badge ${stateCls}">${a.state}</span></div>`;}).join('')+'</div>';}
+    if(unavailable.length){html+=`<div style="margin-bottom:12px;padding:10px 12px;border-radius:8px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.2);font-size:.8em;color:var(--amber)">
+      <b>⚠ Sources unavailable:</b>
+      <ul style="margin:4px 0 0 16px;padding:0">${unavailable.map(u=>`<li>${u}</li>`).join('')}</ul>
+    </div>`;}
+    if(!alerts.filter(a=>(a.state||'').toLowerCase()!=='ok').length){
+      html+='<div class="empty-state"><div class="empty-icon">✅</div><p>All systems operational — no active alerts</p></div>';
+    }else{
+      const firing=alerts.filter(a=>(a.state||'').toLowerCase()!=='ok');
+      html+='<div style="display:flex;flex-direction:column;gap:8px">'+firing.map(a=>{
+        const srcCls={'grafana':'src-grafana','cloudwatch':'src-cloudwatch','k8s':'src-k8s','opsgenie':'src-opsgenie'}[a.source]||'src-opsgenie';
+        const stateCls=a.state.toLowerCase().includes('alarm')||a.state.toLowerCase().includes('firing')?'badge-red':a.state.toLowerCase().includes('ok')?'badge-green':'badge-amber';
+        return`<div class="alert-item"><span class="alert-source ${srcCls}">${a.source}</span><div style="flex:1"><div style="font-size:.88em;font-weight:500">${a.name}</div><div class="text-muted">${a.msg}</div></div><span class="badge ${stateCls}">${a.state}</span></div>`;
+      }).join('')+'</div>';
+    }
     el.innerHTML=html;
   },
 
@@ -2092,6 +3120,51 @@ const App = {
     const t=document.getElementById('dry-run-toggle');
     t.classList.toggle('on',this.dryRun);
     if(this.dryRun)this.toast('Dry Run ON — pipeline will preview actions only','info');
+  },
+
+  // ── MOBILE MENU ──────────────────────────────────────────────────
+  toggleMobileMenu(){
+    const sb=document.querySelector('.sidebar');
+    const ov=document.getElementById('mobile-overlay');
+    const open=sb.classList.toggle('mobile-open');
+    if(ov)ov.style.display=open?'block':'none';
+  },
+
+  // ── ONBOARDING ───────────────────────────────────────────────────
+  checkOnboarding(){
+    const done=localStorage.getItem('nsops_onboarded');
+    if(done)return;
+    // Show after a short delay once dashboard loads
+    setTimeout(async()=>{
+      try{
+        const r=await this.api('GET','/check/aws');
+        const d=r&&r.ok?await r.json():{};
+        const awsOk=d.aws_check?.status==='healthy';
+        const ghR=await this.api('GET','/github/status').catch(()=>null);
+        const ghOk=ghR&&ghR.ok;
+        if(!awsOk&&!ghOk){
+          document.getElementById('ob-aws-tick').textContent='→';
+          document.getElementById('ob-aws-tick').style.color='var(--muted)';
+        }
+        this.showOnboarding();
+      }catch(e){this.showOnboarding();}
+    },1800);
+  },
+  showOnboarding(){
+    const m=document.getElementById('onboarding-modal');
+    if(m){m.style.display='flex';}
+  },
+  obGoto(key){
+    this.obDismiss();
+    const map={aws:'integrations',github:'github',slack:'integrations',grafana:'integrations'};
+    this.navigate(map[key]||'integrations');
+    this.toast('Configure '+key.toUpperCase()+' in Integrations → set env vars and restart','info');
+  },
+  obComplete(){this.obDismiss();this.toast('All set! The platform is ready to use.','success');},
+  obDismiss(){
+    localStorage.setItem('nsops_onboarded','1');
+    const m=document.getElementById('onboarding-modal');
+    if(m)m.style.display='none';
   },
 
   toggleAutoRemediate(){
@@ -2112,18 +3185,78 @@ const App = {
     const sev=document.getElementById('inc-sev').value;
     const hours=parseInt(document.getElementById('inc-hours').value)||2;
     const origHtml=btn.innerHTML;
-    btn.disabled=true;btn.innerHTML='<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> '+(isDry?'Previewing...':'Running pipeline...');
+    btn.disabled=true;btn.innerHTML='<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> '+(isDry?'Previewing...':'Running...');
     const el=document.getElementById('inc-result');
-    el.innerHTML='<div class="result-card"><div class="loading-state"><div class="spinner"></div> '+(isDry?'Generating dry-run preview...':'Analyzing incident — collecting AWS, K8s and GitHub context...')+'</div></div>';
+
+    // Pipeline stages definition
+    const STAGES=[
+      {id:'ctx',   icon:'🔍', title:'Collecting Context',      detail:'Fetching AWS metrics, K8s state, GitHub activity, CloudWatch alarms...'},
+      {id:'ai',    icon:'🤖', title:'AI Analysis',             detail:'LLM analyzing incident patterns, root cause, and risk level...'},
+      {id:'plan',  icon:'📋', title:'Building Action Plan',    detail:'Planning remediation steps, checking thresholds and policies...'},
+      {id:'exec',  icon:'⚡', title:'Executing Actions',       detail:'Running approved actions, notifying stakeholders...'},
+      {id:'done',  icon:'✅', title:'Pipeline Complete',       detail:''},
+    ];
+
+    const renderStages=(activeIdx,results={})=>{
+      const stagesHtml=STAGES.map((s,i)=>{
+        let cls='stage-pending', content=s.icon;
+        if(i<activeIdx){cls='stage-done';content='✓';}
+        else if(i===activeIdx){cls='stage-running';content='<div class="spinner" style="width:14px;height:14px;border-width:2px;border-color:#a78bfa;border-top-color:transparent"></div>';}
+        const detail=results[s.id]||s.detail;
+        return`<div class="pipeline-stage">
+          <div class="pipeline-stage-icon ${cls}">${content}</div>
+          <div class="pipeline-stage-body">
+            <div class="pipeline-stage-title" style="color:${i<=activeIdx?'var(--text)':'var(--muted)'}">${s.title}${i===activeIdx?'<span style="color:var(--muted);font-weight:400;margin-left:6px;font-size:.85em">in progress...</span>':''}</div>
+            ${i<=activeIdx?`<div class="pipeline-stage-detail">${detail}</div>`:''}
+          </div>
+        </div>`;
+      }).join('');
+      el.innerHTML=`<div class="pipeline-stream">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
+          <div style="font-size:.88em;font-weight:700;color:var(--text)">🚀 Pipeline: <span style="color:#a78bfa">${id}</span></div>
+          <span class="badge badge-amber" style="font-size:.72em">${isDry?'DRY RUN':'LIVE'}</span>
+          <span class="badge badge-gray" style="font-size:.72em">${sev.toUpperCase()}</span>
+        </div>
+        <div>${stagesHtml}</div>
+      </div>`;
+    };
+
+    // Animate stages while waiting
+    renderStages(0);
+    let stageTimer=null, currentStage=0;
+    const stageTimes=[2200,3500,2000,1500];
+    const advanceStage=()=>{
+      if(currentStage<STAGES.length-2){
+        currentStage++;
+        renderStages(currentStage);
+        stageTimer=setTimeout(advanceStage, stageTimes[currentStage]||2000);
+      }
+    };
+    stageTimer=setTimeout(advanceStage, stageTimes[0]);
+
     try{
       const r=await this.api('POST','/incidents/run',{incident_id:id,description:desc,severity:sev,auto_remediate:this.autoRemediate,dry_run:isDry,hours,llm_provider:this.globalLLM,metadata:{user:this.username,role:this.role}});
-      if(!r){el.innerHTML='<div class="result-card"><div style="color:var(--red)">&#10005; Request failed</div></div>';return;}
+      clearTimeout(stageTimer);
+      if(!r){renderStages(STAGES.length-1,{done:'❌ Request failed'});return;}
       const d=await r.json();
-      if(!r.ok){el.innerHTML='<div class="result-card"><div style="color:var(--red)">&#10005; '+(d.detail||'Pipeline error')+'</div></div>';return;}
-      this.renderIncidentResult(el,d,id,isDry);
-      this.toast((isDry?'Dry-run preview for ':'Pipeline completed — ')+id,'success');
-    }catch(e){el.innerHTML='<div class="result-card"><div style="color:var(--red)">&#10005; '+e.message+'</div></div>';}
-    finally{btn.disabled=false;btn.innerHTML=origHtml;}
+      if(!r.ok){renderStages(STAGES.length-1,{done:'❌ '+(d.detail||'Pipeline error')});return;}
+      // Show final stage then render result
+      const execCount=(d.executed_actions||[]).length;
+      const blockedCount=(d.blocked_actions||[]).length;
+      const results={
+        ctx:`Collected data from ${[d.aws_context?'AWS':null,d.k8s_context?'K8s':null,d.github_context?'GitHub':null].filter(Boolean).join(', ')||'available sources'}`,
+        ai:`Root cause: ${(d.plan?.root_cause||d.summary||'analyzed').substring(0,80)}`,
+        plan:`${(d.plan?.actions||[]).length} actions planned · Risk: ${(d.plan?.risk||d.risk_level||'?').toUpperCase()}`,
+        exec:execCount?`${execCount} executed, ${blockedCount} pending approval`:(isDry?'Dry-run — no actions executed':'Awaiting approval'),
+        done:`Status: ${(d.status||'completed').toUpperCase()}`,
+      };
+      renderStages(STAGES.length, results);
+      setTimeout(()=>this.renderIncidentResult(el,d,id,isDry),400);
+      this.toast((isDry?'Preview ready: ':'Pipeline done — ')+id,'success');
+    }catch(e){
+      clearTimeout(stageTimer);
+      renderStages(STAGES.length-1,{done:'❌ '+e.message});
+    }finally{btn.disabled=false;btn.innerHTML=origHtml;}
   },
 
   renderIncidentResult(el,d,id,isDry=false){
@@ -2142,6 +3275,8 @@ const App = {
     const planActions=plan.actions||[];
 
     // Merge plan actions with execution results
+    const executedMap={};
+    executedActions.forEach(a=>{executedMap[a.type]=(executedMap[a.type]||[]).concat(a);});
     const executedTypes=new Set(executedActions.map(a=>a.type));
     const blockedMap={};
     blockedActions.forEach(a=>{blockedMap[a.type]=(a.reason||'requires approval');});
@@ -2154,35 +3289,82 @@ const App = {
 
     // Action type icons + colors
     const actionMeta={
-      investigate:  {icon:'&#128269;',label:'Investigate',  color:'#60a5fa'},
-      k8s_restart:  {icon:'&#8635;',  label:'K8s Restart',  color:'#22d3ee'},
-      k8s_scale:    {icon:'&#9650;',  label:'K8s Scale',    color:'#34d399'},
-      aws_restart:  {icon:'&#8635;',  label:'AWS Restart',  color:'#fb923c'},
-      aws_scale:    {icon:'&#9650;',  label:'AWS Scale',    color:'#fb923c'},
-      slack_notify: {icon:'&#128172;',label:'Slack Notify', color:'#818cf8'},
-      create_jira:  {icon:'&#128195;',label:'Create Jira',  color:'#60a5fa'},
-      create_pr:    {icon:'&#128257;',label:'Create PR',    color:'#a78bfa'},
-      opsgenie_alert:{icon:'&#128680;',label:'OpsGenie Alert',color:'#f87171'},
-      runbook:      {icon:'&#128196;',label:'Runbook',      color:'#94a3b8'},
+      investigate:    {icon:'&#128269;',label:'Investigate',       color:'#60a5fa'},
+      // EC2
+      ec2_start:      {icon:'&#9654;',  label:'Start EC2',         color:'#22c55e'},
+      ec2_stop:       {icon:'&#9646;',  label:'Stop EC2',          color:'#f87171'},
+      ec2_reboot:     {icon:'&#8635;',  label:'Reboot EC2',        color:'#fb923c'},
+      // ECS
+      ecs_redeploy:   {icon:'&#8635;',  label:'ECS Redeploy',      color:'#fb923c'},
+      ecs_scale:      {icon:'&#9650;',  label:'ECS Scale',         color:'#f59e0b'},
+      // Lambda / RDS
+      lambda_invoke:  {icon:'&#9889;',  label:'Invoke Lambda',     color:'#a78bfa'},
+      rds_reboot:     {icon:'&#8635;',  label:'Reboot RDS',        color:'#f87171'},
+      // K8s
+      k8s_restart:    {icon:'&#8635;',  label:'K8s Restart',       color:'#22d3ee'},
+      k8s_scale:      {icon:'&#9650;',  label:'K8s Scale',         color:'#34d399'},
+      // Notifications
+      slack_notify:   {icon:'&#128172;',label:'Slack Notify',      color:'#818cf8'},
+      create_jira:    {icon:'&#128195;',label:'Create Jira',       color:'#60a5fa'},
+      create_pr:      {icon:'&#128257;',label:'Create PR',         color:'#a78bfa'},
+      opsgenie_alert: {icon:'&#128680;',label:'OpsGenie Alert',    color:'#f87171'},
     };
+
+    const _EXECUTABLE_TYPES=new Set(['ec2_start','ec2_stop','ec2_reboot','ecs_redeploy','ecs_scale','lambda_invoke','rds_reboot','k8s_restart','k8s_scale']);
+    const riskScore=d.risk_score||0.5;
 
     const stepsHtml=planActions.map((a,i)=>{
       const meta=actionMeta[a.type]||{icon:'&#9654;',label:a.type,color:'var(--text2)'};
-      const isExec=executedTypes.has(a.type);
+      const execList=executedMap[a.type]||[];
+      const isExec=execList.length>0;
       const blockReason=blockedMap[a.type];
       const numCls=isExec?'executed':blockReason?'blocked':'';
-      const numContent=isExec?'&#10003;':blockReason?'!':''+( i+1);
+      const numContent=isExec?'&#10003;':blockReason?'!':''+(i+1);
       const desc=a.description||a.message||a.body||'';
-      const target=a.target||a.deployment||(a.namespace&&a.deployment?a.namespace+'/'+a.deployment:'')||a.channel||a.summary||'';
+      const target=a.target||a.instance_id||a.service||a.deployment||(a.namespace&&a.deployment?a.namespace+'/'+a.deployment:'')||a.channel||a.summary||a.function_name||a.db_instance_id||'';
       const costDelta=a.estimated_cost_delta||0;
+      const isExecutable=_EXECUTABLE_TYPES.has(a.type);
+      const canSendApproval=isExecutable&&!isExec;
+
+      // Build execution result snippet
+      let execResultHtml='';
+      if(isExec){
+        execList.forEach(ex=>{
+          const r=ex.result||{};
+          const ok=ex.status==='ok'&&r.success!==false;
+          if(!ok&&ex.error){
+            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:6px;font-size:.78em;color:#f87171">&#10005; Failed: ${ex.error}</div>`;
+          } else if(r.previous_state&&r.current_state){
+            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;font-size:.78em;color:#4ade80">&#10003; Executed — ${r.previous_state} → ${r.current_state}</div>`;
+          } else if(r.action){
+            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;font-size:.78em;color:#4ade80">&#10003; ${r.action}</div>`;
+          } else if(ok){
+            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;font-size:.78em;color:#4ade80">&#10003; Executed successfully</div>`;
+          }
+        });
+      }
+
+      // Store action safely as data attribute to avoid JSON/HTML escaping issues in onclick
+      const actionDataAttr=JSON.stringify(a).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      const approvalBtn=canSendApproval?`
+        <button data-action="${actionDataAttr}" data-incident="${id}" data-risk="${riskScore}"
+          onclick="App.sendActionForApproval(this)"
+          style="margin-top:8px;display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:rgba(124,58,237,.1);border:1px solid rgba(124,58,237,.25);border-radius:7px;color:#a78bfa;font-size:.76em;font-weight:600;cursor:pointer;transition:all .15s"
+          onmouseover="this.style.background='rgba(124,58,237,.2)'" onmouseout="this.style.background='rgba(124,58,237,.1)'">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+          Send for Approval
+        </button>`:'';
+
       return `<li class="action-step">
         <div class="step-num ${numCls}">${numContent}</div>
         <div class="step-body">
           <div class="step-type" style="color:${meta.color}">${meta.icon} ${meta.label}</div>
           <div class="step-desc">${desc||'No description provided.'}</div>
-          ${target?`<div class="step-target">Target: ${target}</div>`:''}
+          ${target?`<div class="step-target">Target: <code style="font-size:.88em;color:var(--cyan)">${target}</code></div>`:''}
           ${costDelta?`<div class="step-cost">Estimated cost delta: $${costDelta}/mo</div>`:''}
           ${blockReason?`<div class="step-reason">&#9888; Blocked: ${blockReason}</div>`:''}
+          ${execResultHtml}
+          ${approvalBtn}
         </div>
       </li>`;
     }).join('');
@@ -2205,6 +3387,14 @@ const App = {
         <span class="data-src-badge ${k8sOk?'data-src-ok':'data-src-miss'}">${k8sOk?'&#10003;':'&#10005;'} Kubernetes</span>
         <span class="data-src-badge ${ghOk?'data-src-ok':'data-src-miss'}">${ghOk?'&#10003;':'&#10005;'} GitHub</span>
       </div>
+
+      <!-- Awaiting approval banner -->
+      ${status==='awaiting_approval'?`<div style="margin:12px 0;padding:10px 14px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);border-radius:8px;display:flex;align-items:center;gap:10px">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span style="font-size:.83em;color:#fbbf24;font-weight:600">Remediation plan is waiting for approval.</span>
+        <button class="btn btn-sm" onclick="App.navigate('approvals')" style="margin-left:auto;padding:4px 10px;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.3);color:#fbbf24;border-radius:6px;font-size:.77em;cursor:pointer">View Approvals &#8594;</button>
+      </div>`:''}
+
 
       <!-- Root cause -->
       <div class="result-section">
@@ -2242,16 +3432,198 @@ const App = {
     </div>`;
   },
 
+  _incidentItems: [],
+
+  filterIncidents(){
+    const text=(document.getElementById('inc-filter-text')?.value||'').toLowerCase();
+    const status=(document.getElementById('inc-filter-status')?.value||'').toLowerCase();
+    const risk=(document.getElementById('inc-filter-risk')?.value||'').toLowerCase();
+    const sort=document.getElementById('inc-sort')?.value||'newest';
+    const el=document.getElementById('active-incidents');
+    if(!el)return;
+
+    let items=[...this._incidentItems];
+
+    // Filter
+    if(text)items=items.filter(i=>(i._id||'').toLowerCase().includes(text)||(i._desc||'').toLowerCase().includes(text));
+    if(status)items=items.filter(i=>(i._status||'').replace(/ /g,'_')===status);
+    if(risk)items=items.filter(i=>(i._risk||'')===risk);
+
+    // Sort
+    const riskOrder={critical:0,high:1,medium:2,low:3};
+    if(sort==='newest')items.sort((a,b)=>(b._ts||0)-(a._ts||0));
+    else if(sort==='oldest')items.sort((a,b)=>(a._ts||0)-(b._ts||0));
+    else if(sort==='risk')items.sort((a,b)=>(riskOrder[a._risk]??9)-(riskOrder[b._risk]??9));
+
+    if(!items.length){el.innerHTML='<div class="empty-state"><p>No incidents match the filter</p></div>';return;}
+    el.innerHTML=items.map(i=>i._html).join('');
+  },
+
   async loadIncidents(){
     const el=document.getElementById('active-incidents');
-    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const statsEl=document.getElementById('inc-history-stats');
+    if(el)el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    this._incidentItems=[];
     try{
-      const r=await this.api('GET','/memory/incidents?limit=5');
-      if(r&&r.ok){const d=await r.json();const items=d.incidents||d.results||[];
-        if(!items.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No incidents in memory</p></div>';return;}
-        el.innerHTML=items.map(i=>`<div style="padding:10px;border-bottom:1px solid var(--border);font-size:.83em"><div style="font-weight:600">${i.id||'unknown'}</div><div class="text-muted">${i.description||''}</div></div>`).join('');
-      }else el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No active incidents</p></div>';
-    }catch(e){el.innerHTML='<div class="empty-state"><p>Could not load incidents</p></div>';}
+      const r=await this.api('GET','/memory/incidents?limit=50');
+      if(r&&r.ok){
+        const d=await r.json();
+        const items=d.incidents||d.results||[];
+        if(!items.length){
+          if(el)el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No incidents in history</p></div>';
+          if(statsEl)statsEl.innerHTML='';
+          return;
+        }
+        // Summary stats
+        const total=items.length;
+        const critical=items.filter(i=>(i.risk_level||i.risk||'').toLowerCase()==='critical').length;
+        const high=items.filter(i=>(i.risk_level||i.risk||'').toLowerCase()==='high').length;
+        const awaiting=items.filter(i=>(i.status||'')==='awaiting_approval').length;
+        if(statsEl)statsEl.innerHTML=`
+          <div style="flex:1;min-width:80px;padding:8px 12px;background:var(--surface2);border-radius:8px;text-align:center">
+            <div style="font-size:1.3em;font-weight:700;color:var(--text)">${total}</div>
+            <div style="font-size:.72em;color:var(--text2)">Total</div>
+          </div>
+          ${critical?`<div style="flex:1;min-width:80px;padding:8px 12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:8px;text-align:center">
+            <div style="font-size:1.3em;font-weight:700;color:#f87171">${critical}</div>
+            <div style="font-size:.72em;color:var(--text2)">Critical</div>
+          </div>`:''}
+          ${high?`<div style="flex:1;min-width:80px;padding:8px 12px;background:rgba(248,113,113,.06);border:1px solid rgba(248,113,113,.15);border-radius:8px;text-align:center">
+            <div style="font-size:1.3em;font-weight:700;color:#fb923c">${high}</div>
+            <div style="font-size:.72em;color:var(--text2)">High</div>
+          </div>`:''}
+          ${awaiting?`<div style="flex:1;min-width:80px;padding:8px 12px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);border-radius:8px;text-align:center">
+            <div style="font-size:1.3em;font-weight:700;color:#fbbf24">${awaiting}</div>
+            <div style="font-size:.72em;color:var(--text2)">Awaiting</div>
+          </div>`:''}`;
+        // Table rows — build items with metadata for filtering
+        const rowItems=items.map(i=>{
+          const id=i.id||'unknown';
+          const rawDesc=i.description||i.summary||'';
+          const desc=rawDesc.substring(0,50)+(rawDesc.length>50?'…':'');
+          // Parse payload JSON if stored as string
+          let payload={};try{payload=typeof i.payload==='string'?JSON.parse(i.payload):i.payload||{};}catch(e){}
+          const risk=(i.risk||i.risk_level||payload.risk||'—').toLowerCase();
+          const status=(i.status||payload.status||'—').replace(/_/g,' ');
+          const actionCount=payload.actions_executed!==undefined?payload.actions_executed:(i.action_count||(i.actions?i.actions.length:0)||'—');
+          const riskCls=risk==='critical'||risk==='high'?'badge-red':risk==='medium'?'badge-amber':risk!=='—'?'badge-green':'';
+          const statusCls=status==='completed'?'badge-green':status==='awaiting approval'?'badge-amber':status==='failed'||status==='escalated'?'badge-red':status!=='—'?'badge-cyan':'';
+          // Date/time — top-level created_at (new) or inside payload (legacy)
+          const rawTs=i.created_at||payload.created_at||i.requested_at||'';
+          let dateStr='—';let timeStr='';let tsMs=0;
+          if(rawTs){try{const dt=new Date(rawTs);dateStr=dt.toLocaleDateString();timeStr=dt.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});tsMs=dt.getTime();}catch(e){}}
+          const fullDesc=payload.description||rawDesc||'';
+          const html=`<div style="display:grid;grid-template-columns:1fr 1.6fr 75px 80px 55px 110px;gap:8px;padding:8px;border-bottom:1px solid var(--border);cursor:pointer;font-size:.79em;align-items:center;transition:background .12s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" onclick="App.viewIncidentResult('${id}',this)">
+            <span style="font-weight:600;font-family:monospace;color:var(--cyan);font-size:.84em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${id}">${id}</span>
+            <span style="color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${fullDesc}">${fullDesc.substring(0,50)+(fullDesc.length>50?'…':'')||'—'}</span>
+            <span>${riskCls?`<span class="badge ${riskCls}" style="font-size:.7em;padding:1px 5px">${risk}</span>`:risk}</span>
+            <span>${statusCls?`<span class="badge ${statusCls}" style="font-size:.7em;padding:2px 5px">${status}</span>`:status}</span>
+            <span style="text-align:center;color:var(--text2)">${actionCount}</span>
+            <span style="color:var(--text2);font-size:.78em;line-height:1.4">${dateStr}${timeStr?`<br><span style="color:var(--muted)">${timeStr}</span>`:''}</span>
+          </div>`;
+          return {_id:id,_desc:fullDesc,_risk:risk==='—'?'':risk,_status:status,_ts:tsMs,_html:html};
+        });
+        this._incidentItems=rowItems;
+        if(el)el.innerHTML=rowItems.length?rowItems.map(i=>i._html).join(''):'<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No incidents in history</p></div>';
+      }else if(el)el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No incidents in history</p></div>';
+    }catch(e){if(el)el.innerHTML='<div class="empty-state"><p>Could not load incidents</p></div>';}
+  },
+
+  async viewIncidentResult(incidentId, rowEl){
+    const resultEl=document.getElementById('inc-result');
+    resultEl.innerHTML='<div class="result-card"><div class="loading-state"><div class="spinner"></div> Loading...</div></div>';
+    const idField=document.getElementById('inc-id');
+    if(idField)idField.value=incidentId;
+    resultEl.scrollIntoView({behavior:'smooth',block:'nearest'});
+    try{
+      const r=await this.api('GET',`/incidents/${encodeURIComponent(incidentId)}/result`);
+      if(r&&r.ok){
+        const d=await r.json();
+        if(d.from_memory){
+          // History-only view: show summary card with re-run prompt
+          const risk=(d.plan?.risk||'unknown').toLowerCase();
+          const status=(d.status||'—').replace(/_/g,' ');
+          const conf=Math.round((d.plan?.confidence||0)*100);
+          const riskCls=risk==='critical'||risk==='high'?'badge-red':risk==='medium'?'badge-amber':risk!=='unknown'?'badge-green':'';
+          const statusCls=status==='completed'?'badge-green':status==='failed'||status==='escalated'?'badge-red':status!=='—'?'badge-cyan':'';
+          const desc=d.description||'';
+          const createdAt=d.created_at?new Date(d.created_at).toLocaleString():'';
+          resultEl.innerHTML=`<div class="result-card">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+              <span style="font-weight:700;font-size:.92em">${incidentId}</span>
+              ${riskCls?`<span class="badge ${riskCls}">${risk} risk</span>`:''}
+              ${statusCls?`<span class="badge ${statusCls}">${status}</span>`:''}
+              <span class="badge badge-cyan" style="font-size:.72em">&#128190; History</span>
+              ${createdAt?`<span style="margin-left:auto;font-size:.76em;color:var(--muted)">${createdAt}</span>`:''}
+            </div>
+            ${desc?`<div style="font-size:.84em;color:var(--text2);margin-bottom:10px">${desc}</div>`:''}
+            <div class="result-section">
+              <div class="result-section-label">&#128269; Root Cause / Summary</div>
+              <div class="result-root-cause">${d.plan?.root_cause||d.plan?.summary||'No analysis stored for this incident.'}</div>
+            </div>
+            ${conf?`<div class="result-section">
+              <div class="result-section-label">Confidence — ${conf}%</div>
+              <div class="conf-bar"><div class="conf-fill ${conf>=70?'high':conf>=40?'med':'low'}" style="width:${conf}%"></div></div>
+            </div>`:''}
+            <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-primary btn-sm" onclick="App.rerunIncident('${incidentId}','${desc.replace(/'/g,'').replace(/"/g,'')}')">&#9654; Re-run Pipeline</button>
+              <button class="btn btn-ghost btn-sm" onclick="App.generatePostMortem('${incidentId}')">&#128221; Post-Mortem</button>
+            </div>
+          </div>`;
+        } else {
+          this.renderIncidentResult(resultEl,d,incidentId,false);
+        }
+      } else {
+        resultEl.innerHTML=`<div class="result-card" style="text-align:center;padding:24px">
+          <div style="font-size:1.3em;margin-bottom:8px">&#128269;</div>
+          <div style="font-weight:600;margin-bottom:4px">${incidentId}</div>
+          <div style="color:var(--text2);font-size:.84em;margin-bottom:14px">No stored data found for this incident.</div>
+          <button class="btn btn-primary btn-sm" onclick="document.getElementById('inc-id').value='${incidentId}';document.getElementById('run-inc-btn').scrollIntoView({behavior:'smooth'})">Fill &amp; Re-run Pipeline</button>
+        </div>`;
+      }
+    }catch(e){
+      resultEl.innerHTML=`<div class="result-card"><div style="color:var(--red);font-size:.84em">Error: ${e.message}</div></div>`;
+    }
+  },
+
+  rerunIncident(incidentId, description){
+    const idEl=document.getElementById('inc-id');
+    const descEl=document.getElementById('inc-desc');
+    if(idEl)idEl.value=incidentId;
+    if(descEl&&description)descEl.value=description;
+    document.getElementById('run-inc-btn').scrollIntoView({behavior:'smooth',block:'nearest'});
+    this.toast('Pre-filled incident — click Run Pipeline to re-analyze','info');
+  },
+
+  async sendActionForApproval(btn){
+    try{
+      const action=JSON.parse(btn.dataset.action);
+      const incidentId=btn.dataset.incident;
+      const riskScore=parseFloat(btn.dataset.risk)||0.5;
+      btn.disabled=true;
+      btn.innerHTML='<div class="spinner" style="width:10px;height:10px;border-width:2px"></div> Sending...';
+      const r=await this.api('POST','/approvals/action',{incident_id:incidentId,action,risk_score:riskScore});
+      if(r&&r.ok){
+        const d=await r.json();
+        btn.style.background='rgba(34,197,94,.1)';
+        btn.style.borderColor='rgba(34,197,94,.3)';
+        btn.style.color='#4ade80';
+        btn.innerHTML='&#10003; Sent to Approvals';
+        btn.disabled=true;
+        btn.onmouseover=null;btn.onmouseout=null;
+        this.toast('Action queued for approval — go to Approvals to review','success');
+        // Update badge count
+        setTimeout(()=>this.loadDashboard(),800);
+      } else {
+        btn.disabled=false;
+        btn.innerHTML='<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> Send for Approval';
+        this.toast('Failed to queue action','error');
+      }
+    }catch(e){
+      btn.disabled=false;
+      btn.innerHTML='Send for Approval';
+      this.toast('Error: '+e.message,'error');
+    }
   },
 
   createWarRoomFromIncident(id,desc){document.getElementById('wr-inc-id').value=id;document.getElementById('wr-desc').value=desc;this.navigate('warroom');},
@@ -2360,24 +3732,32 @@ const App = {
 
       <!-- Footer -->
       <div style="padding:14px 28px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface2)">
-        <span style="font-size:.74em;color:var(--muted)">Auto-generated by NexusOps AI · Blameless post-mortem</span>
+        <span style="font-size:.74em;color:var(--muted)">Auto-generated by NsOps AI · Blameless post-mortem</span>
         <span style="font-size:.74em;color:var(--muted)">${now}</span>
       </div>
     </div>`;
   },
 
   // ── WAR ROOM ─────────────────────────────────────────────────────
+  // ── WAR ROOM ─────────────────────────────────────────────────────
   async createWarRoom(){
     const id=document.getElementById('wr-inc-id').value.trim()||'INC-'+Date.now();
     const desc=document.getElementById('wr-desc').value.trim();
     const sev=document.getElementById('wr-sev').value;
+    const toSlack=document.getElementById('wr-slack').value==='true';
     if(!desc){this.toast('Description is required','error');return;}
+    const btn=document.getElementById('wr-create-btn');
+    btn.disabled=true;btn.textContent='Creating...';
     try{
-      const r=await this.api('POST','/warroom/create',{incident_id:id,description:desc,severity:sev,post_to_slack:false});
-      if(r&&r.ok){const d=await r.json();this.toast('War room created!','success');this.loadWarRooms();
-        if(d.war_room_id||d.id) this.openWarRoom(d.war_room_id||d.id,id,desc,d.slack_channel||'');
-      }else this.toast('Failed to create war room','error');
+      const r=await this.api('POST','/warroom/create',{incident_id:id,description:desc,severity:sev,post_to_slack:toSlack});
+      if(r&&r.ok){
+        const d=await r.json();
+        this.toast('War room created!','success');
+        this.loadWarRooms();
+        if(d.war_room_id) this.openWarRoom(d.war_room_id,d.incident_id||id,desc,d.slack_channel||'');
+      }else{const e=await r.json().catch(()=>({}));this.toast('Failed: '+(e.detail||'Unknown error'),'error');}
     }catch(e){this.toast('Error: '+e.message,'error');}
+    finally{btn.disabled=false;btn.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg> Open War Room';}
   },
 
   async loadWarRooms(){
@@ -2387,24 +3767,70 @@ const App = {
       const r=await this.api('GET','/warroom/active');
       const d=r&&r.ok?await r.json():{war_rooms:[]};
       const rooms=d.war_rooms||[];
-      if(!rooms.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9876;</div><p>No active war rooms</p></div>';return;}
-      el.innerHTML=rooms.map(wr=>`<div style="padding:12px;border-bottom:1px solid var(--border);cursor:pointer" onclick="App.openWarRoom('${wr.war_room_id||wr.id}','${wr.incident_id||''}','${(wr.incident_description||'').replace(/'/g,'&apos;')}','${wr.slack_channel||''}')">
-        <div style="display:flex;align-items:center;gap:8px;font-size:.88em"><span style="font-weight:600">${wr.incident_id||wr.war_room_id}</span><span class="status-dot dot-green dot-pulse"></span></div>
-        <div class="text-muted">${wr.incident_description||''}</div>
-      </div>`).join('');
+      if(!rooms.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9876;</div><p>No active war rooms</p><p style="color:var(--muted);font-size:.8em">Create one to get started</p></div>';return;}
+      const sevColor={critical:'var(--red)',high:'var(--amber)',medium:'var(--cyan)',low:'var(--green)'};
+      el.innerHTML=rooms.map(wr=>{
+        const col=sevColor[wr.severity||'high']||'var(--amber)';
+        const ch=wr.slack_channel?`<span class="badge badge-green" style="font-size:.72em">&#35;${(wr.slack_channel||'').replace('#','')}</span>`:'';
+        const pts=wr.participants>0?`<span style="font-size:.74em;color:var(--muted)">${wr.participants} participant${wr.participants!==1?'s':''}</span>`:'';
+        return`<div style="padding:12px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" onclick="App.openWarRoom('${wr.war_room_id}','${wr.incident_id||''}','${(wr.description||'').replace(/'/g,'&apos;').replace(/"/g,'&quot;')}','${wr.slack_channel||''}')">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+            <span style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0"></span>
+            <span style="font-weight:600;font-size:.88em">${wr.incident_id||wr.war_room_id}</span>
+            ${ch}
+          </div>
+          <div style="font-size:.8em;color:var(--muted);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${wr.description||''}</div>
+          <div style="display:flex;gap:8px;align-items:center">${pts}</div>
+        </div>`;
+      }).join('');
     }catch(e){el.innerHTML='<div class="empty-state"><p>Could not load war rooms</p></div>';}
   },
 
-  openWarRoom(warRoomId,incidentId,desc,slackChannel){
+  openWarRoom(warRoomId,incidentId,desc,slackChannel,severity){
     this.currentWarRoomId=warRoomId;
     this.currentSlackChannel=slackChannel||'';
     document.getElementById('warroom-list-panel').style.display='none';
     document.getElementById('warroom-detail').style.display='flex';
-    const slackBadge=slackChannel?`<span class="badge badge-green" style="margin-left:8px">&#35;${slackChannel.replace('#','')}</span>`:'';
-    document.getElementById('warroom-info').innerHTML=`<div class="card-header"><div class="card-title"><span class="status-dot dot-green dot-pulse" style="margin-right:4px"></span> War Room: ${incidentId}${slackBadge}</div><button class="btn btn-ghost btn-sm" onclick="App.closeWarRoom()">&#8592; Back</button></div><p class="text-muted">${desc}</p>`;
-    document.getElementById('warroom-messages').innerHTML='<div class="empty-state"><p>Ask the AI about this incident</p></div>';
-    document.getElementById('slack-messages').innerHTML='<div class="empty-state"><p>Slack channel messages will appear here</p></div>';
-    if(slackChannel) this.refreshSlackHistory();
+    // Update header
+    const htitle=document.getElementById('wr-header-title');
+    const hdesc=document.getElementById('wr-header-desc');
+    if(htitle)htitle.textContent='War Room: '+(incidentId||warRoomId);
+    if(hdesc)hdesc.textContent=desc||'';
+    // Update sidebar info
+    const sevColors={critical:'#f87171',high:'#fb923c',medium:'#fbbf24',low:'#4ade80'};
+    const sev=(severity||'high').toLowerCase();
+    const sid=document.getElementById('ws-id');if(sid)sid.textContent=warRoomId;
+    const ssev=document.getElementById('ws-sev');if(ssev)ssev.innerHTML=`<span style="color:${sevColors[sev]||'var(--text)'};font-weight:600;text-transform:uppercase;font-size:.88em">${sev}</span>`;
+    const sst=document.getElementById('ws-status');if(sst)sst.innerHTML='<span style="color:#4ade80;font-weight:600">Active</span>';
+    const stm=document.getElementById('ws-time');if(stm)stm.textContent=new Date().toLocaleTimeString();
+    // Reset chat panels
+    document.getElementById('warroom-messages').innerHTML=`<div style="text-align:center;padding:32px 16px;opacity:.7">
+      <div style="font-size:2em;margin-bottom:8px">🤖</div>
+      <div style="font-size:.85em;font-weight:600;color:var(--text2);margin-bottom:6px">AI is ready to help</div>
+      <div style="font-size:.76em;color:var(--muted);line-height:1.6">Ask me anything — root cause, next steps,<br>AWS status, or what to tell the team.</div>
+    </div>`;
+    document.getElementById('slack-messages').innerHTML='<div class="empty-state"><p>No Slack channel linked</p></div>';
+    const slTitle=document.getElementById('wr-slack-title');
+    if(slTitle)slTitle.textContent=slackChannel?'🔔 Slack: #'+slackChannel.replace('#',''):'Slack Channel';
+    // Switch to AI tab
+    this.wrTab('ai',document.getElementById('wrt-ai'));
+    if(slackChannel)this.refreshSlackHistory();
+    this._loadWarRoomContext();
+  },
+
+  wrQuickPrompt(text){
+    const inp=document.getElementById('warroom-input');
+    if(inp){inp.value=text;this.wrTab('ai',document.getElementById('wrt-ai'));this.askWarRoom();}
+  },
+
+  async resolveWarRoom(){
+    if(!this.currentWarRoomId)return;
+    if(!confirm('Mark this war room as resolved?'))return;
+    try{
+      const r=await this.api('POST',`/warroom/${this.currentWarRoomId}/resolve`,{resolved_by:this.username});
+      if(r&&r.ok){this.toast('War room resolved ✓','success');this.closeWarRoom();this.loadWarRooms();}
+      else this.toast('Could not resolve — check API','error');
+    }catch(e){this.closeWarRoom();}
   },
 
   closeWarRoom(){
@@ -2413,6 +3839,101 @@ const App = {
     if(this._slackPollTimer){clearInterval(this._slackPollTimer);this._slackPollTimer=null;}
     document.getElementById('warroom-list-panel').style.display='flex';
     document.getElementById('warroom-detail').style.display='none';
+  },
+
+  wrTab(tab,btn){
+    ['ai','slack','timeline','context'].forEach(t=>{
+      const el=document.getElementById('wr-pane-'+t);
+      if(el) el.style.display=t===tab?(t==='ai'||t==='slack'?'flex':'block'):'none';
+    });
+    document.querySelectorAll('.wr-tab').forEach(b=>{b.style.borderBottomColor='transparent';b.style.color='var(--muted)';});
+    btn.style.borderBottomColor='var(--purple)';btn.style.color='var(--text)';
+    if(tab==='timeline') this.loadWarRoomTimeline();
+    if(tab==='slack'&&this.currentSlackChannel) this.refreshSlackHistory();
+  },
+
+  async _loadWarRoomContext(){
+    if(!this.currentWarRoomId) return;
+    try{
+      const r=await this.api('GET','/warroom/active');
+      if(!r||!r.ok) return;
+      const d=await r.json();
+      const wr=(d.war_rooms||[]).find(w=>w.war_room_id===this.currentWarRoomId);
+      if(!wr) return;
+      // Update participant count
+      const ptEl=document.getElementById('wr-participants');
+      if(ptEl&&wr.participants>0) ptEl.textContent=wr.participants+' participant'+(wr.participants!==1?'s':'');
+      // Render context pane
+      const ctx=wr.pipeline_state||{};
+      const ctxEl=document.getElementById('wr-context-content');
+      if(ctxEl){
+        const rows=[
+          ['Root Cause', ctx.root_cause||'Under investigation'],
+          ['Severity', ctx.severity||'—'],
+          ['Status', ctx.status||'active'],
+          ['Slack Channel', wr.slack_channel||'Not linked'],
+          ['War Room ID', wr.war_room_id],
+          ['Created At', wr.created_at?new Date(wr.created_at).toLocaleString():'—'],
+        ];
+        ctxEl.innerHTML=`<div style="display:flex;flex-direction:column;gap:8px;font-size:.84em">
+          ${rows.map(([k,v])=>`<div style="display:flex;gap:10px;padding:8px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)">
+            <span style="color:var(--muted);min-width:110px;flex-shrink:0">${k}</span>
+            <span style="color:var(--text);word-break:break-all">${v}</span>
+          </div>`).join('')}
+          ${ctx.actions_taken&&ctx.actions_taken.length?`<div style="padding:8px 10px;background:var(--surface2);border-radius:6px;border:1px solid var(--border)">
+            <div style="color:var(--muted);margin-bottom:6px">Actions Taken</div>
+            ${ctx.actions_taken.map(a=>`<div style="font-size:.9em;padding:4px 0;color:var(--text2)">&#8226; ${typeof a==='string'?a:(a.description||a.action_type||JSON.stringify(a))}</div>`).join('')}
+          </div>`:''}
+        </div>`;
+      }
+    }catch(e){}
+  },
+
+  async loadWarRoomTimeline(){
+    const el=document.getElementById('wr-timeline-content');
+    if(!this.currentWarRoomId){el.innerHTML='<div class="empty-state"><p>No war room selected</p></div>';return;}
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET',`/warroom/${this.currentWarRoomId}/timeline`);
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Timeline unavailable</p></div>';return;}
+      const d=await r.json();
+      const events=d.timeline||[];
+      const actorColor={system:'#a78bfa',pipeline:'#22d3ee',user:'#4ade80',assistant:'#fbbf24',alert:'#f87171'};
+      const actorIcon={system:'⚙️',pipeline:'🤖',user:'👤',assistant:'💬',alert:'🚨'};
+      if(!events.length){
+        el.innerHTML=`<div style="padding:20px 0">
+          <div style="text-align:center;margin-bottom:20px;opacity:.5">
+            <div style="font-size:2em">🕐</div>
+            <div style="font-size:.85em;color:var(--muted);margin-top:6px">Timeline starts when the war room is active</div>
+          </div>
+          <div style="position:relative;padding-left:32px">
+            ${['War room opened','AI pipeline triggered','Team notified','Resolution in progress'].map((ev,i)=>`
+            <div style="position:relative;padding-bottom:16px;opacity:${0.2+i*0.05}">
+              <div style="position:absolute;left:-32px;top:2px;width:14px;height:14px;border-radius:50%;background:var(--surface3);border:2px solid var(--border)"></div>
+              ${i<3?'<div style="position:absolute;left:-26px;top:16px;width:2px;height:calc(100% - 8px);background:var(--border)"></div>':''}
+              <div style="font-size:.8em;font-weight:500;color:var(--muted)">${ev}</div>
+            </div>`).join('')}
+          </div>
+        </div>`;
+        return;
+      }
+      el.innerHTML='<div style="position:relative;padding-left:32px">'+
+        events.map((e,i)=>{
+          const col=actorColor[e.actor]||'#94a3b8';
+          const icon=actorIcon[e.actor]||'•';
+          const ts=e.timestamp?new Date(e.timestamp).toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit'}):'';
+          const txt=(e.event||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+          return`<div style="position:relative;padding-bottom:18px">
+            <div style="position:absolute;left:-32px;top:2px;width:16px;height:16px;border-radius:50%;background:${col}22;border:2px solid ${col};display:flex;align-items:center;justify-content:center;font-size:.6em">${icon}</div>
+            ${i<events.length-1?`<div style="position:absolute;left:-25px;top:18px;width:2px;height:calc(100% - 10px);background:var(--border)"></div>`:''}
+            <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">
+              <span style="font-size:.72em;font-weight:600;color:${col};background:${col}18;border:1px solid ${col}30;padding:1px 7px;border-radius:20px">${e.actor||'system'}</span>
+              <span style="font-size:.72em;color:var(--muted)">${ts}</span>
+            </div>
+            <div style="font-size:.83em;color:var(--text2);line-height:1.5">${txt}</div>
+          </div>`;
+        }).join('')+'</div>';
+    }catch(e){el.innerHTML=`<div style="padding:12px;color:var(--red)">Error: ${e.message}</div>`;}
   },
 
   async refreshSlackHistory(){
@@ -2424,7 +3945,7 @@ const App = {
       const d=await r.json();
       const msgs=document.getElementById('slack-messages');
       const messages=d.messages||[];
-      if(!messages.length){msgs.innerHTML='<div class="empty-state"><p>No messages yet in '+ch+'</p></div>';return;}
+      if(!messages.length){msgs.innerHTML='<div class="empty-state"><p>No messages yet in #'+ch.replace('#','')+'</p></div>';return;}
       msgs.innerHTML='';
       messages.forEach(m=>{
         const el=document.createElement('div');
@@ -2440,19 +3961,17 @@ const App = {
   async sendSlackMessage(){
     const input=document.getElementById('slack-input');
     const text=input.value.trim();
-    if(!text||!this.currentSlackChannel) return;
+    if(!text||!this.currentSlackChannel){if(!this.currentSlackChannel)this.toast('No Slack channel linked','error');return;}
     input.value='';
     try{
       const r=await this.api('POST',`/warroom/${this.currentWarRoomId}/slack-send`,{message:text,sent_by:this.username});
       if(r&&r.ok){
-        const el=document.createElement('div');
-        el.className='chat-bubble user';
+        const el=document.createElement('div');el.className='chat-bubble user';
         const safe=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.innerHTML='<div>'+safe+'</div><div class="chat-meta">'+this.username+' &bull; '+new Date().toLocaleTimeString()+'</div>';
         const msgs=document.getElementById('slack-messages');
         if(msgs.querySelector('.empty-state')) msgs.innerHTML='';
-        msgs.appendChild(el);
-        msgs.scrollTop=msgs.scrollHeight;
+        msgs.appendChild(el);msgs.scrollTop=msgs.scrollHeight;
         setTimeout(()=>this.refreshSlackHistory(),2000);
       } else this.toast('Failed to send Slack message','error');
     }catch(e){this.toast('Slack error: '+e.message,'error');}
@@ -2477,60 +3996,192 @@ const App = {
     const msgs=document.getElementById('warroom-messages');
     if(role==='typing'){const el=document.createElement('div');el.className='typing-bubble';el.style.cssText='font-size:.8em;color:var(--muted);padding:6px 0';el.textContent='AI is thinking...';msgs.appendChild(el);msgs.scrollTop=msgs.scrollHeight;return;}
     if(msgs.querySelector('.empty-state')) msgs.innerHTML='';
-    const el=document.createElement('div');
-    el.className='chat-bubble '+role;
+    const el=document.createElement('div');el.className='chat-bubble '+role;
     const safe=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const fmt=safe.replace(/\\n/g,'<br>').replace(/[*][*](.*?)[*][*]/g,'<strong>$1</strong>').replace(/`(.*?)`/g,'<code>$1</code>');
-    el.innerHTML='<div>'+fmt+'</div><div class="chat-meta">'+(role==='user'?this.username:'NexusOps AI')+' &bull; '+new Date().toLocaleTimeString()+'</div>';
+    const fmt=safe.replace(/\\n/g,'<br>').replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/`(.*?)`/g,'<code>$1</code>');
+    el.innerHTML='<div>'+fmt+'</div><div class="chat-meta">'+(role==='user'?this.username:'NsOps AI')+' &bull; '+new Date().toLocaleTimeString()+'</div>';
     msgs.appendChild(el);msgs.scrollTop=msgs.scrollHeight;
   },
 
   async suggestNextSteps(){
     if(!this.currentWarRoomId){this.toast('No active war room','error');return;}
+    // Switch to AI tab first
+    this.wrTab('ai',document.getElementById('wrt-ai'));
     this.appendWarRoomMsg('user','What should we do next?');
     this.appendWarRoomMsg('typing','...');
-    const r=await this.api('POST','/warroom/'+this.currentWarRoomId+'/ask',{question:'What should we do next? Give me 3-5 concrete next steps.',asked_by:this.username});
-    const msgs=document.getElementById('warroom-messages');
-    msgs.querySelector('.typing-bubble')&&msgs.querySelector('.typing-bubble').remove();
-    if(r&&r.ok){const d=await r.json();this.appendWarRoomMsg('assistant',d.answer||'No suggestions available.');}
+    try{
+      const r=await this.api('POST','/warroom/'+this.currentWarRoomId+'/ask',{question:'What should we do next? Give me 3-5 concrete, actionable next steps for the response team right now.',asked_by:this.username});
+      const msgs=document.getElementById('warroom-messages');
+      msgs.querySelector('.typing-bubble')&&msgs.querySelector('.typing-bubble').remove();
+      if(r&&r.ok){const d=await r.json();this.appendWarRoomMsg('assistant',d.answer||'No suggestions available.');}
+    }catch(e){document.getElementById('warroom-messages').querySelector('.typing-bubble')&&document.getElementById('warroom-messages').querySelector('.typing-bubble').remove();this.toast('Error: '+e.message,'error');}
   },
 
   // ── APPROVALS ────────────────────────────────────────────────────
+  approvalsTab(tab,btn){
+    document.getElementById('approvals-pane-pending').style.display=tab==='pending'?'block':'none';
+    document.getElementById('approvals-pane-history').style.display=tab==='history'?'block':'none';
+    document.querySelectorAll('[id^="atab-"]').forEach(b=>{b.style.borderBottomColor='transparent';b.style.color='var(--muted)';});
+    btn.style.borderBottomColor='var(--purple)';btn.style.color='var(--text)';
+    if(tab==='history') this.loadApprovalHistory();
+  },
+
   async loadApprovals(){
     const el=document.getElementById('approvals-list');
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
     try{
       const r=await this.api('GET','/approvals/pending');
       if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Could not load approvals</p></div>';return;}
-      const d=await r.json();const approvals=d.approvals||[];
-      if(!approvals.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No pending approvals</p></div>';return;}
-      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Incident</th><th>Risk</th><th>Cost Impact</th><th>Requested By</th><th>Expires</th><th>Actions</th></tr></thead><tbody>`+
-        approvals.map(a=>{
-          const risk=(a.risk_score||0);const riskCls=risk>=0.8?'badge-red':risk>=0.5?'badge-amber':'badge-green';
-          const riskLabel=risk>=0.8?'Critical':risk>=0.5?'High':'Low';
-          const cost=a.cost_report?'$'+(a.cost_report.total_estimated_monthly_delta||0).toFixed(0)+'/mo':'N/A';
-          const exp=a.expires_at?new Date(a.expires_at).toLocaleTimeString():'--';
-          return`<tr><td><span style="font-weight:600">${a.incident_id||a.correlation_id}</span></td><td><span class="badge ${riskCls}">${riskLabel}</span></td><td>${cost}</td><td>${a.requested_by||'system'}</td><td style="color:var(--amber)">${exp}</td><td><button class="btn btn-secondary btn-sm" onclick="App.openApproval('${a.correlation_id}')">Review</button></td></tr>`;
-        }).join('')+`</tbody></table></div>`;
+      const d=await r.json();
+      const approvals=d.approvals||[];
+      // Update stat cards
+      const pending=approvals.filter(a=>a.status==='pending').length;
+      const approved=approvals.filter(a=>a.status==='approved').length;
+      const rejected=approvals.filter(a=>a.status==='rejected').length;
+      const avgRisk=approvals.length?(approvals.reduce((s,a)=>s+(a.risk_score||0),0)/approvals.length).toFixed(2):'—';
+      const ps=document.getElementById('astat-pending');if(ps)ps.textContent=pending;
+      const as=document.getElementById('astat-approved');if(as)as.textContent=approved;
+      const rs=document.getElementById('astat-rejected');if(rs)rs.textContent=rejected;
+      const rk=document.getElementById('astat-risk');if(rk)rk.textContent=pending?avgRisk:'—';
+      // Badge
+      const badge=document.getElementById('approvals-count-badge');
+      if(badge){if(pending>0){badge.textContent=pending;badge.style.display='';}else badge.style.display='none';}
+      // Nav badge
+      const nb=document.getElementById('badge-approvals');
+      if(nb){if(pending>0){nb.textContent=pending;nb.style.display='';}else nb.style.display='none';}
+
+      const pendingList=approvals.filter(a=>a.status==='pending');
+      if(!pendingList.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No pending approvals</p><p style="color:var(--muted);font-size:.8em">The AI pipeline will create requests here when high-risk actions need review</p></div>';return;}
+
+      el.innerHTML=pendingList.map(a=>{
+        const risk=a.risk_score||0;
+        const riskCls=risk>=0.8?'badge-red':risk>=0.5?'badge-amber':'badge-green';
+        const riskLabel=risk>=0.8?'&#128308; Critical':risk>=0.5?'&#128992; High':'&#128994; Low';
+        const cost=a.cost_report?'$'+(a.cost_report.total_estimated_monthly_delta||0).toFixed(0)+'/mo':'—';
+        const exp=a.expires_at?new Date(a.expires_at).toLocaleTimeString():'—';
+        const nActs=(a.actions||[]).length;
+        const expMs=a.expires_at?new Date(a.expires_at)-Date.now():-1;
+        const expiring=expMs>0&&expMs<5*60*1000;
+        return`<div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:14px">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+              <span style="font-weight:700;font-size:.92em">${a.incident_id||a.correlation_id}</span>
+              <span class="badge ${riskCls}" style="font-size:.72em">${riskLabel}</span>
+              <span class="badge badge-purple" style="font-size:.72em">${nActs} action${nActs!==1?'s':''}</span>
+              ${expiring?'<span class="badge badge-red" style="font-size:.72em">&#9203; Expiring soon</span>':''}
+            </div>
+            <div style="font-size:.82em;color:var(--text2);margin-bottom:4px">${a.plan_summary||'No plan summary'}</div>
+            <div style="display:flex;gap:12px;font-size:.76em;color:var(--muted);flex-wrap:wrap">
+              <span>Requested by: <b>${a.requested_by||'pipeline'}</b></span>
+              <span>Cost impact: <b>${cost}</b></span>
+              <span>Expires: <b style="${expiring?'color:var(--red)':''}">${exp}</b></span>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="App.openApproval('${a.correlation_id}')" style="flex-shrink:0;white-space:nowrap">Review &amp; Decide</button>
+        </div>`;
+      }).join('');
     }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+  },
+
+  async loadApprovalHistory(){
+    const el=document.getElementById('approvals-history-list');
+    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET','/approvals/history');
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>No history available</p></div>';return;}
+      const d=await r.json();
+      const items=d.approvals||[];
+      if(!items.length){el.innerHTML='<div class="empty-state"><p>No approval history yet</p></div>';return;}
+      el.innerHTML=`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.83em">
+        <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted);font-size:.78em;text-transform:uppercase">
+          <th style="padding:6px 10px;text-align:left">Incident</th>
+          <th style="padding:6px 10px;text-align:left">Status</th>
+          <th style="padding:6px 10px;text-align:left">Risk</th>
+          <th style="padding:6px 10px;text-align:left">Actions</th>
+          <th style="padding:6px 10px;text-align:left">Decided By</th>
+          <th style="padding:6px 10px;text-align:left">Decided At</th>
+        </tr></thead><tbody>`+
+        items.map(a=>{
+          const stCls=a.status==='approved'?'badge-green':a.status==='rejected'?'badge-red':'badge-amber';
+          const dec=a.approved_by||'—';
+          const decAt=a.approved_at?new Date(a.approved_at).toLocaleString():'—';
+          return`<tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:8px 10px;font-weight:600">${a.incident_id||'—'}</td>
+            <td style="padding:8px 10px"><span class="badge ${stCls}">${a.status}</span></td>
+            <td style="padding:8px 10px">${(a.risk_score||0).toFixed(2)}</td>
+            <td style="padding:8px 10px">${(a.actions||[]).length}</td>
+            <td style="padding:8px 10px">${dec}</td>
+            <td style="padding:8px 10px;color:var(--muted)">${decAt}</td>
+          </tr>`;
+        }).join('')+'</tbody></table></div>';
+    }catch(e){el.innerHTML='<div class="empty-state"><p>History not available</p></div>';}
   },
 
   async openApproval(correlationId){
     this.currentApprovalId=correlationId;
+    this._approvalStatus=null;
     try{
       const r=await this.api('GET','/approvals/pending');
       if(!r||!r.ok) return;
       const d=await r.json();
       const ap=(d.approvals||[]).find(a=>a.correlation_id===correlationId);
-      if(!ap){this.toast('Approval not found','error');return;}
+      if(!ap){this.toast('Approval not found or expired','error');return;}
       const actions=ap.actions||[];
+      const risk=ap.risk_score||0;
+      const riskColor=risk>=0.8?'var(--red)':risk>=0.5?'var(--amber)':'var(--green)';
+      const costDelta=ap.cost_report?.total_estimated_monthly_delta||0;
+      const perAction=(ap.cost_report?.per_action_costs||[]);
+      document.getElementById('approve-modal-title').textContent=`Review: ${ap.incident_id}`;
       document.getElementById('approve-modal-body').innerHTML=`
-        <p class="text-muted mb-12">Incident: <strong>${ap.incident_id}</strong> &bull; Risk: ${(ap.risk_score||0).toFixed(2)}</p>
-        <p class="text-muted mb-12">Plan: ${ap.plan_summary||'No summary'}</p>
-        <div class="mb-16"><div class="result-section-label mb-8">Select actions to approve:</div>
-        ${actions.map((a,i)=>`<label style="display:flex;align-items:center;gap:8px;padding:8px;border-radius:6px;cursor:pointer;border:1px solid var(--border);margin-bottom:6px;font-size:.85em"><input type="checkbox" value="${i}" checked style="accent-color:var(--purple)"/> <span class="action-chip">${a.type||'action'}</span> ${a.deployment||a.summary||''}</label>`).join('')}
+        <!-- Stats row -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
+          <div style="padding:10px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);text-align:center">
+            <div style="font-size:.72em;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Risk Score</div>
+            <div style="font-size:1.4em;font-weight:800;color:${riskColor}">${risk.toFixed(2)}</div>
+          </div>
+          <div style="padding:10px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);text-align:center">
+            <div style="font-size:.72em;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Cost Impact</div>
+            <div style="font-size:1.4em;font-weight:800;color:${costDelta>0?'var(--red)':'var(--green)'}">${costDelta?'$'+(costDelta>0?'+':'')+costDelta.toFixed(0)+'/mo':'N/A'}</div>
+          </div>
+          <div style="padding:10px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);text-align:center">
+            <div style="font-size:.72em;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Actions</div>
+            <div style="font-size:1.4em;font-weight:800;color:var(--cyan)">${actions.length}</div>
+          </div>
         </div>
-        <div><label class="form-label">Rejection reason (if rejecting)</label><input type="text" id="reject-reason" class="form-input" placeholder="Optional reason..."/></div>`;
+        <!-- Plan summary -->
+        <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);margin-bottom:14px;font-size:.84em">
+          <div style="font-weight:600;color:var(--text);margin-bottom:4px">AI Plan Summary</div>
+          <div style="color:var(--text2)">${ap.plan_summary||'No summary provided'}</div>
+        </div>
+        <!-- Actions checklist -->
+        <div style="margin-bottom:14px">
+          <div style="font-size:.78em;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:8px">Select actions to approve</div>
+          ${actions.map((a,i)=>{
+            const ac=perAction[i];
+            const delta=ac?.monthly_delta_usd;
+            const atype=a.action_type||a.type||'action';
+            const adesc=a.deployment||a.description||a.summary||a.resource_id||'';
+            return`<label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;border:1px solid var(--border);margin-bottom:6px;background:var(--surface2)" onclick="this.style.borderColor=this.querySelector('input').checked?'var(--border)':'var(--purple)'">
+              <input type="checkbox" value="${i}" checked style="accent-color:var(--purple);margin-top:2px;flex-shrink:0"/>
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                  <span class="action-chip">${atype}</span>
+                  <span style="font-size:.83em;color:var(--text2)">${adesc}</span>
+                </div>
+                ${delta!=null?`<div style="font-size:.76em;color:${delta>0?'var(--red)':'var(--green)'};margin-top:3px">${delta>0?'▲':'▼'} $${Math.abs(delta).toFixed(2)}/mo cost ${delta>0?'increase':'saving'}</div>`:''}
+              </div>
+            </label>`;
+          }).join('')}
+        </div>
+        <!-- Reject reason -->
+        <div>
+          <label class="form-label" style="font-size:.78em">Rejection reason (required when rejecting)</label>
+          <input type="text" id="reject-reason" class="form-input" placeholder="Reason for rejection..." style="font-size:.85em"/>
+        </div>`;
+      // Show/hide resume button based on status
+      document.getElementById('btn-resume').style.display='none';
+      document.getElementById('btn-approve').style.display='';
+      document.getElementById('btn-reject').style.display='';
       document.getElementById('approve-modal').classList.add('open');
     }catch(e){this.toast('Error: '+e.message,'error');}
   },
@@ -2539,20 +4190,71 @@ const App = {
     if(!this.currentApprovalId) return;
     const checks=[...document.querySelectorAll('#approve-modal-body input[type=checkbox]')];
     const indices=checks.filter(c=>c.checked).map(c=>parseInt(c.value));
+    if(!indices.length){this.toast('Select at least one action to approve','error');return;}
+    const btn=document.getElementById('btn-approve');
+    btn.disabled=true;btn.textContent='Approving...';
     try{
       const r=await this.api('POST','/approvals/'+this.currentApprovalId+'/approve',{approved_action_indices:indices});
-      if(r&&r.ok){this.toast('Actions approved!','success');this.closeModal('approve-modal');this.loadApprovals();}
-      else this.toast('Approval failed','error');
+      if(r&&r.ok){
+        this.toast('Actions approved! Click "Resume Pipeline" to execute.','success');
+        // Show resume button
+        document.getElementById('btn-approve').style.display='none';
+        document.getElementById('btn-reject').style.display='none';
+        document.getElementById('btn-resume').style.display='';
+        this._approvalStatus='approved';
+        this.loadApprovals();
+      }else this.toast('Approval failed','error');
     }catch(e){this.toast('Error: '+e.message,'error');}
+    finally{btn.disabled=false;btn.textContent='Approve Selected Actions';}
   },
 
   async submitRejection(){
     if(!this.currentApprovalId) return;
-    const reason=document.getElementById('reject-reason').value||'Rejected by user';
+    const reason=document.getElementById('reject-reason')?.value?.trim();
+    if(!reason){this.toast('Please enter a rejection reason','error');return;}
     try{
       const r=await this.api('POST','/approvals/'+this.currentApprovalId+'/reject',{reason});
       if(r&&r.ok){this.toast('Request rejected','info');this.closeModal('approve-modal');this.loadApprovals();}
     }catch(e){this.toast('Error: '+e.message,'error');}
+  },
+
+  async resumePipeline(){
+    if(!this.currentApprovalId) return;
+    const btn=document.getElementById('btn-resume');
+    btn.disabled=true;btn.innerHTML='<div class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></div> Executing...';
+    try{
+      const r=await this.api('POST','/approvals/'+this.currentApprovalId+'/resume');
+      if(r&&r.ok){
+        const d=await r.json();
+        const incidentId=d.incident_id;
+        const executed=d.executed_actions||[];
+        const statusLabel=(d.status||'completed').replace(/_/g,' ');
+        this.closeModal('approve-modal');
+        this.loadApprovals();
+        // Navigate to incidents and show the execution result
+        this.navigate('incidents');
+        setTimeout(()=>{
+          const resultEl=document.getElementById('inc-result');
+          if(resultEl){
+            this.renderIncidentResult(resultEl,d,incidentId,false);
+            resultEl.scrollIntoView({behavior:'smooth',block:'nearest'});
+          }
+          // Pre-fill incident ID
+          const idEl=document.getElementById('inc-id');
+          if(idEl&&incidentId)idEl.value=incidentId;
+        },300);
+        // Build toast with execution summary
+        const execSummary=executed.map(a=>{
+          const r=a.result||{};
+          if(r.previous_state&&r.current_state) return `${a.type}: ${r.previous_state} → ${r.current_state}`;
+          if(r.action) return r.action;
+          return `${a.type}: ${a.status}`;
+        }).join(', ');
+        this.toast(`Executed — ${execSummary||statusLabel}`,'success');
+        setTimeout(()=>this.loadIncidents(),500);
+      }else{const e=await r.json().catch(()=>({}));this.toast('Resume failed: '+(e.detail||'Unknown'),'error');}
+    }catch(e){this.toast('Error: '+e.message,'error');}
+    finally{btn.disabled=false;btn.innerHTML='&#9654; Resume Pipeline';}
   },
 
   closeModal(id){document.getElementById(id).classList.remove('open');},
@@ -2876,34 +4578,39 @@ const App = {
         <div style="font-size:1.7em;font-weight:800;color:${c.color};line-height:1.1">${c.val}</div>
         <div class="text-muted" style="font-size:.76em;margin-top:4px">${c.sub}</div>
       </div>`).join('');
-      // Service breakdown
+      // Service breakdown — Chart.js horizontal bar
       const svcs=d.service_breakdown||[];
+      const svcPeriod=document.getElementById('cost-services-period');
+      if(svcPeriod)svcPeriod.textContent=d.period||'';
       if(!svcs.length){svcEl.innerHTML='<div class="empty-state"><p>No service data</p></div>';}
       else{
-        const max=svcs[0].amount_usd||1;
-        svcEl.innerHTML='<div style="display:flex;flex-direction:column;gap:8px;padding:4px 0">'+
-          svcs.map(s=>{const pct=Math.round(s.amount_usd/mtd*100)||0;const barW=Math.round(s.amount_usd/max*100);
-            return`<div style="display:flex;align-items:center;gap:10px;font-size:.83em">
-              <div style="width:110px;flex-shrink:0;color:var(--text2)">${s.service}</div>
-              <div style="flex:1;background:var(--surface3);border-radius:4px;height:8px;overflow:hidden"><div style="width:${barW}%;height:100%;background:var(--purple);border-radius:4px"></div></div>
-              <div style="width:70px;text-align:right;font-weight:600">$${s.amount_usd.toFixed(2)}</div>
-              <div style="width:36px;text-align:right;color:var(--muted);font-size:.9em">${pct}%</div>
-            </div>`;
-          }).join('')+'</div>';
+        svcEl.style.display='none';
+        const wrap=document.getElementById('cost-services-chart-wrap');
+        wrap.style.display='block';
+        if(window._svcChart)window._svcChart.destroy();
+        const colors=['#7c3aed','#06b6d4','#f59e0b','#22c55e','#f87171','#818cf8','#34d399','#fb923c'];
+        window._svcChart=new Chart(document.getElementById('cost-services-chart'),{
+          type:'bar',
+          data:{labels:svcs.map(s=>s.service),datasets:[{data:svcs.map(s=>s.amount_usd),backgroundColor:svcs.map((_,i)=>colors[i%colors.length]+'cc'),borderColor:svcs.map((_,i)=>colors[i%colors.length]),borderWidth:1,borderRadius:5}]},
+          options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>' $'+ctx.parsed.x.toFixed(2)}}},scales:{x:{ticks:{color:'#94a3b8',callback:v=>'$'+v},grid:{color:'rgba(255,255,255,.04)'}},y:{ticks:{color:'#cbd5e1'},grid:{display:false}}}}
+        });
       }
-      // Monthly trend
+      // Monthly trend — Chart.js line chart
       const trend6=d.monthly_trend||[];
+      const trendNote=document.getElementById('cost-trend-note');
+      if(trendNote&&trend6.length)trendNote.textContent='Last '+trend6.length+' months';
       if(!trend6.length){trendEl.innerHTML='<div class="empty-state"><p>No trend data</p></div>';}
       else{
-        const tMax=Math.max(...trend6.map(m=>m.amount_usd),0.01);
-        trendEl.innerHTML='<div style="display:flex;align-items:flex-end;gap:6px;padding:12px 0 4px;height:120px">'+
-          trend6.map(m=>{const h=Math.max(Math.round(m.amount_usd/tMax*80),4);
-            return`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
-              <div style="font-size:.68em;color:var(--muted)">$${m.amount_usd>=1000?(m.amount_usd/1000).toFixed(1)+'k':m.amount_usd.toFixed(0)}</div>
-              <div style="width:100%;background:var(--cyan);border-radius:3px 3px 0 0;height:${h}px;opacity:0.8"></div>
-              <div style="font-size:.67em;color:var(--muted)">${m.month.slice(5)}</div>
-            </div>`;
-          }).join('')+'</div>';
+        trendEl.style.display='none';
+        const tw=document.getElementById('cost-trend-chart-wrap');
+        tw.style.display='block';
+        if(window._trendChart)window._trendChart.destroy();
+        const amounts=trend6.map(m=>m.amount_usd);
+        window._trendChart=new Chart(document.getElementById('cost-trend-chart'),{
+          type:'line',
+          data:{labels:trend6.map(m=>m.month),datasets:[{data:amounts,borderColor:'#06b6d4',backgroundColor:'rgba(6,182,212,.12)',fill:true,tension:0.4,pointBackgroundColor:'#06b6d4',pointRadius:4,pointHoverRadius:6}]},
+          options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>' $'+ctx.parsed.y.toFixed(2)}}},scales:{x:{ticks:{color:'#94a3b8'},grid:{color:'rgba(255,255,255,.04)'}},y:{ticks:{color:'#94a3b8',callback:v=>'$'+v},grid:{color:'rgba(255,255,255,.04)'}}}}
+        });
       }
     }catch(e){
       sumRow.innerHTML=`<div style="grid-column:1/-1;color:var(--red)">Error: ${e.message}</div>`;
@@ -2985,7 +4692,7 @@ const App = {
     const msgs=document.getElementById('chat-messages');
     msgs.innerHTML='';
     const w=document.createElement('div');w.className='chat-welcome';w.id='chat-welcome';
-    w.innerHTML='<div class="chat-welcome-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg></div><h2>NexusOps AI</h2><p>Ask me anything about your infrastructure.</p>';
+    w.innerHTML='<div class="chat-welcome-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg></div><h2>NsOps AI</h2><p>Ask me anything about your infrastructure.</p>';
     msgs.appendChild(w);
     document.getElementById('chat-session-label').textContent='';
     document.getElementById('chat-chips').style.display='flex';
@@ -3023,6 +4730,50 @@ const App = {
     const input=document.getElementById('chat-input');
     const msg=input.value.trim();if(!msg) return;
     input.value='';input.style.height='';
+    if(msg.toLowerCase()==='/help'){
+      this.appendChatMsg('user','/help');
+      this.appendChatMsg('assistant',`**NsOps AI — What I can do**
+
+**AWS Infrastructure**
+- List / check EC2 instances, ECS services, Lambda functions, RDS databases
+- Start, stop, reboot EC2 instances
+- Scale ECS services, redeploy ECS services
+- Check CloudWatch alarms and metrics
+- Fetch CloudTrail audit events — *who* did *what* and *when*
+- View S3 buckets, SQS queues, DynamoDB tables, SNS topics
+
+**Kubernetes**
+- List pods, deployments, namespaces
+- Restart or scale deployments
+- Stream pod logs
+- Check node health and cluster events
+
+**GitHub**
+- List repos, recent commits, open PRs
+- Create issues or pull requests
+- Review a PR for security/infra issues
+
+**Incidents & Alerts**
+- Run the full incident pipeline (analyze → plan → execute → validate)
+- Create Jira tickets or OpsGenie alerts
+- Send Slack notifications
+- Generate a post-mortem report
+
+**General**
+- Ask about any infrastructure state, cost, or audit history
+- \`/help\` — show this message
+- \`/clear\` — clear chat history
+
+*Tip: mention a specific resource ID (e.g. \`i-0abc1234\`, \`payment-service\`) for precise answers.*`);
+      return;
+    }
+    if(msg.toLowerCase()==='/clear'){
+      this.appendChatMsg('user','/clear');
+      document.getElementById('chat-messages').innerHTML='';
+      this.chatSessionId=null;localStorage.removeItem('nexusops_chat_session');
+      this.appendChatMsg('assistant','Chat history cleared. Starting a new session.');
+      return;
+    }
     this.sendChatMsg(msg);
   },
 
@@ -3111,7 +4862,7 @@ const App = {
     const avatarCls=role==='user'?'user-av':'ai';
     const avatarInner=role==='user'?initials
       :'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>';
-    const metaName=role==='user'?(this.username||'You'):'NexusOps AI'+(providerLabel?' &bull; '+providerLabel:'');
+    const metaName=role==='user'?(this.username||'You'):'NsOps AI'+(providerLabel?' &bull; '+providerLabel:'');
     const bubbleContent=role==='user'
       ?text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
       :this._md(text);
@@ -3536,9 +5287,11 @@ const App = {
     try{
       const r=await this.api('GET','/health/integrations');
       const d=r&&r.ok?await r.json():{integrations:{}};
-      const integs=d.integrations||d||{};
+      const integs=d.integrations||{};
       el.innerHTML=intDefs.map(i=>{
-        const ok=integs[i.key]===true||integs[i.key+'_configured']===true||integs[i.name.toLowerCase()]===true;
+        let ok=false;
+        if(i.key==='github') ok=!!(d.github&&d.github.repo_valid);
+        else ok=!!(integs[i.key]&&integs[i.key].configured);
         return`<div class="integration-card">
           <div class="int-header"><div class="int-icon" style="background:${i.color}22;color:${i.color}">${i.icon}</div><div><div class="int-name">${i.name}</div></div></div>
           <div class="int-status"><span class="status-dot ${ok?'dot-green':'dot-gray'}"></span>${ok?'Configured':'Not configured'}</div>
@@ -3547,23 +5300,424 @@ const App = {
     }catch(e){el.innerHTML='<div class="empty-state" style="grid-column:1/-1"><p>Could not load integrations</p></div>';}
   },
 
+  // ── GITHUB ───────────────────────────────────────────────────────
+  _ghReposCache:[],
+  async loadGithub(){
+    this.loadGhProfile();
+    this.loadGhRepos();
+    this.loadGhCommits();
+    this.loadGhPRs();
+  },
+
+  // ── VS CODE ────────────────────────────────────────────────────────────────
+  async loadVSCode(){
+    const dot=document.getElementById('vscode-status-dot');
+    const txt=document.getElementById('vscode-status-text');
+    const sub=document.getElementById('vscode-status-sub');
+    if(dot)dot.style.background='#6b7280';
+    if(txt)txt.textContent='Connecting…';
+    if(sub)sub.textContent='';
+    const r=await this.api('GET','/vscode/status');
+    if(!r||!r.ok){
+      if(dot)dot.style.background='#ef4444';
+      if(txt)txt.textContent='Extension unreachable';
+      if(sub)sub.textContent='Install and enable the NsOps VS Code extension';
+      return;
+    }
+    const d=await r.json();
+    if(d.connected){
+      if(dot)dot.style.background='#22c55e';
+      if(txt)txt.textContent='Connected';
+      const parts=[];
+      if(d.workspace)parts.push(d.workspace.split('/').pop()||d.workspace);
+      if(d.port)parts.push('port '+d.port);
+      if(d.files!==undefined)parts.push(d.files+' open files');
+      if(sub)sub.textContent=parts.join(' · ');
+    } else {
+      if(dot)dot.style.background='#f59e0b';
+      if(txt)txt.textContent='Extension offline';
+      if(sub)sub.textContent=d.error||'Start the integration server in VS Code';
+    }
+  },
+
+  _vscodeActionType: null,
+  vscodeAction(type){
+    this._vscodeActionType=type;
+    const modal=document.getElementById('vscode-modal');
+    const title=document.getElementById('vscode-modal-title');
+    const body=document.getElementById('vscode-modal-body');
+    const inp=(label,id,placeholder,type2='text')=>`<label style="display:block;font-size:.8em;color:var(--muted);margin-bottom:4px">${label}</label><input id="${id}" type="${type2}" placeholder="${placeholder}" style="width:100%;padding:8px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:.85em;margin-bottom:12px;box-sizing:border-box">`;
+    const sel=(label,id,opts)=>`<label style="display:block;font-size:.8em;color:var(--muted);margin-bottom:4px">${label}</label><select id="${id}" style="width:100%;padding:8px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:.85em;margin-bottom:12px">${opts.map(o=>`<option value="${o}">${o}</option>`).join('')}</select>`;
+    if(type==='notify'){
+      title.textContent='Send VS Code Notification';
+      body.innerHTML=inp('Message','vc-msg','Enter notification message')+sel('Level','vc-lvl',['info','warning','error']);
+    } else if(type==='open'){
+      title.textContent='Open File in VS Code';
+      body.innerHTML=inp('File Path','vc-fp','/absolute/path/to/file.py')+inp('Line (optional)','vc-line','42','number');
+    } else if(type==='terminal'){
+      title.textContent='Run Terminal Command';
+      body.innerHTML=inp('Command','vc-cmd','npm test')+inp('Terminal Name (optional)','vc-tname','NsOps');
+    } else if(type==='highlight'){
+      title.textContent='Highlight Lines';
+      body.innerHTML=inp('File Path','vc-fp','/absolute/path/to/file.py')+inp('Lines (comma-separated)','vc-lines','10,15,20');
+    } else if(type==='clear'){
+      title.textContent='Clear All Highlights';
+      body.innerHTML='<p style="font-size:.85em;color:var(--muted)">Remove all NsOps line decorations from open editors?</p>';
+    } else if(type==='output'){
+      title.textContent='Write to Output Channel';
+      body.innerHTML=inp('Message','vc-out-msg','Message to write to NsOps output channel');
+    }
+    modal.style.display='flex';
+  },
+  vscodeModalClose(){
+    document.getElementById('vscode-modal').style.display='none';
+  },
+  async vscodeModalSubmit(){
+    const type=this._vscodeActionType;
+    const btn=document.getElementById('vscode-modal-submit');
+    const g=id=>{const el=document.getElementById(id);return el?el.value.trim():'';}
+    btn.disabled=true;btn.textContent='Sending…';
+    let url='/vscode/notify',body={};
+    if(type==='notify'){
+      url='/vscode/notify';body={message:g('vc-msg'),level:g('vc-lvl')};
+    } else if(type==='open'){
+      url='/vscode/open';body={file_path:g('vc-fp')};
+      if(g('vc-line'))body.line=parseInt(g('vc-line'));
+    } else if(type==='terminal'){
+      url='/vscode/terminal';body={command:g('vc-cmd'),name:g('vc-tname')||'NsOps'};
+    } else if(type==='highlight'){
+      url='/vscode/highlight';
+      const lines=g('vc-lines').split(',').map(s=>parseInt(s.trim())).filter(n=>!isNaN(n));
+      body={file_path:g('vc-fp'),lines};
+    } else if(type==='clear'){
+      url='/vscode/clear-highlights';body={};
+    } else if(type==='output'){
+      url='/vscode/output';body={message:g('vc-out-msg'),show:true};
+    }
+    try{
+      const r=await this.api('POST',url,body);
+      const d=r&&r.ok?await r.json():{};
+      if(d.success||d.ok){
+        this.toast('VS Code action sent','success');
+      } else {
+        this.toast(d.error||'Action failed','error');
+      }
+    }catch(e){this.toast('Error: '+e.message,'error');}
+    btn.disabled=false;btn.textContent='Send';
+    this.vscodeModalClose();
+  },
+  async loadGhProfile(){
+    const el=document.getElementById('gh-profile-row');
+    const r=await this.api('GET','/github/profile');
+    if(!r||!r.ok){el.innerHTML='<div class="card" style="padding:14px 18px;color:var(--muted);font-size:.85em">GitHub not configured or token invalid.</div>';return;}
+    const d=await r.json();
+    const p=d.profile||d;
+    const langs=p.top_languages||[];
+    el.innerHTML=`<div style="display:grid;grid-template-columns:auto 1fr repeat(4,auto);gap:12px;align-items:center">
+      <div style="width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#22d3ee);display:flex;align-items:center;justify-content:center;font-size:1.3em;font-weight:700">${(p.login||'G')[0].toUpperCase()}</div>
+      <div>
+        <div style="font-weight:600;font-size:1em">${p.login||'GitHub User'}</div>
+        <div style="color:var(--muted);font-size:.8em">${p.name||''} ${p.company?'· '+p.company:''}</div>
+        ${langs.length?`<div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">${langs.slice(0,5).map(l=>`<span style="font-size:.7em;padding:1px 7px;border-radius:10px;background:var(--bg3);color:var(--text2)">${l}</span>`).join('')}</div>`:''}
+      </div>
+      ${[['Repos',p.public_repos??'—','#6366f1'],['Stars',p.total_stars??'—','#f59e0b'],['Followers',p.followers??'—','var(--cyan2)'],['Following',p.following??'—','var(--muted)']].map(([label,val,color])=>`
+      <div class="card" style="padding:12px 16px;text-align:center;min-width:80px">
+        <div style="font-size:1.4em;font-weight:700;color:${color}">${val}</div>
+        <div style="font-size:.72em;color:var(--muted)">${label}</div>
+      </div>`).join('')}
+    </div>`;
+  },
+  async loadGhRepos(){
+    const el=document.getElementById('gh-repos-list');
+    const r=await this.api('GET','/github/repos');
+    if(!r||!r.ok){el.innerHTML='<div class="empty-state" style="padding:24px"><p>Could not load repos</p></div>';return;}
+    const d=await r.json();
+    const repos=(d.repos||d.repositories||[]);
+    this._ghReposCache=repos;
+    this._renderGhRepos(repos);
+  },
+  _renderGhRepos(repos){
+    const el=document.getElementById('gh-repos-list');
+    if(!repos.length){el.innerHTML='<div class="empty-state" style="padding:24px"><p>No repositories found</p></div>';return;}
+    el.innerHTML=repos.map(r=>`<div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <div style="min-width:0">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-weight:500;font-size:.85em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${r.name||r.full_name||'?'}</span>
+          ${r.private?'<span style="font-size:.65em;padding:1px 5px;border-radius:4px;background:rgba(245,158,11,.15);color:#f59e0b">Private</span>':'<span style="font-size:.65em;padding:1px 5px;border-radius:4px;background:var(--bg3);color:var(--muted)">Public</span>'}
+        </div>
+        <div style="font-size:.75em;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${r.description||'—'}</div>
+        ${r.language?`<span style="font-size:.7em;margin-top:4px;display:inline-block;padding:1px 6px;border-radius:8px;background:var(--bg3);color:var(--cyan2)">${r.language}</span>`:''}
+      </div>
+      <div style="display:flex;gap:10px;flex-shrink:0;font-size:.75em;color:var(--muted)">
+        ${r.stargazers_count!=null?`<span>&#11088; ${r.stargazers_count}</span>`:''}
+        ${r.forks_count!=null?`<span>&#127860; ${r.forks_count}</span>`:''}
+      </div>
+    </div>`).join('');
+  },
+  filterGhRepos(q){
+    const f=q.toLowerCase();
+    this._renderGhRepos(f?this._ghReposCache.filter(r=>(r.name||'').toLowerCase().includes(f)||(r.description||'').toLowerCase().includes(f)||(r.language||'').toLowerCase().includes(f)):this._ghReposCache);
+  },
+  async loadGhCommits(){
+    const el=document.getElementById('gh-commits-list');
+    const hours=document.getElementById('gh-hours-filter')?.value||48;
+    const r=await this.api('GET','/github/commits?hours='+hours);
+    if(!r||!r.ok){el.innerHTML='<div class="empty-state" style="padding:24px"><p>Could not load commits</p></div>';return;}
+    const d=await r.json();
+    const commits=d.commits||[];
+    if(!commits.length){el.innerHTML='<div class="empty-state" style="padding:24px"><p>No commits in this period</p></div>';return;}
+    el.innerHTML=commits.slice(0,30).map(c=>{
+      const sha=(c.sha||c.id||'').slice(0,7);
+      const msg=(c.message||c.commit_message||'').split('\\n')[0].slice(0,72);
+      const author=c.author||c.committer||'';
+      const repo=c.repo||c.repository||'';
+      const ts=(c.timestamp||c.date||'').substring(0,10);
+      return`<div style="padding:9px 18px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+          <div style="min-width:0">
+            <div style="font-size:.83em;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${msg||'(no message)'}</div>
+            <div style="font-size:.73em;color:var(--muted);margin-top:2px">${author?author+' · ':''}${repo?repo+' · ':''}<code style="background:var(--bg3);padding:1px 4px;border-radius:3px;font-size:.9em">${sha}</code></div>
+          </div>
+          <div style="font-size:.72em;color:var(--muted);flex-shrink:0">${ts}</div>
+        </div>
+      </div>`;
+    }).join('');
+  },
+  async loadGhPRs(){
+    const el=document.getElementById('gh-prs-list');
+    el.innerHTML='<div class="loading-state" style="padding:24px"><div class="spinner"></div></div>';
+    const hours=document.getElementById('gh-hours-filter')?.value||48;
+    const state=document.getElementById('gh-pr-state')?.value||'closed';
+    const r=await this.api('GET','/github/prs?hours='+hours+'&state='+state);  // Note: /github/prs uses 'hours' param but prs endpoint may not support state, check
+    if(!r||!r.ok){el.innerHTML='<div class="empty-state" style="padding:24px"><p>Could not load PRs</p></div>';return;}
+    const d=await r.json();
+    const prs=d.prs||d.pull_requests||[];
+    if(!prs.length){el.innerHTML='<div class="empty-state" style="padding:24px"><p>No pull requests in this period</p></div>';return;}
+    const stateColor={open:'var(--cyan2)',closed:'var(--muted)',merged:'#a855f7'};
+    el.innerHTML=`<div class="table-wrap"><table style="width:100%">
+      <thead><tr>
+        <th style="padding:8px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">#</th>
+        <th style="padding:8px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">Title</th>
+        <th style="padding:8px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">Repo</th>
+        <th style="padding:8px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">Author</th>
+        <th style="padding:8px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">Status</th>
+        <th style="padding:8px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">Date</th>
+      </tr></thead>
+      <tbody>${prs.slice(0,20).map(p=>{
+        const st=p.merged_at?'merged':p.state||'open';
+        const col=stateColor[st]||'var(--muted)';
+        return`<tr style="border-top:1px solid var(--border)">
+          <td style="padding:10px 18px;color:var(--muted);font-size:.8em">#${p.number||'—'}</td>
+          <td style="padding:10px 18px;font-size:.83em;max-width:280px"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.title||'—'}</div></td>
+          <td style="padding:10px 18px;font-size:.78em;color:var(--muted)">${p.repo||p.repository||'—'}</td>
+          <td style="padding:10px 18px;font-size:.78em">${p.user||p.author||'—'}</td>
+          <td style="padding:10px 18px"><span style="font-size:.75em;font-weight:600;color:${col};background:${col}22;padding:2px 8px;border-radius:10px">${st}</span></td>
+          <td style="padding:10px 18px;font-size:.75em;color:var(--muted)">${(p.merged_at||p.created_at||p.date||'').substring(0,10)||'—'}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`;
+  },
+
   // ── USERS ────────────────────────────────────────────────────────
+  _usersCache:[],
   async loadUsers(){
-    const el=document.getElementById('users-table');
-    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    if(this.role==='admin'){
+      await this._loadAdminUsersView();
+    } else {
+      this._loadMyProfileView();
+    }
+  },
+
+  // ── ADMIN: full user management ───────────────────────────────
+  async _loadAdminUsersView(){
+    const hdr=document.getElementById('users-page-header');
+    const statsEl=document.getElementById('users-stats');
+    const main=document.getElementById('users-main-content');
+    const sec=document.getElementById('users-secondary-content');
+
+    hdr.innerHTML=`<div class="section-header">
+      <div><div class="section-title">User Management</div><div class="section-sub">Manage team members, roles and platform access</div></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost btn-sm" onclick="App._loadAdminUsersView()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refresh
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="App.openInviteModal()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Invite User
+        </button>
+      </div>
+    </div>`;
+
+    main.innerHTML='<div class="loading-state" style="padding:24px"><div class="spinner"></div></div>';
     try{
       const r=await this.api('GET','/users');
-      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Access denied</p></div>';return;}
-      const d=await r.json();const users=d.users||[];
-      if(!users.length){el.innerHTML='<div class="empty-state"><p>No users</p></div>';return;}
-      el.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody>`+
-        users.map(u=>{const roleCls=u.role==='admin'?'badge-purple':u.role==='developer'?'badge-cyan':'badge-gray';
-          return`<tr><td><div style="display:flex;align-items:center;gap:8px"><div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,var(--purple),var(--cyan2));display:flex;align-items:center;justify-content:center;font-size:.75em;font-weight:700">${(u.username||'?')[0].toUpperCase()}</div>${u.username}</div></td>
-          <td><span class="badge ${roleCls}">${u.role}</span></td>
-          <td class="text-muted">${(u.created_at||'').substring(0,10)||'--'}</td>
-          <td><button class="btn btn-danger btn-sm" onclick="App.deleteUser('${u.username}')" ${u.username===this.username?'disabled':''}>Delete</button></td></tr>`;
-        }).join('')+`</tbody></table></div>`;
-    }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+      if(!r||!r.ok){
+        const msg=r?(await r.json().catch(()=>({detail:'Access denied'}))).detail:'Could not connect';
+        main.innerHTML=`<div class="card"><div class="empty-state" style="padding:32px"><p>${msg}</p></div></div>`;
+        return;
+      }
+      const d=await r.json();
+      const users=d.users||[];
+      this._usersCache=users;
+      // Stats
+      const admins=users.filter(u=>u.role==='admin').length;
+      const devs=users.filter(u=>u.role==='developer').length;
+      const viewers=users.filter(u=>u.role==='viewer').length;
+      statsEl.style.display='grid';
+      statsEl.style.gridTemplateColumns='repeat(4,1fr)';
+      statsEl.style.gap='12px';
+      statsEl.innerHTML=[
+        {label:'Total Members',val:users.length,color:'var(--purple)',icon:'&#128101;'},
+        {label:'Admins',val:admins,color:'#f87171',icon:'&#9733;'},
+        {label:'Developers',val:devs,color:'var(--cyan2)',icon:'&#128187;'},
+        {label:'Viewers',val:viewers,color:'var(--muted)',icon:'&#128065;'},
+      ].map(s=>`<div class="card" style="padding:16px 18px;display:flex;align-items:center;gap:12px">
+        <div style="font-size:1.6em">${s.icon}</div>
+        <div><div style="font-size:1.5em;font-weight:700;color:${s.color}">${s.val}</div>
+        <div style="font-size:.78em;color:var(--muted)">${s.label}</div></div>
+      </div>`).join('');
+      // Table
+      main.innerHTML=`<div class="card" style="padding:0;overflow:hidden">
+        <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <div class="card-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            Team Members
+          </div>
+          <input id="users-search" type="text" placeholder="Search..." style="padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.8em;width:180px" oninput="App.filterUsers(this.value)">
+        </div>
+        <div id="users-table"></div>
+      </div>`;
+      this._renderUsersTable(users);
+      // My account at bottom for admin
+      sec.innerHTML=`<div class="card" style="padding:0;overflow:hidden">
+        <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
+          <div class="card-title">&#9881; Admin Account</div>
+        </div>
+        <div style="padding:20px" id="admin-account-inner"></div>
+      </div>`;
+      document.getElementById('admin-account-inner').innerHTML=this._buildAccountHTML();
+    }catch(e){main.innerHTML=`<div class="card"><div class="empty-state" style="padding:32px"><p>Error: ${e.message}</p></div></div>`;}
+  },
+
+  // ── NON-ADMIN: personal profile view ─────────────────────────
+  _loadMyProfileView(){
+    const hdr=document.getElementById('users-page-header');
+    const statsEl=document.getElementById('users-stats');
+    const main=document.getElementById('users-main-content');
+    const sec=document.getElementById('users-secondary-content');
+    statsEl.innerHTML='';statsEl.style.display='none';
+    hdr.innerHTML=`<div class="section-header">
+      <div><div class="section-title">My Profile</div><div class="section-sub">Your account details and platform permissions</div></div>
+      <button class="btn btn-ghost btn-sm" onclick="App._loadMyProfileView()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refresh
+      </button>
+    </div>`;
+    // Profile card
+    main.innerHTML=`<div class="card" style="padding:28px">${this._buildAccountHTML()}</div>`;
+    // Access info card
+    const roleDesc={'developer':'You can run incidents, approve actions, and deploy changes. You cannot manage users or edit secrets.',
+      'viewer':'You have read-only access to dashboards and monitoring. Contact an admin to request elevated access.'};
+    sec.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="card" style="padding:20px">
+        <div style="font-weight:600;margin-bottom:12px;font-size:.9em">&#128274; Access Level</div>
+        <p style="font-size:.83em;color:var(--text2);line-height:1.6;margin:0">${roleDesc[this.role]||'Standard platform access.'}</p>
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+          <div style="font-size:.75em;color:var(--muted);margin-bottom:6px;font-weight:600;text-transform:uppercase">Need more access?</div>
+          <p style="font-size:.8em;color:var(--text2);margin:0">Contact your NsOps administrator to request a role change.</p>
+        </div>
+      </div>
+      <div class="card" style="padding:20px">
+        <div style="font-weight:600;margin-bottom:12px;font-size:.9em">&#128640; Quick Actions</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button class="btn btn-ghost btn-sm" style="justify-content:flex-start" onclick="App.navigate('dashboard')">&#128202; View Dashboard</button>
+          <button class="btn btn-ghost btn-sm" style="justify-content:flex-start" onclick="App.navigate('monitoring')">&#128308; Monitoring</button>
+          <button class="btn btn-ghost btn-sm" style="justify-content:flex-start" onclick="App.navigate('chat')">&#129302; AI Assistant</button>
+          <button class="btn btn-ghost btn-sm" style="justify-content:flex-start" onclick="App.navigate('github')">&#128049; GitHub</button>
+        </div>
+      </div>
+    </div>`;
+  },
+
+  _buildAccountHTML(){
+    const roleColor=this.role==='admin'?'#f87171':this.role==='developer'?'var(--cyan2)':'var(--muted)';
+    const perms={
+      'admin':   ['View all data','Run incidents','Manage users','Approve actions','Deploy changes','Edit secrets','Configure integrations'],
+      'developer':['View all data','Run incidents','Approve actions','Deploy changes'],
+      'viewer':  ['View dashboards','View monitoring','Read-only access']
+    };
+    const myPerms=perms[this.role]||perms['viewer'];
+    return`<div style="display:grid;grid-template-columns:auto 1fr;gap:24px;align-items:start">
+      <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--purple),var(--cyan2));display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:700">${(this.username||'?')[0].toUpperCase()}</div>
+      <div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+          <div style="font-size:1.15em;font-weight:700">${this.username}</div>
+          <span style="font-size:.75em;font-weight:600;color:${roleColor};background:${roleColor}22;padding:3px 12px;border-radius:12px;text-transform:capitalize">${this.role}</span>
+        </div>
+        <div style="color:var(--muted);font-size:.82em;margin-bottom:18px">NsOps Platform · Active Session</div>
+        <div style="font-size:.75em;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em">Permissions</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:${this.role==='admin'?'20px':'0'}">
+          ${myPerms.map(p=>`<span style="font-size:.78em;padding:4px 11px;border-radius:12px;background:var(--bg3);color:var(--text2);border:1px solid var(--border)">&#10003; ${p}</span>`).join('')}
+        </div>
+        ${this.role==='admin'?`<div style="padding-top:18px;border-top:1px solid var(--border)">
+          <div style="font-size:.75em;color:var(--muted);margin-bottom:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em">Admin Controls</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" onclick="App.openInviteModal()">&#43; Invite User</button>
+            <button class="btn btn-ghost btn-sm" onclick="App.navigate('security')">&#128274; Security</button>
+            <button class="btn btn-ghost btn-sm" onclick="App.navigate('integrations')">&#128279; Integrations</button>
+            <button class="btn btn-ghost btn-sm" onclick="App.navigate('monitoring')">&#128200; Monitoring</button>
+          </div>
+        </div>`:''}
+      </div>
+    </div>`;
+  },
+
+  _renderUsersTable(users){
+    const el=document.getElementById('users-table');
+    if(!el)return;
+    if(!users.length){el.innerHTML='<div class="empty-state" style="padding:32px"><p>No users found</p></div>';return;}
+    const roleColors={'admin':'#f87171','developer':'var(--cyan2)','viewer':'var(--muted)'};
+    el.innerHTML=`<div class="table-wrap"><table style="width:100%">
+      <thead><tr>
+        <th style="padding:10px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">User</th>
+        <th style="padding:10px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">Role</th>
+        <th style="padding:10px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">Joined</th>
+        <th style="padding:10px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">Change Role</th>
+        <th style="padding:10px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">Actions</th>
+      </tr></thead>
+      <tbody>${users.map(u=>{
+        const rc=roleColors[u.role]||'var(--muted)';
+        const isMe=u.username===this.username;
+        return`<tr style="border-top:1px solid var(--border)">
+          <td style="padding:12px 18px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--purple),var(--cyan2));display:flex;align-items:center;justify-content:center;font-size:.78em;font-weight:700;flex-shrink:0">${(u.username||'?').slice(0,2).toUpperCase()}</div>
+              <div>
+                <div style="font-weight:500">${u.username}${isMe?'<span style="font-size:.7em;color:var(--cyan2);margin-left:6px;background:var(--cyan2)22;padding:1px 6px;border-radius:4px">You</span>':''}</div>
+                <div style="font-size:.73em;color:var(--muted)">${u.email||u.role+' account'}</div>
+              </div>
+            </div>
+          </td>
+          <td style="padding:12px 18px"><span style="font-size:.78em;font-weight:600;color:${rc};background:${rc}22;padding:3px 10px;border-radius:12px">${u.role}</span></td>
+          <td style="padding:12px 18px;color:var(--muted);font-size:.82em">${(u.created_at||'').substring(0,10)||'—'}</td>
+          <td style="padding:12px 18px">
+            <select onchange="App.changeUserRole('${u.username}',this.value)" ${isMe?'disabled title="Cannot change your own role"':''} style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.8em;cursor:pointer">
+              <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+              <option value="developer" ${u.role==='developer'?'selected':''}>Developer</option>
+              <option value="viewer" ${u.role==='viewer'?'selected':''}>Viewer</option>
+            </select>
+          </td>
+          <td style="padding:12px 18px">
+            <button class="btn btn-danger btn-sm" onclick="App.deleteUser('${u.username}')" ${isMe?'disabled title="Cannot remove yourself"':''}>Remove</button>
+          </td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`;
+  },
+  filterUsers(q){
+    const f=q.toLowerCase();
+    this._renderUsersTable(f?this._usersCache.filter(u=>u.username.includes(f)||u.role.includes(f)):this._usersCache);
+  },
+  async changeUserRole(username,role){
+    const r=await this.api('PUT','/users/'+username+'/role',{role});
+    if(r&&r.ok){this.toast('Role updated for '+username,'success');this._loadAdminUsersView();}
+    else this.toast('Failed to update role','error');
   },
 
   async deleteUser(username){
@@ -3590,8 +5744,8 @@ const App = {
   // ── SECURITY ─────────────────────────────────────────────────────
   async loadSecrets(){
     const el=document.getElementById('secrets-list');
+    if(!el)return;
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
-    // Icons keyed by integration group name (lowercased)
     const _icons={
       'claude ai':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>',
       'aws':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
@@ -3603,142 +5757,160 @@ const App = {
       'jira':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 13.5L3 21"/><path d="M21 3l-7.5 7.5"/><path d="M21 12.5A8.5 8.5 0 0 1 12.5 21"/><path d="M3 11.5A8.5 8.5 0 0 1 11.5 3"/></svg>',
       'opsgenie':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>',
     };
-    const _defaultIcon='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+    const _dflt='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
     try{
       const r=await this.api('GET','/secrets/status');
-      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Could not load secrets</p></div>';return;}
-      // API returns grouped: {"Claude AI": {"ANTHROPIC_API_KEY": true, "GROQ_API_KEY": false}, "AWS": {...}, ...}
+      if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Could not load credentials</p></div>';return;}
       const d=await r.json();
       const grouped=d.secrets||d||{};
-
-      // Flatten to per-integration status:
-      // An integration is "Active" if ANY of its keys is set (partial = some but not all)
       const integrations=Object.entries(grouped).map(([name,keys])=>{
         const vals=Object.values(keys);
-        const total=vals.length;
-        const setCount=vals.filter(Boolean).length;
-        const status = setCount===0 ? 'missing' : setCount===total ? 'active' : 'partial';
-        // Build tooltip showing which specific keys are set/missing
-        const keyDetail=Object.entries(keys).map(([k,v])=>`${v?'✓':'✗'} ${k}`).join(', ');
+        const total=vals.length,setCount=vals.filter(Boolean).length;
+        const status=setCount===0?'missing':setCount===total?'active':'partial';
+        const keyDetail=Object.entries(keys).map(([k,v])=>`${v?'✓':'✗'} ${k}`).join(' · ');
         return{name,status,setCount,total,keyDetail};
       });
-
       const activeCount=integrations.filter(i=>i.status==='active').length;
       const partialCount=integrations.filter(i=>i.status==='partial').length;
       const missingCount=integrations.filter(i=>i.status==='missing').length;
-      const configuredCount=activeCount+partialCount;
 
-      // Update summary stats
+      // Compact 3-stat summary
       const sum=document.getElementById('sec-summary');
-      if(sum) sum.innerHTML=
-        `<div class="card" style="padding:14px 18px;display:flex;align-items:center;gap:12px">
-          <div style="width:36px;height:36px;border-radius:10px;background:rgba(34,197,94,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          </div>
-          <div><div style="font-size:1.4em;font-weight:700;color:var(--green)">${activeCount}</div><div style="font-size:.75em;color:var(--muted)">Active</div></div>
+      if(sum) sum.innerHTML=[
+        {label:'Active',val:activeCount,stroke:'#22c55e',bg:'rgba(34,197,94,.12)',icon:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'},
+        {label:'Not Set',val:missingCount,stroke:missingCount>0?'#ef4444':'#3d5070',bg:missingCount>0?'rgba(239,68,68,.12)':'rgba(61,80,112,.12)',icon:'<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>'},
+        {label:'Partial',val:partialCount,stroke:partialCount>0?'#f59e0b':'#3d5070',bg:partialCount>0?'rgba(245,158,11,.12)':'rgba(61,80,112,.12)',icon:'<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><line x1="12" y1="16" x2="12.01" y2="16"/>'},
+      ].map(s=>`<div class="card" style="padding:12px 16px;display:flex;align-items:center;gap:10px">
+        <div style="width:32px;height:32px;border-radius:9px;background:${s.bg};display:flex;align-items:center;justify-content:center;flex-shrink:0">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="${s.stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${s.icon}</svg>
         </div>
-        <div class="card" style="padding:14px 18px;display:flex;align-items:center;gap:12px">
-          <div style="width:36px;height:36px;border-radius:10px;background:rgba(239,68,68,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          </div>
-          <div><div style="font-size:1.4em;font-weight:700;color:${missingCount>0?'var(--red)':'var(--muted)'}">${missingCount}</div><div style="font-size:.75em;color:var(--muted)">Not Configured</div></div>
-        </div>
-        <div class="card" style="padding:14px 18px;display:flex;align-items:center;gap:12px">
-          <div style="width:36px;height:36px;border-radius:10px;background:rgba(59,130,246,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-          </div>
-          <div><div style="font-size:1.4em;font-weight:700">4</div><div style="font-size:.75em;color:var(--muted)">Webhooks</div></div>
-        </div>
-        <div class="card" style="padding:14px 18px;display:flex;align-items:center;gap:12px">
-          <div style="width:36px;height:36px;border-radius:10px;background:rgba(168,85,247,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a855f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          </div>
-          <div><div style="font-size:1.4em;font-weight:700;color:${missingCount===0?'var(--green)':'var(--amber)'}">${missingCount===0?'Secure':'Review'}</div><div style="font-size:.75em;color:var(--muted)">Overall</div></div>
-        </div>`;
+        <div><div style="font-size:1.3em;font-weight:700;color:var(--text)">${s.val}</div><div style="font-size:.72em;color:var(--muted)">${s.label}</div></div>
+      </div>`).join('');
 
-      // Render per-integration rows
-      el.innerHTML=integrations.map(({name,status,setCount,total,keyDetail})=>{
-        const icon=_icons[name.toLowerCase()]||_defaultIcon;
-        const isActive=status==='active';
-        const isPartial=status==='partial';
-        const isMissing=status==='missing';
-        const bg=isActive?'rgba(34,197,94,.1)':isPartial?'rgba(245,158,11,.1)':'rgba(239,68,68,.1)';
-        const color=isActive?'var(--green)':isPartial?'var(--amber)':'var(--red)';
+      // Credential rows grouped: active first, then partial, then missing
+      const sorted=[...integrations].sort((a,b)=>{const o={active:0,partial:1,missing:2};return o[a.status]-o[b.status];});
+      el.innerHTML=sorted.map(({name,status,setCount,total,keyDetail})=>{
+        const icon=_icons[name.toLowerCase()]||_dflt;
+        const isActive=status==='active',isPartial=status==='partial';
+        const accentColor=isActive?'#22c55e':isPartial?'#f59e0b':'#ef4444';
+        const bg=isActive?'rgba(34,197,94,.08)':isPartial?'rgba(245,158,11,.08)':'rgba(239,68,68,.08)';
         const badgeCls=isActive?'badge-green':isPartial?'badge-amber':'badge-red';
-        const badgeTxt=isActive?'&#10003; Active':isPartial?`&#9679; Partial (${setCount}/${total})`:'&#10005; Not configured';
-        return`<div style="display:flex;align-items:center;gap:10px;padding:10px 18px;border-bottom:1px solid var(--border);transition:background .15s" title="${keyDetail}" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''">
-          <div style="width:28px;height:28px;border-radius:8px;background:${bg};display:flex;align-items:center;justify-content:center;flex-shrink:0;color:${color}">
-            ${icon}
-          </div>
-          <span style="flex:1;font-size:.85em;font-weight:500">${name}</span>
-          ${isPartial?`<span style="font-size:.72em;color:var(--muted);margin-right:6px">${keyDetail}</span>`:''}
-          <span class="badge ${badgeCls}" style="font-size:.73em">${badgeTxt}</span>
+        const badgeTxt=isActive?'Active':isPartial?`Partial ${setCount}/${total}`:'Not set';
+        return`<div style="display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid var(--border);transition:background .12s" title="${keyDetail}" onmouseover="this.style.background='rgba(255,255,255,.02)'" onmouseout="this.style.background=''">
+          <div style="width:30px;height:30px;border-radius:8px;background:${bg};display:flex;align-items:center;justify-content:center;flex-shrink:0;color:${accentColor}">${icon}</div>
+          <span style="flex:1;font-size:.84em;font-weight:600;color:var(--text)">${name}</span>
+          ${isPartial?`<span style="font-size:.7em;color:var(--muted);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${keyDetail}</span>`:''}
+          <span class="badge ${badgeCls}" style="font-size:.72em;flex-shrink:0">${badgeTxt}</span>
         </div>`;
       }).join('');
-    }catch(e){el.innerHTML='<div class="empty-state"><p>Error loading secrets</p></div>';}
+      if(missingCount>0){
+        el.innerHTML+=`<div style="padding:10px 18px;background:rgba(239,68,68,.04);border-top:1px solid rgba(239,68,68,.15);display:flex;align-items:center;justify-content:space-between">
+          <span style="font-size:.78em;color:var(--muted)">${missingCount} integration${missingCount>1?'s':''} not configured</span>
+          <button class="btn btn-ghost btn-sm" onclick="App.navigate('integrations')" style="font-size:.75em;color:#a78bfa">Configure →</button>
+        </div>`;
+      }
+    }catch(e){el.innerHTML='<div class="empty-state"><p>Error loading credentials</p></div>';}
   },
 
   async loadAudit(){
     const el=document.getElementById('audit-list');
+    if(!el)return;
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
     try{
-      const r=await this.api('GET','/audit/log?limit=10');
-      if(!r||!r.ok){el.innerHTML='<div class="empty-state" style="padding:24px"><p style="font-size:.83em;color:var(--muted)">Audit log not available</p></div>';return;}
+      const r=await this.api('GET','/audit/log?limit=20');
+      if(!r||!r.ok){el.innerHTML='<div style="padding:24px;text-align:center;font-size:.82em;color:var(--muted)">Audit log unavailable</div>';return;}
       const d=await r.json();const logs=d.entries||d.logs||[];
       if(!logs.length){
-        el.innerHTML=`<div style="display:flex;flex-direction:column;align-items:center;padding:32px 16px;gap:10px;color:var(--muted)">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:.4"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          <span style="font-size:.82em">No audit entries yet</span>
-        </div>`;
+        el.innerHTML='<div style="padding:32px 16px;text-align:center;font-size:.82em;color:var(--muted)">No audit entries yet</div>';
         return;
       }
       el.innerHTML=logs.map(l=>{
-        const time=(l.timestamp||l.ts||'').substring(11,19)||'--';
+        const ts=l.timestamp||l.ts||'';
+        const date=ts?ts.substring(0,10):'';
+        const time=ts?ts.substring(11,19):'--';
         const user=l.user||'system';
         const action=l.action||l.event||'--';
         const ok=l.result&&(l.result.success||l.result.ok);
-        return`<div style="display:flex;align-items:center;gap:10px;padding:9px 18px;border-bottom:1px solid var(--border);font-size:.82em">
-          <span style="color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;font-size:.88em;white-space:nowrap">${time}</span>
-          <span class="badge ${ok?'badge-green':'badge-gray'}" style="font-size:.7em">${ok?'OK':'—'}</span>
-          <span style="font-weight:500;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${action}</span>
-          <span style="color:var(--muted);font-size:.85em">${user}</span>
+        return`<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border);transition:background .12s" onmouseover="this.style.background='rgba(255,255,255,.02)'" onmouseout="this.style.background=''">
+          <div style="display:flex;flex-direction:column;align-items:flex-end;flex-shrink:0;min-width:52px">
+            <span style="font-size:.72em;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace">${time}</span>
+            ${date?`<span style="font-size:.65em;color:var(--muted);opacity:.6">${date}</span>`:''}
+          </div>
+          <div style="width:6px;height:6px;border-radius:50%;background:${ok?'#22c55e':'#64748b'};flex-shrink:0"></div>
+          <span style="flex:1;font-size:.8em;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${action}">${action}</span>
+          <span style="font-size:.72em;color:var(--muted);flex-shrink:0">${user}</span>
         </div>`;
       }).join('');
-    }catch(e){el.innerHTML='<div class="empty-state" style="padding:24px"><p style="font-size:.83em;color:var(--muted)">Error loading audit log</p></div>';}
+    }catch(e){el.innerHTML='<div style="padding:24px;text-align:center;font-size:.82em;color:var(--muted)">Error loading audit log</div>';}
+  },
+
+  async loadPolicyRules(){
+    const el=document.getElementById('policy-rules-editor');
+    const st=document.getElementById('policy-rules-status');
+    if(!el)return;
+    try{
+      const r=await this.api('GET','/policies/rules');
+      if(r&&r.ok){
+        const d=await r.json();
+        el.value=JSON.stringify(d,null,2);
+        if(st)st.innerHTML='<span style="color:var(--green)">&#10003; Loaded</span>';
+      }else{
+        if(st)st.innerHTML='<span style="color:var(--red)">Failed to load rules</span>';
+      }
+    }catch(e){if(st)st.innerHTML=`<span style="color:var(--red)">Error: ${e.message}</span>`;}
+  },
+
+  async savePolicyRules(){
+    const el=document.getElementById('policy-rules-editor');
+    const st=document.getElementById('policy-rules-status');
+    if(!el)return;
+    let parsed;
+    try{parsed=JSON.parse(el.value);}catch(e){
+      if(st)st.innerHTML=`<span style="color:var(--red)">Invalid JSON: ${e.message}</span>`;
+      this.toast('Invalid JSON — fix the syntax before saving','error');
+      return;
+    }
+    if(st)st.innerHTML='<span style="color:var(--muted)">Saving...</span>';
+    try{
+      const r=await this.api('PUT','/policies/rules',parsed);
+      if(r&&r.ok){
+        this.toast('Policy rules saved','success');
+        if(st)st.innerHTML='<span style="color:var(--green)">&#10003; Saved</span>';
+      }else{
+        const d=r?await r.json():{};
+        this.toast('Save failed: '+(d.detail||'unknown error'),'error');
+        if(st)st.innerHTML=`<span style="color:var(--red)">&#10007; ${d.detail||'Save failed'}</span>`;
+      }
+    }catch(e){this.toast('Error: '+e.message,'error');if(st)st.innerHTML=`<span style="color:var(--red)">Error: ${e.message}</span>`;}
   },
 
   loadWebhookUrls(){
     const base=window.location.origin;
     const hooks=[
-      {name:'Grafana',path:'/webhooks/grafana',color:'#f97316',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',desc:'Alerting & panels'},
-      {name:'CloudWatch (SNS)',path:'/webhooks/cloudwatch',color:'#f59e0b',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',desc:'AWS alarms & SNS'},
-      {name:'OpsGenie',path:'/webhooks/opsgenie',color:'#3b82f6',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/></svg>',desc:'On-call alerts'},
-      {name:'PagerDuty',path:'/webhooks/pagerduty',color:'#22c55e',icon:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',desc:'Incident events'},
+      {name:'Grafana',path:'/webhooks/grafana',color:'#f97316',desc:'Alerting & panels'},
+      {name:'CloudWatch',path:'/webhooks/cloudwatch',color:'#f59e0b',desc:'AWS alarms via SNS'},
+      {name:'OpsGenie',path:'/webhooks/opsgenie',color:'#3b82f6',desc:'On-call alerts'},
+      {name:'PagerDuty',path:'/webhooks/pagerduty',color:'#22c55e',desc:'Incident events'},
     ];
-    document.getElementById('webhook-urls').innerHTML=`
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        ${hooks.map(h=>`
-        <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;background:var(--surface2);border-radius:10px;border:1px solid var(--border)">
-          <div style="width:36px;height:36px;border-radius:9px;background:${h.color}18;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:${h.color}">
-            ${h.icon}
-          </div>
-          <div style="flex:1;min-width:0">
-            <div style="font-size:.84em;font-weight:600;margin-bottom:2px">${h.name}</div>
-            <div style="font-size:.72em;color:var(--muted);margin-bottom:4px">${h.desc}</div>
-            <code style="font-size:.72em;color:var(--cyan);font-family:'SF Mono',ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block">${base+h.path}</code>
-          </div>
-          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="navigator.clipboard.writeText('${base+h.path}').then(()=>App.toast('Copied!','success'))">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            Copy
-          </button>
-        </div>`).join('')}
-      </div>`;
+    const el=document.getElementById('webhook-urls');
+    if(!el)return;
+    el.innerHTML=hooks.map(h=>`
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)">
+        <div style="width:8px;height:8px;border-radius:50%;background:${h.color};flex-shrink:0"></div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:.8em;font-weight:600;color:var(--text)">${h.name} <span style="font-weight:400;color:var(--muted)">&mdash; ${h.desc}</span></div>
+          <code style="font-size:.72em;color:var(--cyan);font-family:'SF Mono',ui-monospace,monospace;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${base+h.path}</code>
+        </div>
+        <button onclick="navigator.clipboard.writeText('${base+h.path}').then(()=>App.toast('Copied!','success'))" style="background:none;border:1px solid var(--border);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:.72em;color:var(--muted);transition:all .12s;flex-shrink:0" onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--text)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">Copy</button>
+      </div>`).join('');
   },
 
 };
 
 document.addEventListener('DOMContentLoaded', () => App.init());
+document.addEventListener('click', ()=>{ const dd=document.getElementById('user-dropdown'); if(dd&&dd.style.display==='block')App.closeUserDropdown(); });
 </script>
+
 </body>
 </html>
 """
@@ -3942,7 +6114,7 @@ def setup_password_page(token: str = ""):
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Set Your Password — NexusOps</title>
+  <title>Set Your Password — NsOps</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
   <style>
     *{{margin:0;padding:0;box-sizing:border-box}}
@@ -3980,7 +6152,7 @@ def setup_password_page(token: str = ""):
       <div class="logo-icon">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
       </div>
-      <span class="logo-text">NexusOps</span>
+      <span class="logo-text">NsOps</span>
     </div>
     <h2>Set Your Password</h2>
     <p class="sub">Welcome, <strong>{username}</strong>. Enter the OTP from your invite email and choose a password.</p>
@@ -4583,17 +6755,6 @@ def aws_diagnose(req: AWSDiagnoseRequest):
 def k8s_check():
     return {"k8s_check": check_k8s_cluster()}
 
-@app.get("/check/k8s/nodes")
-def k8s_nodes():
-    return {"k8s_nodes": check_k8s_nodes()}
-
-@app.get("/check/k8s/pods")
-def k8s_pods(namespace: str = "default"):
-    return {"k8s_pods": check_k8s_pods(namespace)}
-
-@app.get("/check/k8s/deployments")
-def k8s_deployments(namespace: str = "default"):
-    return {"k8s_deployments": check_k8s_deployments(namespace)}
 
 @app.post("/k8s/restart")
 def k8s_restart(req: K8sRestartRequest, x_user: Optional[str] = Header(default=None)):
@@ -4622,13 +6783,8 @@ def k8s_logs(namespace: str, pod: str, container: str = "", tail_lines: int = 10
         raise HTTPException(status_code=400, detail=result.get("error"))
     return {"result": result}
 
-@app.post("/incident/war-room")
-def incident_war_room():
-    result = create_war_room()
-    return {"war_room": result}
-
 @app.post("/incident/jira")
-def incident_jira(summary: str = "AI DevOps Incident", description: str = "Created via NexusOps"):
+def incident_jira(summary: str = "AI DevOps Incident", description: str = "Created via NsOps"):
     result = create_incident(summary=summary, description=description)
     if "error" in result:
         return {"jira_incident": result, "ok": False}
@@ -4668,6 +6824,44 @@ def memory_incidents_list(limit: int = 10):
 def memory_incident(incident: Event):
     record = store_incident(incident.model_dump())
     return {"stored": record}
+
+@app.get("/policies/rules", tags=["policies"])
+def get_policy_rules(auth: AuthContext = Depends(require_viewer)):
+    """Return the current policy rules JSON."""
+    import json as _json
+    from pathlib import Path as _Path
+    rules_path = _Path(__file__).resolve().parents[1] / "policies" / "rules.json"
+    try:
+        return _json.loads(rules_path.read_text())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read rules.json: {exc}")
+
+
+@app.put("/policies/rules", tags=["policies"])
+def update_policy_rules(rules: Dict[str, Any], auth: AuthContext = Depends(require_admin)):
+    """Overwrite policy rules JSON. Admin only. Changes take effect on next policy evaluation."""
+    import json as _json
+    from pathlib import Path as _Path
+    rules_path = _Path(__file__).resolve().parents[1] / "policies" / "rules.json"
+    # Validate required top-level keys
+    required_keys = {"blocked_actions", "action_permissions", "role_permissions", "guardrails"}
+    missing = required_keys - set(rules.keys())
+    if missing:
+        raise HTTPException(status_code=422, detail=f"Missing required keys: {missing}")
+    try:
+        tmp = rules_path.with_suffix(".tmp")
+        tmp.write_text(_json.dumps(rules, indent=2))
+        tmp.replace(rules_path)
+        # Reload the policy engine's cached rules if it has one
+        try:
+            from app.policies.policy_engine import PolicyEngine as _PE
+            _PE._rules_cache = None  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return {"success": True, "message": "Policy rules updated"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not write rules.json: {exc}")
+
 
 @app.post("/security/check")
 def security_check(req: AccessRequest):
@@ -4740,11 +6934,74 @@ def incident_run(req: IncidentRunRequest, x_user: Optional[str] = Header(default
         },
     )
 
-    # Store state for resume-after-approval
-    if result.get("status") == "awaiting_approval":
+    # Normalize status — routing function mutation may not persist in LangGraph
+    if result.get("requires_human_approval") and result.get("status") not in ("completed", "failed", "escalated"):
+        result["status"] = "awaiting_approval"
+
+    # Store state for resume-after-approval and create approval request
+    if result.get("status") == "awaiting_approval" or result.get("requires_human_approval"):
         cid = result.get("correlation_id")
         if cid:
             _PENDING_PIPELINE_STATES[cid] = result
+            # Create the approval record so it appears in /approvals/pending
+            try:
+                from app.incident.approval import create_approval_request, post_approval_to_slack
+                plan = result.get("plan") or {}
+                approval = create_approval_request(
+                    incident_id  = result.get("incident_id", "unknown"),
+                    actions      = plan.get("actions", []),
+                    plan         = plan.get("summary") or result.get("approval_reason") or "AI-generated remediation plan",
+                    risk_score   = float(result.get("risk_score") or plan.get("risk_score") or 0.5),
+                    cost_report  = result.get("cost_report"),
+                    requested_by = (result.get("metadata") or {}).get("user", "pipeline"),
+                )
+                # Overwrite correlation_id so resume can look up both records
+                _PENDING_PIPELINE_STATES[approval.correlation_id] = result
+                _PENDING_PIPELINE_STATES.pop(cid, None)
+                result["correlation_id"] = approval.correlation_id
+                # Notify approvers on Slack if a channel is configured
+                slack_ch = (result.get("metadata") or {}).get("slack_channel", "")
+                if slack_ch:
+                    try:
+                        post_approval_to_slack(approval, slack_ch)
+                    except Exception:
+                        pass
+                # Email notification — approval required
+                try:
+                    from app.integrations.email import send_approval_required
+                    _plan = result.get("plan") or {}
+                    send_approval_required(
+                        incident_id     = result.get("incident_id", "unknown"),
+                        description     = result.get("description", ""),
+                        risk            = _plan.get("risk", "unknown"),
+                        confidence      = float(_plan.get("confidence", 0)),
+                        actions         = _plan.get("actions", []),
+                        approval_reason = result.get("approval_reason", ""),
+                    )
+                except Exception:
+                    pass
+            except Exception as _approval_exc:
+                import logging as _log
+                _log.getLogger(__name__).warning("approval_creation_failed: %s", _approval_exc)
+    else:
+        # Pipeline completed/failed — send completion email
+        try:
+            from app.integrations.email import send_incident_completed
+            _plan = result.get("plan") or {}
+            send_incident_completed(
+                incident_id       = result.get("incident_id", "unknown"),
+                description       = result.get("description", ""),
+                risk              = _plan.get("risk", "unknown"),
+                status            = result.get("status", "completed"),
+                root_cause        = _plan.get("root_cause", ""),
+                summary           = _plan.get("summary", ""),
+                actions_executed  = len(result.get("executed_actions", [])),
+                validation_passed = bool(result.get("validation_passed", False)),
+            )
+        except Exception:
+            pass
+    # Cache result for later viewing
+    _cache_result(result)
     return result
 
 
@@ -4762,6 +7019,68 @@ class IncidentRunV2Request(BaseModel):
     slack_channel:  str  = "#incidents"
     llm_provider:   str  = ""
     metadata:       Optional[Dict[str, Any]] = None
+
+def _cache_result(result: dict):
+    """Cache a pipeline result so it can be retrieved later by incident_id."""
+    iid = result.get("incident_id")
+    if not iid:
+        return
+    if len(_RECENT_RESULTS) >= _MAX_CACHED_RESULTS:
+        # Evict oldest entry
+        oldest = next(iter(_RECENT_RESULTS))
+        _RECENT_RESULTS.pop(oldest, None)
+    _RECENT_RESULTS[iid] = result
+
+
+@app.get("/incidents/{incident_id}/result")
+def get_incident_result(incident_id: str, auth: AuthContext = Depends(require_viewer)):
+    """Return pipeline result for an incident — from cache or memory store."""
+    # 1. Try in-session cache (full result with plan/actions)
+    result = _RECENT_RESULTS.get(incident_id)
+    if result:
+        return result
+
+    # 2. Fall back to memory store (summary data only)
+    try:
+        from app.memory.vector_db import search_similar_incidents
+        results = search_similar_incidents("", n_results=200)
+        if results and isinstance(results[0], list):
+            results = results[0]
+        incident = next((r for r in results if r.get("id") == incident_id), None)
+        if incident:
+            import json as _json
+            payload = incident.get("payload", {})
+            if isinstance(payload, str):
+                try:
+                    payload = _json.loads(payload)
+                except Exception:
+                    payload = {}
+            # Reconstruct a display-friendly result from stored metadata
+            return {
+                "incident_id": incident_id,
+                "status":      payload.get("status") or incident.get("status", "unknown"),
+                "from_memory": True,
+                "plan": {
+                    "root_cause":  payload.get("root_cause", ""),
+                    "summary":     payload.get("summary", ""),
+                    "risk":        payload.get("risk", "unknown"),
+                    "confidence":  payload.get("confidence", 0),
+                    "actions":     [],
+                },
+                "description":      payload.get("description", incident.get("description", "")),
+                "executed_actions": [],
+                "blocked_actions":  [],
+                "errors":           [],
+                "aws_context":      {"_data_available": False},
+                "k8s_context":      {"_data_available": False},
+                "github_context":   {"_data_available": False},
+                "created_at":       payload.get("created_at", ""),
+            }
+    except Exception:
+        pass
+
+    raise HTTPException(status_code=404, detail="Incident not found")
+
 
 @app.post("/v2/incident/run")
 def incident_run_v2(req: IncidentRunV2Request,
@@ -5891,45 +8210,83 @@ def warroom_create(req: WarRoomRequest, auth: AuthContext = Depends(require_deve
         "github_context": context.get("github", {}),
     })
 
-    result = {
-        "incident_id": req.incident_id,
-        "analysis":    synthesis,
-        "sources":     context.get("configured", []),
-        "slack":       None,
-    }
+    slack_channel = ""
+    slack_info = None
 
     # 3. Create Slack war room channel + post findings
     if req.post_to_slack:
         channel_result = create_incident_channel(req.incident_id, topic=f"{req.severity.upper()} — {req.description[:80]}")
         if channel_result.get("success"):
             channel_id = channel_result["channel_id"]
+            slack_channel = channel_result.get("channel_name", channel_id)
             post_incident_summary(
-                channel    = channel_id,
+                channel     = channel_id,
                 incident_id = req.incident_id,
-                summary    = synthesis.get("summary", req.description),
-                findings   = synthesis.get("findings", []),
-                severity   = synthesis.get("severity", req.severity),
-                actions    = synthesis.get("actions_to_take", []),
+                summary     = synthesis.get("summary", req.description),
+                findings    = synthesis.get("findings", []),
+                severity    = synthesis.get("severity", req.severity),
+                actions     = synthesis.get("actions_to_take", []),
             )
-            result["slack"] = {
+            slack_info = {
                 "channel_name": channel_result.get("channel_name"),
                 "channel_url":  channel_result.get("channel_url"),
             }
         else:
-            result["slack"] = {"error": channel_result.get("error")}
+            slack_info = {"error": channel_result.get("error")}
 
-    return result
+    # 4. Create war room AI session (persisted, linked to this incident)
+    from app.incident.war_room_intelligence import create_war_room_session
+    pipeline_state = {
+        "root_cause":      synthesis.get("root_cause", "Under investigation"),
+        "severity":        req.severity,
+        "status":          "active",
+        "actions_taken":   synthesis.get("actions_to_take", []),
+        "aws_context":     context.get("aws", {}),
+        "k8s_context":     context.get("k8s", {}),
+        "github_context":  context.get("github", {}),
+    }
+    war_room = create_war_room_session(
+        incident_id   = req.incident_id,
+        description   = req.description,
+        pipeline_state= pipeline_state,
+        slack_channel = slack_channel,
+    )
+
+    return {
+        "war_room_id": war_room.war_room_id,
+        "incident_id": req.incident_id,
+        "slack_channel": slack_channel,
+        "analysis":    synthesis,
+        "sources":     context.get("configured", []),
+        "slack":       slack_info,
+        "created_at":  war_room.created_at,
+    }
 
 @app.get("/health/full")
 def health_full():
-    """Full health check — collects universal context and returns per-integration status."""
+    """Full health check — AWS, K8s, Grafana, Linux node, and all integrations."""
+    from app.plugins.linux_checker import check_linux_node
+    from app.plugins.grafana_checker import check_grafana
     context: dict = {}
     try:
         context = collect_all_context(hours=1)
     except Exception:
         pass
-    health = summarize_health(context)
-    return {"status": "healthy" if health["healthy"] else "degraded", "health": health}
+    health  = summarize_health(context)
+    linux   = check_linux_node()
+    grafana = check_grafana()
+
+    # Roll Grafana firing alerts into overall status
+    overall = "healthy" if health["healthy"] else "degraded"
+    if grafana.get("firing_alerts", 0) > 0:
+        overall = "degraded"
+
+    return {
+        "status":     overall,
+        "health":     health,
+        "linux_node": linux,
+        "grafana":    grafana,
+    }
 
 
 @app.get("/github/repos")
@@ -6007,14 +8364,17 @@ def health_integrations():
     # ── Other integrations ────────────────────────────────────────────────
     def _env_set(key: str) -> bool:
         v = os.getenv(key, "").strip()
-        return bool(v) and not v.startswith("your_")
+        if not v:
+            return False
+        _placeholders = ("your_", "your-", "example", "placeholder", "changeme", "xxx", "<", "TODO")
+        return not any(p in v.lower() for p in _placeholders)
 
     integrations = {
         "slack":    {"configured": _env_set("SLACK_BOT_TOKEN")},
         "jira":     {"configured": _env_set("JIRA_URL") and _env_set("JIRA_TOKEN")},
         "opsgenie": {"configured": _env_set("OPSGENIE_API_KEY")},
         "aws":      {"configured": _env_set("AWS_ACCESS_KEY_ID") or bool(os.getenv("AWS_PROFILE"))},
-        "k8s":      {"configured": bool(os.getenv("KUBECONFIG") or os.getenv("K8S_IN_CLUSTER"))},
+        "k8s":      {"configured": bool(os.getenv("KUBECONFIG")) or os.getenv("K8S_IN_CLUSTER","").lower() == "true"},
         "grafana":  {"configured": _env_set("GRAFANA_URL") and _env_set("GRAFANA_TOKEN")},
         "gitlab":   {"configured": _env_set("GITLAB_TOKEN")},
     }
@@ -6029,20 +8389,16 @@ def health_integrations():
 # ── Clean public-facing aliases for all UI-shown paths ───────
 
 # K8s — canonical clean paths
-@app.get("/k8s/health")
-def k8s_health():
-    return {"k8s_check": check_k8s_cluster()}
-
 @app.get("/k8s/pods")
-def k8s_pods_clean(namespace: str = "default"):
+def k8s_pods(namespace: str = "default"):
     return {"k8s_pods": check_k8s_pods(namespace)}
 
 @app.get("/k8s/deployments")
-def k8s_deployments_clean(namespace: str = "default"):
+def k8s_deployments(namespace: str = "default"):
     return {"k8s_deployments": check_k8s_deployments(namespace)}
 
 @app.get("/k8s/nodes")
-def k8s_nodes_clean():
+def k8s_nodes():
     return {"k8s_nodes": check_k8s_nodes()}
 
 @app.post("/k8s/diagnose")
@@ -6257,12 +8613,57 @@ async def websocket_events(websocket: WebSocket):
 
 # ── Approvals ────────────────────────────────────────────────────────────────
 
+class QuickActionRequest(BaseModel):
+    incident_id: str
+    action: dict
+    risk_score: float = 0.5
+
+@app.post("/approvals/action", tags=["approvals"])
+def create_quick_action_approval(req: QuickActionRequest, auth: AuthContext = Depends(require_developer)):
+    """Create a single-action approval request from an incident result card."""
+    try:
+        from app.incident.approval import create_approval_request
+        action_type = req.action.get("type", "unknown")
+        plan_summary = req.action.get("description") or f"Execute {action_type} on {req.incident_id}"
+        approval = create_approval_request(
+            incident_id=req.incident_id,
+            actions=[req.action],
+            plan=plan_summary,
+            risk_score=req.risk_score,
+            cost_report=None,
+            requested_by=auth.username,
+        )
+        # Store a minimal resumable state so the resume endpoint can execute it
+        _PENDING_PIPELINE_STATES[approval.correlation_id] = {
+            "incident_id":    req.incident_id,
+            "correlation_id": approval.correlation_id,
+            "plan":           {"actions": [req.action], "risk": "medium", "confidence": 1.0, "summary": plan_summary},
+            "metadata":       {"user": auth.username, "role": auth.role},
+            "auto_remediate": True,
+            "dry_run":        False,
+            "errors":         [],
+            "retry_count":    0,
+            "status":         "awaiting_approval",
+        }
+        return {"success": True, "correlation_id": approval.correlation_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @app.get("/approvals/pending", tags=["approvals"])
 def list_pending_approvals_endpoint(auth: AuthContext = Depends(require_viewer)):
     try:
         from app.incident.approval import list_pending_approvals
         approvals = list_pending_approvals()
         return {"approvals": [vars(a) for a in approvals]}
+    except Exception as e:
+        return {"approvals": [], "error": str(e)}
+
+@app.get("/approvals/history", tags=["approvals"])
+def list_approval_history_endpoint(auth: AuthContext = Depends(require_viewer)):
+    """Return all approval records (pending + decided) from the persistence store."""
+    try:
+        from app.incident.approval import _pending_approvals
+        return {"approvals": [vars(a) for a in _pending_approvals.values()]}
     except Exception as e:
         return {"approvals": [], "error": str(e)}
 
@@ -6320,10 +8721,24 @@ def resume_approved_pipeline(
     # Retrieve the saved pipeline state
     saved_state = _PENDING_PIPELINE_STATES.get(correlation_id)
     if not saved_state:
-        raise HTTPException(
-            status_code=404,
-            detail="Pipeline state not found — it may have expired. Re-run the incident.",
-        )
+        # State was lost (e.g. server restart). Reconstruct from the approval record.
+        # This covers quick-action approvals created via /approvals/action.
+        saved_state = {
+            "incident_id":    approval.incident_id,
+            "correlation_id": correlation_id,
+            "plan": {
+                "actions":    approval.actions,
+                "risk":       "medium",
+                "confidence": 1.0,
+                "summary":    approval.plan_summary,
+            },
+            "metadata":       {"user": approval.requested_by, "role": "admin"},
+            "auto_remediate": True,
+            "dry_run":        False,
+            "errors":         [],
+            "retry_count":    0,
+            "status":         "awaiting_approval",
+        }
 
     # Build a resumable state: restore plan but allow execution
     resume_state = dict(saved_state)
@@ -6334,12 +8749,9 @@ def resume_approved_pipeline(
 
     # Filter plan actions to only those approved
     plan = resume_state.get("plan") or {}
-    all_actions = plan.get("actions", [])
-    if approval.approved_action_indices:
-        approved_actions = [
-            all_actions[i] for i in approval.approved_action_indices
-            if i < len(all_actions)
-        ]
+    # approval.approved_actions holds the actual filtered action dicts
+    approved_actions = getattr(approval, "approved_actions", None)
+    if approved_actions:
         resume_state["plan"] = {**plan, "actions": approved_actions}
 
     try:
@@ -6363,8 +8775,9 @@ def resume_approved_pipeline(
         resume_state["status"] = "failed"
         resume_state["errors"] = resume_state.get("errors", []) + [str(exc)]
 
-    # Clean up pending state
+    # Clean up pending state and cache result for UI display
     _PENDING_PIPELINE_STATES.pop(correlation_id, None)
+    _cache_result(resume_state)
     return resume_state
 
 # ── War Room AI ───────────────────────────────────────────────────────────────
@@ -6389,6 +8802,16 @@ def list_active_war_rooms(auth: AuthContext = Depends(require_viewer)):
         return {"war_rooms": _list()}
     except Exception as e:
         return {"war_rooms": [], "error": str(e)}
+
+@app.get("/warroom/{war_room_id}/timeline", tags=["warroom"])
+def get_war_room_timeline(war_room_id: str, auth: AuthContext = Depends(require_viewer)):
+    """Return the chronological event timeline for a war room."""
+    try:
+        from app.incident.war_room_intelligence import generate_incident_timeline
+        events = generate_incident_timeline(war_room_id)
+        return {"timeline": events, "count": len(events)}
+    except Exception as e:
+        return {"timeline": [], "count": 0, "error": str(e)}
 
 
 class SlackSendRequest(BaseModel):
@@ -6442,7 +8865,7 @@ def send_war_room_slack_message(war_room_id: str, req: SlackSendRequest, auth: A
         if not channel:
             raise HTTPException(status_code=400, detail="No Slack channel linked to this war room")
         from app.integrations.slack import post_message
-        text = f"*{req.sent_by}* (via NexusOps): {req.message}"
+        text = f"*{req.sent_by}* (via NsOps): {req.message}"
         result = post_message(channel=channel, text=text)
         return {"success": result.get("ok", False), "channel": channel}
     except HTTPException:
@@ -6783,3 +9206,111 @@ async def cost_resources_endpoint(auth: AuthContext = Depends(require_viewer)):
     return {"resources": resources, "total_monthly_usd": round(total, 2), "count": len(resources)}
 
 
+
+
+# ── VS Code Integration Endpoints ─────────────────────────────────────────────
+
+def _vscode():
+    from app.integrations import vscode as _vs
+    return _vs
+
+
+@app.get("/vscode/status", tags=["vscode"])
+async def vscode_status(u=Depends(require_viewer)):
+    vs = _vscode()
+    return vs.status()
+
+
+@app.post("/vscode/notify", tags=["vscode"])
+async def vscode_notify(req: Request, u=Depends(require_viewer)):
+    body = await req.json()
+    vs = _vscode()
+    return vs.notify(
+        message=body.get("message", ""),
+        level=body.get("level", "info"),
+        actions=body.get("actions"),
+    )
+
+
+@app.post("/vscode/open", tags=["vscode"])
+async def vscode_open(req: Request, u=Depends(require_developer)):
+    body = await req.json()
+    vs = _vscode()
+    return vs.open_file(
+        file_path=body.get("file_path", ""),
+        line=body.get("line"),
+        column=body.get("column"),
+        preview=body.get("preview", False),
+    )
+
+
+@app.post("/vscode/highlight", tags=["vscode"])
+async def vscode_highlight(req: Request, u=Depends(require_developer)):
+    body = await req.json()
+    vs = _vscode()
+    return vs.highlight_lines(
+        file_path=body.get("file_path", ""),
+        lines=body.get("lines", []),
+    )
+
+
+@app.post("/vscode/terminal", tags=["vscode"])
+async def vscode_terminal(req: Request, u=Depends(require_developer)):
+    body = await req.json()
+    vs = _vscode()
+    return vs.run_in_terminal(
+        command=body.get("command", ""),
+        name=body.get("name", "NsOps"),
+        cwd=body.get("cwd"),
+    )
+
+
+@app.post("/vscode/diff", tags=["vscode"])
+async def vscode_diff(req: Request, u=Depends(require_developer)):
+    body = await req.json()
+    vs = _vscode()
+    return vs.show_diff(
+        title=body.get("title", "NsOps Diff"),
+        original_path=body.get("original_path"),
+        original_content=body.get("original_content"),
+        modified_path=body.get("modified_path"),
+        modified_content=body.get("modified_content"),
+    )
+
+
+@app.post("/vscode/problems", tags=["vscode"])
+async def vscode_problems(req: Request, u=Depends(require_developer)):
+    body = await req.json()
+    vs = _vscode()
+    return vs.inject_problems(
+        problems=body.get("problems", []),
+        source=body.get("source", "NsOps"),
+    )
+
+
+@app.post("/vscode/clear-highlights", tags=["vscode"])
+async def vscode_clear_highlights(u=Depends(require_developer)):
+    vs = _vscode()
+    return vs.clear_highlights()
+
+
+@app.post("/vscode/output", tags=["vscode"])
+async def vscode_output(req: Request, u=Depends(require_viewer)):
+    body = await req.json()
+    vs = _vscode()
+    return vs.write_output(
+        message=body.get("message", ""),
+        show=body.get("show", False),
+    )
+
+
+@app.post("/vscode/incident/{incident_id}", tags=["vscode"])
+async def vscode_open_incident(incident_id: str, req: Request, u=Depends(require_developer)):
+    body = await req.json()
+    vs = _vscode()
+    return vs.open_incident_context(
+        incident_id=incident_id,
+        root_cause=body.get("root_cause", ""),
+        file_path=body.get("file_path"),
+        problem_line=body.get("problem_line"),
+    )

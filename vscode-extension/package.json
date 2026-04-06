@@ -1,0 +1,55 @@
+{
+  "name": "nsops-vscode",
+  "displayName": "NsOps AI DevOps",
+  "description": "NsOps AI DevOps Platform integration for VS Code — receive file opens, highlights, notifications and terminal commands from the platform.",
+  "version": "1.0.0",
+  "publisher": "nsops",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "nsops.startServer",
+        "title": "NsOps: Start Integration Server"
+      },
+      {
+        "command": "nsops.stopServer",
+        "title": "NsOps: Stop Integration Server"
+      },
+      {
+        "command": "nsops.showStatus",
+        "title": "NsOps: Show Status"
+      }
+    ],
+    "configuration": {
+      "title": "NsOps",
+      "properties": {
+        "nsops.serverPort": {
+          "type": "number",
+          "default": 6789,
+          "description": "Local HTTP server port for NsOps platform integration"
+        },
+        "nsops.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the integration server when VS Code opens"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "echo 'ready'",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^2.32.0"
+  }
+}

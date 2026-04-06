@@ -11,20 +11,26 @@ One platform to detect incidents, analyse root cause, plan and safely execute re
 | Capability | Description |
 |---|---|
 | 🤖 **Multi-Agent Incident Pipeline** | LangGraph-orchestrated agents collect context, plan remediation, score risk, execute safely with policy guardrails, validate outcome, and store to memory |
+| 🎬 **Real-Time Pipeline Streaming** | Animated 5-stage pipeline UI — watch AI work step-by-step: Context → Analysis → Plan → Execute → Complete |
 | 🔍 **Pre-Deployment Assessment** | Before any deploy, the AI assesses cluster state, active alarms, and past incidents → go / no-go decision |
 | 🎫 **Jira → Auto PR** | When a Jira change-request ticket is created, the AI reads it and opens a GitHub PR with file patches |
 | ☁️ **AWS Observability** | Read-only collection across EC2, ECS, Lambda, RDS, ALB, CloudWatch, CloudTrail, S3, SQS, DynamoDB, Route53, SNS |
 | ☸️ **Kubernetes Operations** | Health checks, rolling restarts, scale deployments, pod logs, unhealthy pod detection |
-| 💰 **Smart Cost Analysis** | Live AWS spend (Cost Explorer), resource-level cost breakdown, multi-account AWS Organizations view, on-demand price estimation, Terraform plan cost analysis |
+| 💰 **Smart Cost Analysis** | Live AWS spend (Cost Explorer), interactive Chart.js bar and trend charts, multi-account AWS Organizations view, on-demand price estimation, Terraform plan cost analysis |
 | 📈 **Predictive Scaling** | Analyse CloudWatch metric trends and predict scaling needs before a breach occurs |
 | 🔎 **AI PR Review** | Reviews GitHub PRs for security issues, infra concerns, and code quality |
 | 🔐 **JWT Auth + RBAC** | JWT-based authentication with role-based access control (admin / developer / viewer) enforced on every endpoint |
 | 🧠 **ChromaDB Memory** | All incidents stored in vector DB; similar past incidents feed future planning decisions |
 | 🔁 **Continuous Monitoring** | Background loop polls K8s/AWS for anomalies and auto-triggers the pipeline |
 | 🔀 **Multi-LLM Support** | Claude → Groq → Ollama — automatic provider detection and fallback chain with live status indicator |
-| 💬 **Slack War Room Bot** | Dedicated incident channel auto-created with full AI analysis; bot answers live questions in thread |
+| 💬 **Slack War Room** | Dedicated incident channel auto-created with full AI analysis; redesigned 2-column command-center UI with quick prompts and incident sidebar |
 | 🏥 **Post-Mortem Reports** | AI-generated company-grade post-mortem documents enriched from vector memory |
 | 🌐 **Nginx + TLS** | Production-grade reverse proxy with rate limiting, HTTPS redirect, security headers, WebSocket support |
+| 💻 **VS Code Integration** | Live incident feed, file open, line highlights, terminal commands, Problems panel — all streamed to your IDE |
+| 📧 **Email Notifications** | HTML emails on approval requests and incident completion with risk colour-coding |
+| 📊 **Grafana Plugin** | Read-only health snapshots — firing alerts, datasource status, recent annotations |
+| 📱 **Mobile Responsive** | Full mobile support — hamburger menu, collapsible sidebar, optimised layouts for phone and tablet |
+| 🧭 **Onboarding Wizard** | First-time setup wizard guides you through connecting AWS, GitHub, Slack, and Jira |
 
 ---
 
@@ -164,9 +170,18 @@ app/
 │   └── invite.py          # Invite token management
 │
 ├── plugins/
-│   ├── aws_checker.py
-│   ├── k8s_checker.py
-│   └── linux_checker.py
+│   ├── aws_checker.py       # EC2, ECS, RDS, Lambda, ALB, DynamoDB, Route53, SNS, SQS
+│   ├── k8s_checker.py       # Pods, deployments, nodes, statefulsets, daemonsets
+│   ├── linux_checker.py     # CPU, memory, swap, disk
+│   └── grafana_checker.py   # Firing alerts, datasources, annotations
+│
+├── integrations/
+│   ├── vscode.py            # VS Code IDE bridge — open files, highlight, notify, terminal
+│   └── email.py             # HTML email notifications for approvals and completions
+│
+├── vscode-extension/
+│   ├── extension.js         # VS Code extension — local HTTP server on port 6789
+│   └── package.json         # Extension manifest
 │
 └── correlation/
     └── engine.py          # Event correlation logic
@@ -346,7 +361,49 @@ curl -X POST http://localhost:8000/security/roles/assign \
 | `REDIS_URL` | Rate limiting | Redis connection URL (default: `redis://localhost:6379/0`) |
 | `CORS_ORIGINS` | Optional | Comma-separated allowed CORS origins |
 
+### VS Code
+
+| Variable | Default | Description |
+|---|---|---|
+| `VSCODE_BRIDGE_URL` | `http://127.0.0.1:6789` | URL of the NsOps VS Code extension server |
+| `VSCODE_BRIDGE_TIMEOUT` | `5` | HTTP timeout in seconds for VS Code calls |
+
+### Email Notifications
+
+| Variable | Required for | Description |
+|---|---|---|
+| `SMTP_HOST` | Email | SMTP server hostname |
+| `SMTP_PORT` | Email | SMTP port (587 for TLS, 465 for SSL) |
+| `SMTP_USER` | Email | SMTP login username |
+| `SMTP_PASSWORD` | Email | SMTP password or app password |
+| `ALERT_EMAIL_FROM` | Email | From address (defaults to `SMTP_USER`) |
+| `ALERT_EMAIL_TO` | Email | Comma-separated recipient addresses |
+
 All integrations degrade gracefully — missing credentials return a structured error rather than crashing the platform.
+
+---
+
+## Dashboard
+
+The main dashboard gives a full-platform overview at a glance.
+
+### Stat Cards (clickable)
+
+| Card | Navigates to |
+|---|---|
+| **Active Incidents** | Incidents list |
+| **Pending Approvals** | Approvals queue |
+| **AWS Alarms** | AWS monitoring |
+| **K8s Clusters** | Infrastructure → Kubernetes tab |
+
+### Dashboard Sections
+
+| Section | Description |
+|---|---|
+| **Integration Health** | Live grid showing connection status for all configured integrations (AWS, GitHub, Slack, Jira, Grafana, K8s) |
+| **Recent Activity** | Last 10 platform events — incidents run, approvals, pipeline completions |
+| **Recent Incidents** | Latest 5 incidents with status, risk level, and one-click open |
+| **Cost Overview** | MTD spend, last month comparison, and a Chart.js trend chart |
 
 ---
 
@@ -356,7 +413,7 @@ The Cost Analysis tab has five views:
 
 | Tab | Description |
 |---|---|
-| **Overview** | MTD spend, last month total, forecast, MoM trend, top services bar chart, 6-month trend |
+| **Overview** | MTD spend, last month total, forecast, MoM trend, interactive Chart.js horizontal bar chart (top services) + 6-month line trend chart |
 | **By Resource** | Searchable table of every EC2/RDS/Lambda/ECS resource with estimated monthly and annual cost |
 | **By Account** | Cost Explorer breakdown by linked AWS account with spend bars and % of total |
 | **Organizations** | Per-account spend list + proportional bar chart with AWS Organizations account names |
@@ -373,6 +430,15 @@ Data sources:
 ## Multi-Agent Pipeline (v2)
 
 **`POST /v2/incident/run`** — the flagship endpoint.
+
+The UI renders a live animated 5-stage pipeline as the request runs:
+
+```
+🔍 Collecting Context  →  🤖 AI Analysis  →  📋 Building Plan
+→  ⚡ Executing Actions  →  ✅ Pipeline Complete
+```
+
+Each stage shows a pulsing indicator while active, then snaps to ✅ done (or ⚠️ warn / ❌ error). Real results fill in when the API responds.
 
 ```
 Input → collect_context → PlannerAgent → DecisionAgent
@@ -435,6 +501,36 @@ Actions are evaluated against `app/policies/rules.json` before execution. No Pyt
 
 ---
 
+## War Room Command Center
+
+The War Room is a 2-column incident command interface:
+
+```
+┌────────────────────────────────┬──────────────────┐
+│  Live Chat (AI + team)         │  Incident Info   │
+│                                │  ─────────────   │
+│  [ message bubbles ]           │  ID / Severity   │
+│                                │  Status / Time   │
+│  [ input box ]                 │  Participants    │
+│                                │  ─────────────   │
+│                                │  Quick Prompts   │
+│                                │  ─────────────   │
+│                                │  Resolve         │
+└────────────────────────────────┴──────────────────┘
+```
+
+**Quick Prompts** (one-click questions sent to the AI):
+- What's the root cause?
+- Show me the timeline
+- What should we do next?
+- Check AWS alarms
+- Any recent deployments?
+- Page the on-call engineer
+
+**Resolve** button closes the war room and triggers post-mortem generation.
+
+---
+
 ## Slack War Room Bot
 
 When a war room is created (`POST /warroom/create`), the platform:
@@ -494,6 +590,35 @@ Register `https://your-platform/webhooks/github` in GitHub:
 Set `GITHUB_WEBHOOK_SECRET` in `.env` — the platform verifies HMAC-SHA256 signatures on every request.
 
 Triggers on: `push` to `main`/`master`, PR `opened`/`synchronize` events.
+
+---
+
+## Onboarding Wizard
+
+On first login, a step-by-step wizard guides new users through integration setup:
+
+| Step | What it configures |
+|---|---|
+| **1. AWS** | Region, Access Key ID, Secret Key |
+| **2. GitHub** | Personal access token, default repository |
+| **3. Slack** | Bot token, default channel |
+| **4. Jira** | Instance URL, user email, API token, project key |
+
+Onboarding state is stored in `localStorage` (`nsops_onboarded`) and shown exactly once per browser. It can be re-triggered from the UI if needed. All credentials are written via the `/secrets` API endpoint.
+
+---
+
+## Mobile Support
+
+The dashboard is fully responsive:
+
+| Breakpoint | Behaviour |
+|---|---|
+| `> 768px` | Full desktop layout with sidebar visible |
+| `≤ 768px` | Sidebar collapses off-screen; hamburger button appears top-left |
+| `≤ 480px` | Single-column cards, full-width stat cards, compact navigation |
+
+Tap the **☰** hamburger button to slide the sidebar in. Tapping the overlay outside the sidebar closes it.
 
 ---
 
@@ -619,6 +744,21 @@ Triggers on: `push` to `main`/`master`, PR `opened`/`synchronize` events.
 | `GET` | `/grafana/alerts` | viewer | Firing Grafana alerts |
 | `GET` | `/grafana/dashboards` | viewer | Grafana datasources |
 
+### VS Code
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/vscode/status` | viewer | Check if VS Code extension is reachable |
+| `POST` | `/vscode/notify` | viewer | Show a popup notification in VS Code |
+| `POST` | `/vscode/open` | developer | Open a file, optionally jump to a line |
+| `POST` | `/vscode/highlight` | developer | Yellow-highlight lines in a file |
+| `POST` | `/vscode/terminal` | developer | Run a shell command in VS Code terminal |
+| `POST` | `/vscode/diff` | developer | Open a two-panel diff view |
+| `POST` | `/vscode/problems` | developer | Inject entries into the Problems panel |
+| `POST` | `/vscode/clear-highlights` | developer | Remove all NsOps line decorations |
+| `POST` | `/vscode/output` | viewer | Write a message to the NsOps output channel |
+| `POST` | `/vscode/incident/{id}` | developer | Surface an incident — notify + open file + highlight |
+
 ### Deployment & Code Review
 
 | Method | Path | Auth | Description |
@@ -736,4 +876,155 @@ MONITOR_INTERVAL_SECONDS=60
 AUTO_REMEDIATE_ON_MONITOR=false   # start with alert-only
 ```
 
-The monitor (`app/monitoring/loop.py`) polls K8s for crash-looping pods and unhealthy states. When anomalies are found it triggers the v2 pipeline with `auto_remediate=AUTO_REMEDIATE_ON_MONITOR`.
+The monitor (`app/monitoring/loop.py`) polls K8s and AWS for anomalies. Detectors cover:
+
+| Detector | What it catches |
+|---|---|
+| EC2 | Stopped / terminated instances with auto-resolve when instance returns to running |
+| ECS | Services with running count < desired count |
+| CloudWatch | Alarms in ALARM state, Lambda error spikes |
+| RDS | Instance events |
+| SQS | Queues with messages in flight |
+| K8s Nodes | NotReady nodes |
+| K8s Deployments | 0 available pods |
+| Grafana | Firing alert rules |
+
+When anomalies are found it triggers the v2 pipeline with `auto_remediate=AUTO_REMEDIATE_ON_MONITOR`. All alerts and pipeline results are streamed live to the VS Code NsOps output channel if the extension is running.
+
+---
+
+## VS Code Integration
+
+The platform ships with a VS Code extension that creates a two-way bridge between the AI pipeline and your editor.
+
+### Install
+
+```bash
+cd vscode-extension
+npm install -g @vscode/vsce        # install packager once
+vsce package                        # builds nsops-vscode-1.0.0.vsix
+code --install-extension nsops-vscode-1.0.0.vsix
+```
+
+Or install the VS Code CLI directly if `code` is not in PATH:
+```bash
+/Applications/Visual\ Studio\ Code.app/Contents/Resources/app/bin/code \
+  --install-extension vscode-extension/nsops-vscode-1.0.0.vsix
+```
+
+The extension auto-starts when VS Code opens. You will see **`⚡ NsOps :6789`** in the status bar.
+
+### What streams to your editor
+
+| Event | What appears in VS Code |
+|---|---|
+| Alert detected | `🚨 ALERT [type] resource — description` + Output panel pops open |
+| Pipeline starts | `⚙️ PIPELINE [incident-id] Starting AI pipeline for: ...` |
+| Pipeline completed | `✅ PIPELINE DONE status=completed risk=medium actions=1 root_cause=...` |
+| Awaiting approval | `⏳ PIPELINE DONE` + warning notification popup |
+| Pipeline failed | `❌ PIPELINE DONE` + error notification popup |
+| Alert resolved | `✅ RESOLVED [type] resource` |
+
+View the live feed: `Cmd+Shift+U` → select **NsOps** from the Output panel dropdown.
+
+### Dashboard VS Code section
+
+Navigate to **VS Code** in the sidebar to:
+- See live connection status (green / amber / red)
+- Send notifications, open files, highlight lines, run terminal commands, inject Problems panel entries — all from the browser UI
+
+### API endpoints
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/vscode/status` | viewer | Check if VS Code extension is reachable |
+| `POST` | `/vscode/notify` | viewer | Show a popup notification in VS Code |
+| `POST` | `/vscode/open` | developer | Open a file, optionally jump to a line |
+| `POST` | `/vscode/highlight` | developer | Yellow-highlight lines in a file |
+| `POST` | `/vscode/terminal` | developer | Run a shell command in VS Code terminal |
+| `POST` | `/vscode/diff` | developer | Open a two-panel diff view |
+| `POST` | `/vscode/problems` | developer | Inject entries into the Problems panel |
+| `POST` | `/vscode/clear-highlights` | developer | Remove all NsOps line decorations |
+| `POST` | `/vscode/output` | viewer | Write a message to the NsOps output channel |
+| `POST` | `/vscode/incident/{id}` | developer | Surface an incident — notify + open file + highlight |
+
+### Use from Python
+
+```python
+from app.integrations.vscode import (
+    notify, open_file, highlight_lines,
+    run_in_terminal, inject_problems, open_incident_context
+)
+
+# Popup notification
+notify("Deployment failed on prod", level="error")
+
+# Open file and jump to a line
+open_file("/app/workers/processor.py", line=88)
+
+# Highlight problem lines with hover messages
+highlight_lines("/app/workers/processor.py", [
+    {"line": 88, "message": "OOMKilled here"}
+])
+
+# Run a command in the VS Code integrated terminal
+run_in_terminal("kubectl rollout restart deployment/api -n prod")
+
+# Surface a full incident (notify + open + highlight + output)
+open_incident_context(
+    incident_id="INC-001",
+    root_cause="OOM crash in worker",
+    file_path="/app/workers/processor.py",
+    problem_line=88,
+)
+```
+
+### Extension configuration
+
+| Setting | Default | Description |
+|---|---|---|
+| `nsops.serverPort` | `6789` | Local HTTP server port |
+| `nsops.autoStart` | `true` | Start server automatically when VS Code opens |
+
+Override in VS Code settings (`Cmd+,` → search "nsops").
+
+---
+
+## Email Notifications
+
+Set these in `.env` to receive HTML emails on incident events:
+
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@gmail.com
+SMTP_PASSWORD=your-app-password
+ALERT_EMAIL_TO=oncall@yourcompany.com,team@yourcompany.com
+```
+
+Two email types are sent automatically:
+
+| Trigger | Email sent |
+|---|---|
+| Pipeline reaches `awaiting_approval` | **Approval Required** — incident ID, description, risk level, confidence, proposed actions, approval reason |
+| Pipeline completes or fails | **Incident Completed** — status, root cause, summary, actions executed, validation result |
+
+---
+
+## Plugins
+
+Read-only health snapshot plugins live in `app/plugins/`. Each returns a consistent contract:
+
+```python
+{
+    "status": "healthy" | "degraded" | "unavailable" | "error",
+    "details": { ... }
+}
+```
+
+| Plugin | Function | What it checks |
+|---|---|---|
+| `aws_checker.py` | `check_aws_infrastructure()` | EC2, ECS, RDS, Lambda, ALB, CloudWatch, S3, SQS, DynamoDB, Route53, SNS |
+| `k8s_checker.py` | `check_k8s_cluster()` | Pods, deployments, nodes, statefulsets, daemonsets — namespace or cluster-wide |
+| `linux_checker.py` | `check_linux_health()` | CPU, memory, swap, disk — via psutil |
+| `grafana_checker.py` | `check_grafana()` | Firing alerts, datasource count, recent annotations |

@@ -58,9 +58,9 @@ class DecisionAgent(BaseAgent):
             cost_report = None
         except Exception as exc:
             self._warn("cost_analysis_failed", error=str(exc))
-            # Cost check failed — require approval as a fail-safe
-            self._warn("cost_check_failed_requiring_approval", error=str(exc))
-            needs_approval = True
+            # Only force approval on cost failure when there are destructive actions
+            if not safe_only:
+                needs_approval = True
             cost_report = None
 
         # Edge case: if there are no actions, skip approval

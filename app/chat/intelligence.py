@@ -442,6 +442,69 @@ TOOLS = [
         },
     },
 
+    # ── CloudWatch Logs ──────────────────────────────────────────────────────
+    {
+        "name": "list_log_groups",
+        "description": (
+            "List available CloudWatch log groups. Use when user asks 'what logs do I have', "
+            "'show me log groups', or before searching logs without knowing the group name."
+        ),
+        "parameters": {},
+    },
+    {
+        "name": "get_recent_logs",
+        "description": (
+            "Fetch recent CloudWatch log events from a log group. Use when user asks 'show me logs', "
+            "'what's in the logs', 'show me the last X minutes of logs', 'show errors in logs', "
+            "'what happened between 2pm and 3pm', or any log viewing request."
+        ),
+        "parameters": {
+            "log_group": "CloudWatch log group name (e.g. /aws/lambda/my-function)",
+            "hours": "How many hours back to look (default: 1)",
+            "filter_pattern": "Optional CloudWatch filter pattern (e.g. ERROR, WARN, timeout)",
+        },
+    },
+    {
+        "name": "search_logs",
+        "description": (
+            "Search CloudWatch logs for a pattern or keyword. Use when user asks 'find errors in logs', "
+            "'search for timeout', 'look for OOM in logs', 'any exceptions today', or any log search."
+        ),
+        "parameters": {
+            "log_group": "CloudWatch log group name",
+            "pattern": "Search pattern or keyword (e.g. ERROR, NullPointer, timeout, 500)",
+            "hours": "How many hours back to search (default: 1)",
+        },
+    },
+    # ── Grafana ──────────────────────────────────────────────────────────────
+    {
+        "name": "get_grafana_status",
+        "description": (
+            "Get Grafana health — firing alerts, datasource status, recent annotations. "
+            "Use when user asks about Grafana, dashboards, or monitoring alerts."
+        ),
+        "parameters": {},
+    },
+    # ── VS Code ──────────────────────────────────────────────────────────────
+    {
+        "name": "vscode_notify",
+        "description": (
+            "Send a notification popup to VS Code. Use when user asks to notify in VS Code, "
+            "'alert the editor', or 'send to IDE'."
+        ),
+        "parameters": {
+            "message": "Notification message text",
+            "level": "info, warning, or error (default: info)",
+        },
+    },
+    {
+        "name": "vscode_open_file",
+        "description": "Open a file in VS Code at a specific line.",
+        "parameters": {
+            "file_path": "Absolute path to the file",
+            "line": "Optional line number to jump to",
+        },
+    },
     # ── CloudTrail ───────────────────────────────────────────────────────────
     {
         "name": "get_cloudtrail_events",
@@ -844,7 +907,7 @@ def execute_tool(tool_name: str, params: dict, session_id: str = "") -> str:
         elif tool_name == "page_oncall":
             try:
                 from app.integrations.opsgenie import notify_on_call
-                message  = params.get("message", "Incident alert from NexusOps")
+                message  = params.get("message", "Incident alert from NsOps")
                 priority = params.get("priority", "P3")
                 result = notify_on_call(message=message)
                 return f"On-call paged successfully: {result}"
@@ -1032,6 +1095,166 @@ def execute_tool(tool_name: str, params: dict, session_id: str = "") -> str:
                 lines.append(f"  • {e['time'][:16]} | {e['event_name']} | by {e['user'] or 'unknown'} | resources: {resources}")
             return "\n".join(lines)
 
+        # ── CloudWatch Logs ───────────────────────────────────────────────────
+        elif tool_name == "list_log_groups":
+            if not _AWS_AVAILABLE:
+                return "AWS integration not available."
+            result = aws_ops.list_log_groups() if hasattr(aws_ops, "list_log_groups") else {}
+            if not result:
+                try:
+                    import boto3
+                    client = boto3.client(
+                        "logs",
+                        region_name=os.getenv("AWS_REGION", "us-east-1"),
+                        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                    )
+                    resp = client.describe_log_groups(limit=20)
+                    groups = [g["logGroupName"] for g in resp.get("logGroups", [])]
+                    if not groups:
+                        return "No CloudWatch log groups found."
+                    return "Log groups:\n" + "\n".join(f"  • {g}" for g in groups)
+                except Exception as e:
+                    return f"CloudWatch Logs not available: {e}"
+            groups = result.get("log_groups", [])
+            return "Log groups:\n" + "\n".join(f"  • {g}" for g in groups[:20])
+
+        elif tool_name == "get_recent_logs":
+            if not _AWS_AVAILABLE:
+                return "AWS integration not available."
+            log_group = params.get("log_group", "")
+            hours     = int(params.get("hours", 1))
+            pattern   = params.get("filter_pattern", "")
+            if not log_group:
+                return "Please specify a log group name. Call list_log_groups first to see available groups."
+            try:
+                import boto3, time as _t
+                client = boto3.client(
+                    "logs",
+                    region_name=os.getenv("AWS_REGION", "us-east-1"),
+                    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                )
+                start_ms = int((_t.time() - hours * 3600) * 1000)
+                kwargs = {
+                    "logGroupName": log_group,
+                    "startTime": start_ms,
+                    "limit": 50,
+                    "startFromHead": False,
+                }
+                if pattern:
+                    kwargs["filterPattern"] = pattern
+                    resp = client.filter_log_events(**kwargs)
+                    events = resp.get("events", [])
+                else:
+                    # Get latest log streams first
+                    streams_resp = client.describe_log_streams(
+                        logGroupName=log_group, orderBy="LastEventTime",
+                        descending=True, limit=3
+                    )
+                    events = []
+                    for stream in streams_resp.get("logStreams", []):
+                        log_resp = client.get_log_events(
+                            logGroupName=log_group,
+                            logStreamName=stream["logStreamName"],
+                            startTime=start_ms, limit=20,
+                        )
+                        events.extend(log_resp.get("events", []))
+                if not events:
+                    return f"No log events found in '{log_group}' in the last {hours}h{' matching ' + pattern if pattern else ''}."
+                import datetime as _dt
+                lines = [f"Logs from '{log_group}' (last {hours}h{', filter: ' + pattern if pattern else ''}, {len(events)} events):"]
+                for e in events[-30:]:
+                    ts = _dt.datetime.fromtimestamp(e["timestamp"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                    msg = e.get("message", "").strip()[:200]
+                    lines.append(f"  [{ts}] {msg}")
+                return "\n".join(lines)
+            except Exception as exc:
+                return f"Failed to fetch logs: {exc}"
+
+        elif tool_name == "search_logs":
+            if not _AWS_AVAILABLE:
+                return "AWS integration not available."
+            log_group = params.get("log_group", "")
+            pattern   = params.get("pattern", "ERROR")
+            hours     = int(params.get("hours", 1))
+            if not log_group:
+                return "Please specify a log group. Call list_log_groups first."
+            try:
+                import boto3, time as _t
+                client = boto3.client(
+                    "logs",
+                    region_name=os.getenv("AWS_REGION", "us-east-1"),
+                    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                )
+                start_ms = int((_t.time() - hours * 3600) * 1000)
+                resp = client.filter_log_events(
+                    logGroupName=log_group, startTime=start_ms,
+                    filterPattern=pattern, limit=50,
+                )
+                events = resp.get("events", [])
+                if not events:
+                    return f"No log events matching '{pattern}' in '{log_group}' in the last {hours}h."
+                import datetime as _dt
+                lines = [f"Found {len(events)} events matching '{pattern}' in '{log_group}':"]
+                for e in events[:30]:
+                    ts = _dt.datetime.fromtimestamp(e["timestamp"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                    lines.append(f"  [{ts}] {e.get('message','').strip()[:200]}")
+                return "\n".join(lines)
+            except Exception as exc:
+                return f"Log search failed: {exc}"
+
+        # ── Grafana ───────────────────────────────────────────────────────────
+        elif tool_name == "get_grafana_status":
+            if not _GRAFANA_AVAILABLE:
+                return "Grafana integration not configured."
+            try:
+                from app.plugins.grafana_checker import check_grafana
+                result = check_grafana()
+                status = result.get("status", "unknown")
+                firing = result.get("firing_alerts", 0)
+                names  = result.get("firing_alert_names", [])
+                details = result.get("details", {})
+                lines = [f"Grafana status: {status.upper()}"]
+                lines.append(f"  Firing alerts: {firing}")
+                if names:
+                    for n in names[:5]:
+                        lines.append(f"    • {n}")
+                ds = details.get("datasource_count", 0)
+                lines.append(f"  Datasources connected: {ds}")
+                ann = details.get("recent_annotations", [])
+                if ann:
+                    lines.append(f"  Recent annotations ({len(ann)}):")
+                    for a in ann[:3]:
+                        lines.append(f"    • {a.get('time','')[:16]} — {a.get('text','')[:80]}")
+                return "\n".join(lines)
+            except Exception as exc:
+                return f"Grafana check failed: {exc}"
+
+        # ── VS Code ───────────────────────────────────────────────────────────
+        elif tool_name == "vscode_notify":
+            try:
+                from app.integrations.vscode import notify as _vs_notify
+                msg   = params.get("message", "Message from NsOps AI")
+                level = params.get("level", "info")
+                result = _vs_notify(msg, level=level)
+                return "VS Code notification sent." if result.get("success") else f"VS Code not reachable: {result.get('error','')}"
+            except Exception as exc:
+                return f"VS Code notify failed: {exc}"
+
+        elif tool_name == "vscode_open_file":
+            try:
+                from app.integrations.vscode import open_file as _vs_open
+                fp   = params.get("file_path", "")
+                line = params.get("line")
+                if not fp:
+                    return "Please provide a file_path."
+                result = _vs_open(fp, line=int(line) if line else None)
+                return f"Opened {fp} in VS Code." if result.get("success") else f"VS Code not reachable: {result.get('error','')}"
+            except Exception as exc:
+                return f"VS Code open failed: {exc}"
+
         else:
             return f"Unknown tool: {tool_name}"
 
@@ -1074,7 +1297,7 @@ def _build_system_prompt(incident_context: Optional[dict], session_id: str = "")
             + "\n================================"
         )
 
-    return f"""You are NexusOps AI, a friendly and knowledgeable DevOps assistant.
+    return f"""You are NsOps AI, a friendly and knowledgeable DevOps assistant.
 Current UTC time: {now}
 
 {_build_tools_description()}
@@ -1106,7 +1329,13 @@ Rules:
 - REGION QUERIES: When user asks about resources in a specific region or geography (e.g. "what's in Asia", "resources in Singapore", "show eu-west-1", "everything in us-west-2"), ALWAYS call list_aws_resources with the region parameter. Supported region keywords: "asia", "eu", "europe", "us", "all", specific region codes like "ap-southeast-1", city names like "singapore", "tokyo", "frankfurt", "london".
 - COST QUERIES: When user asks about pricing or costs, ALWAYS call estimate_aws_cost — never EC2 status tools.
 - GITHUB REPOS: When user asks "list my repos", "what repos do I have", "show GitHub repos", "what's on my GitHub" — call list_github_repos immediately. No confirmation needed.
-- INFRA OVERVIEW: When user asks "how does my infra look", "what's my infrastructure", "overview of my setup" — call list_ec2_instances AND list_aws_resources (region="all") together.{incident_section}
+- INFRA OVERVIEW: When user asks "how does my infra look", "what's my infrastructure", "overview of my setup" — call list_ec2_instances AND list_aws_resources (region="all") together.
+- LOGS: When user asks "show me logs", "what's in the logs", "any errors in logs", "show me what happened between X and Y" — ALWAYS call list_log_groups first to see what CloudWatch log groups exist, then call get_recent_logs or search_logs with the correct group. Do NOT use query_k8s_logs unless the user specifically mentions Kubernetes pods or namespaces. Never make up log content.
+- LOG TIME RANGE: When user says "between 2pm and 3pm", "from 10am to 11am", "last 30 minutes", "last hour" — convert to an hours value and pass to get_recent_logs.
+- GRAFANA: When user asks about Grafana, dashboards, or monitoring alerts (not CloudWatch) — call get_grafana_status.
+- VSCODE: When user asks to notify VS Code, open a file in the editor, or send something to the IDE — call vscode_notify or vscode_open_file.
+- LAYMAN PROMPTS: When user says vague things like "something is wrong", "my app is slow", "site is down", "help" — don't ask for clarification. Sweep all available health data (EC2, K8s, alarms) and report what you find.
+- GENERIC HEALTH: When user asks "is everything ok?", "how are things?", "system status" — call list_ec2_instances and query_aws_alarms together to give a full picture.{incident_section}
 """
 
 
@@ -1295,6 +1524,31 @@ def _prefetch_context(message: str, session_id: str) -> str:
         except Exception:
             pass
 
+    # ── Confirmation follow-up: if user says yes/yeah and history has a CloudTrail offer ──
+    _confirm_words = {"yes", "yeah", "yep", "sure", "ok", "okay", "show", "show me", "go ahead", "please", "yup"}
+    _is_confirm = msg.strip() in _confirm_words or msg.strip().startswith(("yes ", "show me", "go ahead"))
+    if _is_confirm and _AWS_AVAILABLE and _MEMORY_AVAILABLE:
+        try:
+            _recent_hist = get_history(session_id, max_messages=4)
+            for _hm in reversed(_recent_hist):
+                _hcontent = getattr(_hm, "content", "").lower()
+                if "event log" in _hcontent or "cloudtrail" in _hcontent or "show you" in _hcontent:
+                    import re as _re2
+                    _iid_match = _re2.search(r'(i-[0-9a-f]{8,17})', _hcontent)
+                    _resource = _iid_match.group(1) if _iid_match else ""
+                    _ct = aws_ops.get_cloudtrail_events(hours=24, resource_name=_resource)
+                    if _ct.get("success") and _ct.get("events"):
+                        _evts = _ct["events"][:15]
+                        _lines = [f"CloudTrail events (last 24 hours{' for ' + _resource if _resource else ''}):"]
+                        for _e in _evts:
+                            _res = ", ".join(r for r in _e.get("resources", []) if r)
+                            _res_str = f" on {_res}" if _res else ""
+                            _lines.append(f"  • {_e['time'][:19].replace('T',' ')} — {_e['event_name']}{_res_str} by {_e.get('user') or 'unknown'}")
+                        parts.append("\n".join(_lines))
+                    break
+        except Exception:
+            pass
+
     # ── CloudTrail / audit intent ────────────────────────────────────────────
     audit_keywords = {"who", "when did", "changed", "stopped", "started", "terminated", "modified",
                       "cloudtrail", "audit", "history", "activity", "last week", "yesterday",
@@ -1331,6 +1585,78 @@ def _prefetch_context(message: str, session_id: str) -> str:
                     res_str = f" on {resources}" if resources else ""
                     lines.append(f"  • {e['time'][:16]} — {e['event_name']}{res_str} by {e['user'] or 'unknown'}")
                 parts.append("\n".join(lines))
+        except Exception:
+            pass
+
+    # ── CloudWatch Logs intent ───────────────────────────────────────────────
+    log_keywords = {"log", "logs", "logging", "log group", "cloudwatch logs", "what happened",
+                    "show me what", "errors in", "exceptions", "stack trace", "traceback",
+                    "between", "from", "since", "last hour", "last 30", "last 15"}
+    if _AWS_AVAILABLE and any(k in msg for k in log_keywords):
+        try:
+            import boto3 as _boto3
+            _cl = _boto3.client(
+                "logs",
+                region_name=os.getenv("AWS_REGION", "us-east-1"),
+                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            )
+            resp = _cl.describe_log_groups(limit=10)
+            groups = [g["logGroupName"] for g in resp.get("logGroups", [])]
+            if groups:
+                parts.append("Available CloudWatch log groups:\n" + "\n".join(f"  • {g}" for g in groups))
+        except Exception:
+            pass
+
+    # ── Grafana intent ───────────────────────────────────────────────────────
+    grafana_keywords = {"grafana", "dashboard", "panel", "datasource", "annotation", "monitoring alert"}
+    if _GRAFANA_AVAILABLE and any(k in msg for k in grafana_keywords):
+        try:
+            from app.plugins.grafana_checker import check_grafana as _cg
+            _gr = _cg()
+            firing = _gr.get("firing_alerts", 0)
+            names  = _gr.get("firing_alert_names", [])
+            status = _gr.get("status", "unknown")
+            summary = f"Grafana: {status.upper()}, {firing} firing alert(s)"
+            if names:
+                summary += " — " + ", ".join(names[:3])
+            parts.append(summary)
+        except Exception:
+            pass
+
+    # ── Layman / vague intent mapping ────────────────────────────────────────
+    # Map plain-English problem reports to the right prefetch data
+    _layman_problem = {
+        "something is wrong", "not working", "broken", "issue", "problem",
+        "slow", "down", "unreachable", "can't access", "cannot access",
+        "app is slow", "site is down", "everything is down", "things are broken",
+        "help", "what's wrong", "whats wrong", "what is wrong",
+    }
+    if any(k in msg for k in _layman_problem) and not parts:
+        # Generic health sweep — prefetch EC2 + alarms + K8s if available
+        try:
+            if _AWS_AVAILABLE:
+                _r = aws_ops.list_ec2_instances()
+                _insts = _r.get("instances", [])
+                _stopped = [i for i in _insts if i.get("state") != "running"]
+                if _stopped:
+                    parts.append("Stopped EC2 instances: " + ", ".join(
+                        f'{i["id"]} ({i.get("name","")})' for i in _stopped[:5]
+                    ))
+                _alarms = aws_ops.get_cloudwatch_alarms()
+                _active = [a for a in _alarms.get("alarms", []) if a.get("state") == "ALARM"]
+                if _active:
+                    parts.append("Firing CloudWatch alarms: " + ", ".join(a.get("name","") for a in _active[:5]))
+        except Exception:
+            pass
+        try:
+            if _K8S_AVAILABLE:
+                _kpods = k8s_ops.list_pods()
+                _bad = [p for p in _kpods.get("pods", []) if p.get("status") not in ("Running","Completed","Succeeded")]
+                if _bad:
+                    parts.append("Unhealthy K8s pods: " + ", ".join(
+                        f'{p["name"]} ({p.get("status","?")})' for p in _bad[:5]
+                    ))
         except Exception:
             pass
 

@@ -32,19 +32,27 @@ class MemoryAgent(BaseAgent):
 
         try:
             from app.memory.vector_db import store_incident
+            import datetime as _dt
+            _now = _dt.datetime.now(_dt.timezone.utc).isoformat()
             store_incident({
-                "id":     incident_id,
-                "type":   "pipeline_v2",
-                "source": "langgraph_orchestrator",
+                "id":          incident_id,
+                "type":        "pipeline_v2",
+                "source":      "langgraph_orchestrator",
+                "created_at":  _now,
+                "description": state.get("description", ""),
+                "risk":        plan.get("risk", ""),
+                "status":      state.get("status", ""),
+                "confidence":  confidence,
                 "payload": {
-                    "description":      state.get("description", ""),
-                    "root_cause":       root_cause,
-                    "summary":          plan.get("summary", ""),
-                    "risk":             plan.get("risk", ""),
-                    "confidence":       confidence,
-                    "actions_executed": len(state.get("executed_actions", [])),
+                    "description":       state.get("description", ""),
+                    "root_cause":        root_cause,
+                    "summary":           plan.get("summary", ""),
+                    "risk":              plan.get("risk", ""),
+                    "confidence":        confidence,
+                    "actions_executed":  len(state.get("executed_actions", [])),
                     "validation_passed": state.get("validation_passed", False),
-                    "status":           state.get("status", ""),
+                    "status":            state.get("status", ""),
+                    "created_at":        _now,
                 },
             })
             self._log("incident_stored", incident_id=incident_id, confidence=confidence)
