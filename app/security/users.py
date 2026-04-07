@@ -119,19 +119,30 @@ def _save() -> None:
 
 # ── User operations ────────────────────────────────────────────────────────────
 
-def create_user(username: str, password: str, created_by: str = "system") -> dict:
-    """Create a new user with a hashed password. Returns error if username taken."""
+def find_user_by_email(email: str) -> str | None:
+    """Return the username of the user with this email, or None."""
+    email = email.strip().lower()
+    for uname, info in _users.items():
+        if info.get("email", "").lower() == email:
+            return uname
+    return None
+
+
+def create_user(username: str, password: str | None, created_by: str = "system", email: str = "") -> dict:
+    """Create a new user. Pass password=None for SSO-only accounts (no local login)."""
     username = username.strip().lower()
     if not username or len(username) < 2:
         return {"success": False, "error": "Username must be at least 2 characters"}
-    if len(password) < 8:
+    if password is not None and password not in ("INVITE_PENDING",) and len(password) < 8:
         return {"success": False, "error": "Password must be at least 8 characters"}
     if username in _users:
         return {"success": False, "error": f"User '{username}' already exists"}
     _users[username] = {
-        "password_hash": hash_password(password),
+        "password_hash": hash_password(password) if password else "SSO_ONLY",
         "created_at":    datetime.datetime.utcnow().isoformat(),
         "created_by":    created_by,
+        "sso_only":      password is None,
+        "email":         email.strip().lower(),
     }
     _save()
     return {"success": True, "username": username}
@@ -169,6 +180,8 @@ def authenticate(username: str, password: str) -> bool:
     user = _users.get(username)
     if not user:
         return False
+    if user.get("sso_only") or user.get("password_hash") == "SSO_ONLY":
+        return False  # SSO-only account — must login via SSO
     stored = user["password_hash"]
     if not verify_password(password, stored):
         return False
@@ -191,6 +204,7 @@ def list_users() -> list[dict]:
         result.append({
             "username":   username,
             "role":       _user_roles.get(username, "no role"),
+            "email":      info.get("email", ""),
             "created_at": info.get("created_at", ""),
             "created_by": info.get("created_by", ""),
         })

@@ -25,8 +25,9 @@ class Settings(BaseSettings):
     # ── Safety / decision thresholds ───────────────────────────────────────
     # Plans with confidence below this always require human approval
     MIN_CONFIDENCE_THRESHOLD: float = 0.6
-    # Risk levels that auto-execute without human approval: low, medium
-    AUTO_EXECUTE_RISK_LEVELS: list[str] = ["low", "medium"]
+    # Risk levels that auto-execute without human approval.
+    # Only "low" by default — medium and above require human approval.
+    AUTO_EXECUTE_RISK_LEVELS: list[str] = ["low"]
 
     # ── Continuous monitoring loop ─────────────────────────────────────────
     ENABLE_MONITOR_LOOP: bool = False          # disabled by default — enable in prod
@@ -48,6 +49,25 @@ class Settings(BaseSettings):
     KUBECONFIG: str = ""
     K8S_IN_CLUSTER: bool = False
     OPSGENIE_API_KEY: str = ""
+
+    # ── SSO / OAuth2 ────────────────────────────────────────────────────────
+    SSO_PROVIDER:     str = ""   # google | github | "" (disabled)
+    SSO_CLIENT_ID:    str = ""
+    SSO_CLIENT_SECRET: str = ""
+    SSO_REDIRECT_URI: str = ""
+    SSO_DEFAULT_ROLE: str = "viewer"
+    SSO_REQUIRE_INVITE: str = "false"   # set "true" to only allow pre-invited emails
+
+    # ── JWT rotation ────────────────────────────────────────────────────────
+    JWT_SECRET_KEY_OLD: str = ""   # previous key — kept during rotation grace period
+
+    # ── ChromaDB ────────────────────────────────────────────────────────────
+    CHROMA_DB_PATH:    str = "./chroma_db"
+    CHROMA_BACKUP_DIR: str = "./chroma_backups"
+
+    # ── Redis HA ────────────────────────────────────────────────────────────
+    REDIS_SENTINEL_HOSTS:  str = ""   # host1:26379,host2:26379
+    REDIS_SENTINEL_MASTER: str = "mymaster"
 
     # ── Server ─────────────────────────────────────────────────────────────
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8000"

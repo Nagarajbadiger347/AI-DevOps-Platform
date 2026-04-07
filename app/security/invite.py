@@ -58,14 +58,15 @@ _load()
 
 # ── Token management ───────────────────────────────────────────
 
-def create_invite(username: str, email: str) -> dict:
+def create_invite(username: str, email: str, role: str = "viewer") -> dict:
     """Generate a one-time invite token + 6-digit OTP. Returns token."""
     token = secrets.token_urlsafe(32)
     otp   = str(random.randint(100000, 999999))
-    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(hours=24)).isoformat()
+    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(hours=48)).isoformat() + "Z"
     _invites[token] = {
         "username":   username.strip().lower(),
         "email":      email.strip().lower(),
+        "role":       role,
         "otp":        otp,
         "expires_at": expires_at,
     }
@@ -73,16 +74,74 @@ def create_invite(username: str, email: str) -> dict:
     return {"token": token, "otp": otp, "expires_at": expires_at}
 
 
+def get_invite_by_email(email: str) -> Optional[dict]:
+    """Return the most recent valid invite for a given email, or None."""
+    email = email.strip().lower()
+    now = datetime.datetime.utcnow()
+    matches = [
+        (token, inv) for token, inv in _invites.items()
+        if isinstance(inv, dict)
+        and inv.get("email", "").lower() == email
+        and datetime.datetime.fromisoformat(inv["expires_at"].rstrip("Z")) > now
+    ]
+    if not matches:
+        return None
+    # Return the latest one
+    matches.sort(key=lambda x: x[1]["expires_at"], reverse=True)
+    token, inv = matches[0]
+    return {**inv, "token": token}
+
+
+def list_pending_invites() -> list[dict]:
+    """Return all non-expired invites (no OTP exposed)."""
+    now = datetime.datetime.utcnow()
+    result = []
+    for token, inv in list(_invites.items()):
+        if not isinstance(inv, dict):
+            continue
+        try:
+            exp = datetime.datetime.fromisoformat(inv["expires_at"].rstrip("Z"))
+        except Exception:
+            continue
+        if now > exp:
+            del _invites[token]
+            _save()
+            continue
+        result.append({
+            "token":      token[:8] + "…",  # partial token — safe for display
+            "full_token": token,
+            "username":   inv.get("username", ""),
+            "email":      inv.get("email", ""),
+            "role":       inv.get("role", "viewer"),
+            "expires_at": inv["expires_at"],
+        })
+    return sorted(result, key=lambda x: x["expires_at"], reverse=True)
+
+
+def cancel_invite(token: str) -> bool:
+    """Cancel (delete) a pending invite. Returns True if found and removed."""
+    if token in _invites:
+        del _invites[token]
+        _save()
+        return True
+    return False
+
+
+def has_pending_invite(email: str) -> bool:
+    """Return True if the email already has a valid, non-expired invite."""
+    return get_invite_by_email(email) is not None
+
+
 def validate_invite(token: str, otp: str) -> dict:
     """Validate token + OTP. Returns {valid, username} or {valid: False, error}."""
     invite = _invites.get(token)
     if not invite:
         return {"valid": False, "error": "Invalid or expired invite link"}
-    expires = datetime.datetime.fromisoformat(invite["expires_at"])
+    expires = datetime.datetime.fromisoformat(invite["expires_at"].rstrip("Z"))
     if datetime.datetime.utcnow() > expires:
         del _invites[token]
         _save()
-        return {"valid": False, "error": "Invite link has expired (24h limit)"}
+        return {"valid": False, "error": "Invite link has expired (48h limit)"}
     if invite["otp"] != otp.strip():
         return {"valid": False, "error": "Incorrect OTP code"}
     return {"valid": True, "username": invite["username"], "token": token}
@@ -100,7 +159,7 @@ def get_invite_username(token: str) -> Optional[str]:
     inv = _invites.get(token)
     if not inv:
         return None
-    expires = datetime.datetime.fromisoformat(inv["expires_at"])
+    expires = datetime.datetime.fromisoformat(inv["expires_at"].rstrip("Z"))
     if datetime.datetime.utcnow() > expires:
         return None
     return inv["username"]
@@ -135,7 +194,7 @@ def send_invite_email(email: str, username: str, otp: str, token: str) -> dict:
   <div style="background:#1a1a2e;color:#fff;border-radius:8px;padding:20px;margin-bottom:24px;text-align:center">
     <div style="font-size:12px;color:#aaa;margin-bottom:8px;letter-spacing:.1em;text-transform:uppercase">Your One-Time Password (OTP)</div>
     <div style="font-size:40px;font-weight:700;letter-spacing:12px;font-family:monospace;color:#7c3aed">{otp}</div>
-    <div style="font-size:11px;color:#aaa;margin-top:8px">Valid for 24 hours</div>
+    <div style="font-size:11px;color:#aaa;margin-top:8px">Valid for 48 hours</div>
   </div>
 
   <a href="{setup_link}" style="display:block;background:#7c3aed;color:#fff;text-decoration:none;padding:14px 24px;border-radius:8px;text-align:center;font-weight:700;font-size:15px;margin-bottom:16px">
@@ -147,7 +206,7 @@ def send_invite_email(email: str, username: str, otp: str, token: str) -> dict:
     <a href="{setup_link}" style="color:#7c3aed;word-break:break-all">{setup_link}</a>
   </div>
   <div style="font-size:11px;color:#aaa;margin-top:20px;border-top:1px solid #eee;padding-top:16px">
-    This invite expires in 24 hours. If you didn't expect this email, ignore it.
+    This invite expires in 48 hours. If you didn't expect this email, ignore it.
   </div>
 </div>
 """

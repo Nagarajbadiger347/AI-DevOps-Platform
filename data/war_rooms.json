@@ -6,7 +6,7 @@
     "pipeline_state": {
       "root_cause": "Synthesis failed",
       "severity": "high",
-      "status": "active",
+      "status": "resolved",
       "actions_taken": [],
       "aws_context": {
         "s3": {
@@ -513,6 +513,1038 @@
     },
     "slack_channel": "",
     "created_at": "2026-04-06T07:41:22.249162Z",
+    "participants": []
+  },
+  "d0ec92c5-8302-4c60-8ad4-ea56bf200d64": {
+    "war_room_id": "d0ec92c5-8302-4c60-8ad4-ea56bf200d64",
+    "incident_id": "WR-TEST",
+    "incident_description": "Test war room",
+    "pipeline_state": {
+      "root_cause": "Synthesis failed",
+      "severity": "SEV3",
+      "status": "active",
+      "actions_taken": [],
+      "aws_context": {
+        "s3": {
+          "success": true,
+          "buckets": [],
+          "count": 0
+        },
+        "lambda": {
+          "success": true,
+          "functions": [],
+          "count": 0
+        },
+        "alarms_firing": {
+          "success": true,
+          "alarms": [],
+          "count": 0
+        },
+        "alarms": {
+          "success": true,
+          "alarms": [],
+          "count": 0
+        },
+        "ec2": {
+          "success": true,
+          "region": "us-west-2",
+          "instances": [
+            {
+              "id": "i-0e2f6f0b7cb4446fb",
+              "name": "sgdggfg",
+              "type": "t3.micro",
+              "state": "stopped",
+              "public_ip": "",
+              "private_ip": "172.31.24.61",
+              "launch_time": "2026-04-06T08:38:37+00:00",
+              "az": "us-west-2b"
+            }
+          ],
+          "count": 1
+        },
+        "ec2_status": {
+          "success": true,
+          "statuses": [
+            {
+              "instance_id": "i-0e2f6f0b7cb4446fb",
+              "instance_state": "stopped",
+              "system_status": "not-applicable",
+              "instance_status": "not-applicable",
+              "healthy": false,
+              "events": []
+            }
+          ],
+          "count": 1
+        },
+        "rds": {
+          "success": true,
+          "instances": [],
+          "count": 0
+        },
+        "dynamodb": {
+          "success": true,
+          "tables": [],
+          "count": 0
+        },
+        "sqs": {
+          "success": true,
+          "queues": [],
+          "count": 0
+        },
+        "route53": {
+          "success": true,
+          "health_checks": [],
+          "count": 0
+        },
+        "sns": {
+          "success": true,
+          "topics": [],
+          "count": 0
+        },
+        "cloudtrail": {
+          "success": true,
+          "events": [
+            {
+              "time": "2026-04-07T13:16:04+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:14:18+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:14:16+05:30",
+              "event_name": "LookupEvents",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:14:15+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D,g cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:57:52+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:57:40+05:30",
+              "event_name": "DescribeInstanceStatus",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:57:38+05:30",
+              "event_name": "DescribeInstanceStatus",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:57:09+05:30",
+              "event_name": "DescribeInstanceStatus",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:56:32+05:30",
+              "event_name": "LookupEvents",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:56:30+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:55:12+05:30",
+              "event_name": "ListTables",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/P,D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:55:10+05:30",
+              "event_name": "ListClusters",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:55:09+05:30",
+              "event_name": "ListFunctions20150331",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:55:09+05:30",
+              "event_name": "DescribeDBInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:55:07+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:16+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:15+05:30",
+              "event_name": "ListTopics",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:13+05:30",
+              "event_name": "ListTables",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,P,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:11+05:30",
+              "event_name": "DescribeDBInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:10+05:30",
+              "event_name": "ListFunctions20150331",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:09+05:30",
+              "event_name": "ListServices",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:08+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:07+05:30",
+              "event_name": "ListTopics",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:07+05:30",
+              "event_name": "ListTables",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,P,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:07+05:30",
+              "event_name": "ListBuckets",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "[Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79]",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "DescribeDBInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "ListTasks",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "LookupEvents",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "ListBuckets",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "[Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79]",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "DescribeInstanceStatus",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,Z,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "ListServices",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "ListFunctions20150331",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:46:06+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:35:38+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,D,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:35:36+05:30",
+              "event_name": "LookupEvents",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,D,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:35:35+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,D,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:35:12+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,D,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:35:10+05:30",
+              "event_name": "LookupEvents",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/b,D,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:35:09+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,D,g,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:32:51+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,b,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:32:50+05:30",
+              "event_name": "ListTopics",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,b,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:32:47+05:30",
+              "event_name": "ListTables",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/P,D,b,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:32:46+05:30",
+              "event_name": "DescribeDBInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,b,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:32:45+05:30",
+              "event_name": "ListFunctions20150331",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,b,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:32:44+05:30",
+              "event_name": "ListServices",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,b,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T12:32:43+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/D,b,Z cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            }
+          ],
+          "count": 50,
+          "lookback_hours": 2
+        }
+      },
+      "k8s_context": {},
+      "github_context": {
+        "prs": {
+          "success": true,
+          "prs": [],
+          "count": 0,
+          "hours": 24,
+          "owner": "Nagarajbadiger347"
+        },
+        "commits": {
+          "success": true,
+          "commits": [],
+          "count": 0,
+          "hours": 2,
+          "owner": "Nagarajbadiger347"
+        }
+      }
+    },
+    "slack_channel": "",
+    "created_at": "2026-04-07T07:47:05.363785Z",
+    "participants": []
+  },
+  "8a3c2804-5575-4eff-bfb9-605994753fa8": {
+    "war_room_id": "8a3c2804-5575-4eff-bfb9-605994753fa8",
+    "incident_id": "WR-E2E",
+    "incident_description": "E2E test war room",
+    "pipeline_state": {
+      "root_cause": "Synthesis failed",
+      "severity": "SEV4",
+      "status": "active",
+      "actions_taken": [],
+      "aws_context": {
+        "s3": {
+          "success": true,
+          "buckets": [],
+          "count": 0
+        },
+        "lambda": {
+          "success": true,
+          "functions": [],
+          "count": 0
+        },
+        "ec2_status": {
+          "success": true,
+          "statuses": [
+            {
+              "instance_id": "i-0e2f6f0b7cb4446fb",
+              "instance_state": "stopped",
+              "system_status": "not-applicable",
+              "instance_status": "not-applicable",
+              "healthy": false,
+              "events": []
+            }
+          ],
+          "count": 1
+        },
+        "rds": {
+          "success": true,
+          "instances": [],
+          "count": 0
+        },
+        "alarms": {
+          "success": true,
+          "alarms": [],
+          "count": 0
+        },
+        "alarms_firing": {
+          "success": true,
+          "alarms": [],
+          "count": 0
+        },
+        "ec2": {
+          "success": true,
+          "region": "us-west-2",
+          "instances": [
+            {
+              "id": "i-0e2f6f0b7cb4446fb",
+              "name": "sgdggfg",
+              "type": "t3.micro",
+              "state": "stopped",
+              "public_ip": "",
+              "private_ip": "172.31.24.61",
+              "launch_time": "2026-04-06T08:38:37+00:00",
+              "az": "us-west-2b"
+            }
+          ],
+          "count": 1
+        },
+        "cloudtrail": {
+          "success": true,
+          "events": [
+            {
+              "time": "2026-04-07T13:21:04+05:30",
+              "event_name": "DescribeInstanceStatus",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,g,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:21:04+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,g,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:21:04+05:30",
+              "event_name": "DescribeDBInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,g,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:21:04+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,g,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:21:04+05:30",
+              "event_name": "ListTasks",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,g,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:21:04+05:30",
+              "event_name": "ListServices",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,g,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:21:04+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,g,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:21:04+05:30",
+              "event_name": "LookupEvents",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,g,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:21:03+05:30",
+              "event_name": "ListBuckets",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "[Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,g,D cfg/retry-mode#legacy Botocore/1.42.79]",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:42+05:30",
+              "event_name": "DescribeDBInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:42+05:30",
+              "event_name": "ListTopics",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:42+05:30",
+              "event_name": "ListTables",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,P,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:41+05:30",
+              "event_name": "ListTasks",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:41+05:30",
+              "event_name": "ListServices",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:41+05:30",
+              "event_name": "DescribeInstanceStatus",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:41+05:30",
+              "event_name": "ListBuckets",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "[Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79]",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:41+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:41+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:41+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:41+05:30",
+              "event_name": "ListFunctions20150331",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:41+05:30",
+              "event_name": "LookupEvents",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:19:11+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:18:06+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:18:05+05:30",
+              "event_name": "ListTopics",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:18:02+05:30",
+              "event_name": "ListTables",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,P,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:18:00+05:30",
+              "event_name": "DescribeDBInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:58+05:30",
+              "event_name": "ListFunctions20150331",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:58+05:30",
+              "event_name": "ListServices",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:56+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:55+05:30",
+              "event_name": "ListBuckets",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "[Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79]",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:55+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:20+05:30",
+              "event_name": "ListTopics",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:20+05:30",
+              "event_name": "ListServices",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:20+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:20+05:30",
+              "event_name": "ListTasks",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:20+05:30",
+              "event_name": "ListTables",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,P,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:20+05:30",
+              "event_name": "DescribeInstanceStatus",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:19+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:19+05:30",
+              "event_name": "DescribeDBInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:19+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:19+05:30",
+              "event_name": "LookupEvents",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:19+05:30",
+              "event_name": "ListBuckets",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "[Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79]",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:17:19+05:30",
+              "event_name": "ListFunctions20150331",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:16:54+05:30",
+              "event_name": "ListTopics",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:16:54+05:30",
+              "event_name": "LookupEvents",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:16:53+05:30",
+              "event_name": "DescribeDBInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:16:53+05:30",
+              "event_name": "ListTables",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython m/Z,P,b,D cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:16:53+05:30",
+              "event_name": "DescribeInstances",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:16:52+05:30",
+              "event_name": "DescribeAlarms",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            },
+            {
+              "time": "2026-04-07T13:16:52+05:30",
+              "event_name": "ListTasks",
+              "user": "nagaraj",
+              "source_ip": "157.20.14.21",
+              "user_agent": "Boto3/1.42.79 md/Botocore#1.42.79 ua/2.1 os/macos#25.3.0 md/arch#arm64 lang/python#3.14.3 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.42.79",
+              "resources": []
+            }
+          ],
+          "count": 50,
+          "lookback_hours": 2
+        },
+        "dynamodb": {
+          "success": true,
+          "tables": [],
+          "count": 0
+        },
+        "sqs": {
+          "success": true,
+          "queues": [],
+          "count": 0
+        },
+        "sns": {
+          "success": true,
+          "topics": [],
+          "count": 0
+        },
+        "route53": {
+          "success": true,
+          "health_checks": [],
+          "count": 0
+        }
+      },
+      "k8s_context": {},
+      "github_context": {
+        "prs": {
+          "success": true,
+          "prs": [],
+          "count": 0,
+          "hours": 24,
+          "owner": "Nagarajbadiger347"
+        },
+        "commits": {
+          "success": true,
+          "commits": [],
+          "count": 0,
+          "hours": 2,
+          "owner": "Nagarajbadiger347"
+        }
+      }
+    },
+    "slack_channel": "",
+    "created_at": "2026-04-07T07:52:43.006352Z",
     "participants": []
   }
 }

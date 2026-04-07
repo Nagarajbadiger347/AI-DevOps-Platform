@@ -9,17 +9,37 @@ Guards:
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
 _RULES_PATH = Path(__file__).parent / "rules.json"
+# How often to re-read rules.json from disk (seconds). 0 = every call.
+_RELOAD_INTERVAL = int(os.getenv("POLICY_RELOAD_INTERVAL", "30"))
 
 
 class PolicyEngine:
     def __init__(self, rules_path: Path = _RULES_PATH) -> None:
-        self._rules: dict = json.loads(rules_path.read_text())
+        self._rules_path = rules_path
+        self._rules: dict = {}
+        self._last_loaded: float = 0.0
+        self._load_rules()
+
+    def _load_rules(self) -> None:
+        """Read rules.json from disk and cache. Called at init and on interval."""
+        try:
+            self._rules = json.loads(self._rules_path.read_text())
+            self._last_loaded = time.monotonic()
+        except Exception as exc:
+            logger.error("policy_rules_load_failed", error=str(exc))
+
+    def _maybe_reload(self) -> None:
+        """Reload rules from disk if the reload interval has elapsed."""
+        if time.monotonic() - self._last_loaded >= _RELOAD_INTERVAL:
+            self._load_rules()
 
     def evaluate(
         self,
@@ -32,6 +52,7 @@ class PolicyEngine:
         allowed=True  → action may proceed
         allowed=False → action must be blocked; reason explains why
         """
+        self._maybe_reload()
         action_type = action.get("type", "")
 
         # 1. Globally blocked

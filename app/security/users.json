@@ -1,6 +1,6 @@
 {
   "admin": {
-    "password_hash": "$2b$12$dHEZNN.2EqxE/DSTpqGe1.PAtVxhu/TIBkfLV8kkyDxJAZ.LltQdW",
+    "password_hash": "$2b$12$gOYvLv1qgqUUgLMCEyuie.hezSNZoFHhuW0gFGXBZC29QTKXubq.q",
     "created_at": "2026-04-01T06:42:03.329079",
     "created_by": "system"
   },
@@ -9,9 +9,10 @@
     "created_at": "2026-04-02T05:29:19.699258",
     "created_by": "admin"
   },
-  "abc": {
-    "password_hash": "$2b$12$lUng7A1FIWn./hvm11xJ.O144krneAvHhZM1XIqqgGAW.1SJEVZGi",
-    "created_at": "2026-04-06T07:19:11.678251",
-    "created_by": "admin"
+  "nagarajbadiger347": {
+    "password_hash": "SSO_ONLY",
+    "created_at": "2026-04-07T05:53:38.376017",
+    "created_by": "sso",
+    "sso_only": true
   }
 }

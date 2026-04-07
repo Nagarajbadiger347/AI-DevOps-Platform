@@ -1,0 +1,13 @@
+{"ts": "now", "user": "test", "action": "test", "params": {}, "success": true, "source": "test"}
+{"ts": "2026-04-07T07:51:02Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-07T07:51:24Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-07T07:52:56Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-07T07:53:53Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-07T07:53:53Z", "user": "admin", "action": "assign_role", "params": {"target_user": "e2etestuser", "new_role": "developer", "previous_role": "none"}, "success": true, "error": null, "source": "rbac", "dry_run": false}
+{"ts": "2026-04-07T07:54:04Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-07T07:54:04Z", "user": "admin", "action": "assign_role", "params": {"target_user": "demouser2", "new_role": "viewer", "previous_role": "none"}, "success": true, "error": null, "source": "rbac", "dry_run": false}
+{"ts": "2026-04-07T07:54:51Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-07T07:54:51Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-07T07:56:40Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-07T07:56:40Z", "user": "admin", "action": "revoke_role", "params": {"target_user": "e2etestuser", "previous_role": "developer"}, "success": true, "error": null, "source": "rbac", "dry_run": false}
+{"ts": "2026-04-07T07:56:40Z", "user": "admin", "action": "revoke_role", "params": {"target_user": "demouser2", "previous_role": "viewer"}, "success": true, "error": null, "source": "rbac", "dry_run": false}

@@ -19,10 +19,33 @@ import hashlib
 import time
 from typing import Any
 
+import json
+import pathlib
+
 from app.core.config import settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+_ALERT_STATE_PATH = pathlib.Path(__file__).resolve().parents[2] / "data" / "alert_state.json"
+
+def _persist_alert_state() -> None:
+    """Save active alert state to disk so it survives restarts."""
+    try:
+        _ALERT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ALERT_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_active_alerts, default=str))
+        tmp.replace(_ALERT_STATE_PATH)
+    except Exception:
+        pass
+
+def _load_alert_state() -> None:
+    """Load persisted alert state on startup."""
+    try:
+        data = json.loads(_ALERT_STATE_PATH.read_text())
+        _active_alerts.update(data)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
 
 
 def _vs(msg: str, show: bool = False) -> None:
@@ -51,6 +74,12 @@ _alert_queue: asyncio.Queue = asyncio.Queue()
 # Dedup suppression window in seconds
 _DEDUP_WINDOW = 600  # 10 minutes
 
+_load_alert_state()  # restore state from previous run
+
+# Maximum number of times the same alert fingerprint can trigger the pipeline.
+# After this limit the alert is suppressed until manually cleared or resolved.
+_MAX_PIPELINE_TRIGGERS = 3
+
 
 # ---------------------------------------------------------------------------
 # Deduplication helpers
@@ -78,12 +107,14 @@ def _record_alert(fingerprint: str, alert_type: str, resource_id: str) -> None:
     entry["last_seen"] = time.time()
     entry["pipeline_triggered"] = entry.get("pipeline_triggered", 0) + 1
     _active_alerts[fingerprint] = entry
+    _persist_alert_state()
 
 
 def _resolve_alert(alert_type: str, resource_id: str) -> None:
     """Remove fingerprint from active alerts when state transitions to OK/resolved."""
     fp = _make_fingerprint(alert_type, resource_id)
     _active_alerts.pop(fp, None)
+    _persist_alert_state()
     _vs(f"✅ RESOLVED  [{alert_type}] {resource_id}")
 
 
@@ -93,6 +124,15 @@ def _enqueue_alert(alert_type: str, resource_id: str, description: str,
     fp = _make_fingerprint(alert_type, resource_id)
     if _is_duplicate(fp):
         logger.debug("alert_deduplicated", fingerprint=fp, alert_type=alert_type)
+        return False
+    # Hard cap: suppress indefinitely if already triggered too many times
+    entry = _active_alerts.get(fp, {})
+    triggers_so_far = entry.get("pipeline_triggered", 0)
+    if triggers_so_far >= _MAX_PIPELINE_TRIGGERS:
+        logger.warning("alert_trigger_cap_reached",
+                       fingerprint=fp, alert_type=alert_type,
+                       resource_id=resource_id, triggers=triggers_so_far)
+        _vs(f"⚠️ SUPPRESSED [{alert_type}] {resource_id} — hit {_MAX_PIPELINE_TRIGGERS}x trigger cap")
         return False
     _record_alert(fp, alert_type, resource_id)
     payload = {

@@ -285,6 +285,7 @@ def list_active_war_rooms() -> list[dict]:
             "severity":      wr.pipeline_state.get("severity", "SEV2"),
         }
         for wr in _war_rooms.values()
+        if wr.pipeline_state.get("status") != "resolved"
     ]
 
 

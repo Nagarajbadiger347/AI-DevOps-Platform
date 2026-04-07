@@ -1,33 +1,24 @@
 {
   "invites": {},
-  "kqT2lBhpNp8pdWs6SvRM3xy5rWnLfb4uVFC9gRa3xpA": {
-    "username": "invited@company.com",
-    "email": "invited@company.com",
-    "otp": "308183",
-    "expires_at": "2026-04-02T07:55:54.582960"
-  },
-  "SC_RaRotTqck7LYeGX1Ty_a4v03etSVZrtgE8ZzRiaE": {
+  "O4CHP7LRK4AeFBbs7_D6RUVIaBe3f7bd0QqNIK0UViE": {
     "username": "nagaraj",
     "email": "nagarajbadiger347@gmail.com",
-    "otp": "752842",
-    "expires_at": "2026-04-03T05:20:07.519056"
+    "role": "developer",
+    "otp": "590641",
+    "expires_at": "2026-04-09T06:23:41.738309"
   },
-  "wohRS8G1pFqBrF1dWVZXGKwM4yXmPvTr6QDUNqeGeLU": {
-    "username": "nagaraj",
-    "email": "nagarajbadiger347@gmail.com",
-    "otp": "612148",
-    "expires_at": "2026-04-03T05:20:08.091139"
+  "Ji_cxPUsHivGMrGyXiuPFym8_EtK9_rNs9vz5gNO7Uk": {
+    "username": "e2etestuser",
+    "email": "e2etest@example.com",
+    "role": "developer",
+    "otp": "528604",
+    "expires_at": "2026-04-09T07:53:53.690482Z"
   },
-  "WXXx2mQibu9Mu5elMBlWE1q1AtScXfEjAfkI3uZAjCY": {
-    "username": "nagaraj",
-    "email": "nagarajbadiger347@gmail.com",
-    "otp": "890360",
-    "expires_at": "2026-04-03T05:29:19.700851"
-  },
-  "ew5MlCOEQLpQJg3Wa8Ve1W2kRwOuaA7lo4HASPkae_M": {
-    "username": "abc",
-    "email": "nagarajbadiger347@gmail.com",
-    "otp": "990136",
-    "expires_at": "2026-04-07T07:19:11.679653"
+  "1F5-YFdkxpeKoDMqDV223efyPkvCRDMnV0jsl7ltBQQ": {
+    "username": "demouser2",
+    "email": "demo2@example.com",
+    "role": "viewer",
+    "otp": "654379",
+    "expires_at": "2026-04-09T07:54:04.200286Z"
   }
 }

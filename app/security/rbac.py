@@ -13,12 +13,21 @@ import json
 import os
 from pathlib import Path
 
+try:
+    from app.core.audit import audit_log as _audit_log
+except Exception:
+    def _audit_log(**kwargs): pass  # noqa: E731
+
 # Maps roles to the set of allowed actions
 ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "admin":     {"deploy", "rollback", "read", "write", "delete", "manage_users", "manage_secrets"},
-    "developer": {"deploy", "read", "write"},
-    "viewer":    {"read"},
+    "super_admin": {"deploy", "rollback", "read", "write", "delete", "manage_users", "manage_secrets", "manage_admins"},
+    "admin":       {"deploy", "rollback", "read", "write", "delete", "manage_users", "manage_secrets"},
+    "developer":   {"deploy", "read", "write"},
+    "viewer":      {"read"},
 }
+
+# Roles that require super_admin to assign or remove
+PROTECTED_ROLES = {"admin", "super_admin"}
 
 
 
@@ -59,22 +68,36 @@ _load_from_file(_config_path)
 _save_to_file(_config_path)
 
 
-def assign_role(user: str, role: str) -> dict:
-    """Assign a role to a user at runtime (persisted to disk)."""
+def assign_role(user: str, role: str, changed_by: str = "system", changer_role: str = "") -> dict:
+    """Assign a role to a user at runtime (persisted to disk).
+
+    Only super_admin may assign admin or super_admin roles.
+    Pass changer_role="" to skip the enforcement (internal/bootstrap calls).
+    """
     user = user.strip().lower()
     if role not in ROLE_PERMISSIONS:
         return {"success": False, "reason": f"Unknown role '{role}'. Valid roles: {list(ROLE_PERMISSIONS)}"}
+    # Enforce: only super_admin can assign protected roles
+    if changer_role and role in PROTECTED_ROLES and changer_role != "super_admin":
+        return {"success": False, "reason": f"Only a super_admin can assign the '{role}' role"}
+    previous = _user_roles.get(user, "none")
     _user_roles[user] = role
     _save_to_file(_config_path)
+    _audit_log(user=changed_by, action="assign_role",
+               params={"target_user": user, "new_role": role, "previous_role": previous},
+               result={"success": True}, source="rbac")
     return {"success": True, "user": user, "role": role}
 
 
-def revoke_role(user: str) -> dict:
+def revoke_role(user: str, changed_by: str = "system") -> dict:
     """Remove a user's role assignment (persisted to disk)."""
     if user not in _user_roles:
         return {"success": False, "reason": f"User '{user}' has no role assigned"}
-    del _user_roles[user]
+    previous = _user_roles.pop(user)
     _save_to_file(_config_path)
+    _audit_log(user=changed_by, action="revoke_role",
+               params={"target_user": user, "previous_role": previous},
+               result={"success": True}, source="rbac")
     return {"success": True, "user": user}
 
 

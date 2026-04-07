@@ -49,11 +49,12 @@ def audit_log(
             "source":   source,
             "dry_run":  dry_run,
         }
-        # Structured log (picked up by any log aggregator)
-        logger.info("audit_action", **{k: v for k, v in record.items() if v is not None})
-        # Append to JSONL file
+        # Append to JSONL file (primary store — do this first)
         with _LOG_FILE.open("a") as f:
             f.write(json.dumps(record, default=str) + "\n")
+        # Log line for aggregators (standard Python logger format)
+        logger.info("audit_action user=%s action=%s success=%s source=%s",
+                    record["user"], record["action"], record["success"], record["source"])
     except Exception:
         pass  # audit must never crash the main flow
 

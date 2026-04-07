@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends, Request
 from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
@@ -102,6 +102,25 @@ async def _approval_cleanup_loop() -> None:
             )
 
 
+async def _daily_backup_loop() -> None:
+    """Background task: back up ChromaDB once every 24 hours."""
+    import asyncio, logging
+    _log = logging.getLogger(__name__)
+    while True:
+        try:
+            await asyncio.sleep(86400)  # 24 hours
+            from app.memory.vector_db import backup_chromadb
+            result = backup_chromadb()
+            if result.get("success"):
+                _log.info("chromadb_backup_ok", extra={"path": result.get("backup_path")})
+            else:
+                _log.warning("chromadb_backup_failed", extra={"error": result.get("error")})
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logging.getLogger(__name__).warning("chromadb_backup_error", extra={"error": str(exc)})
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     import asyncio
@@ -110,19 +129,33 @@ async def _lifespan(_: FastAPI):
         asyncio.create_task(monitoring_loop())
     # Start approval cleanup background task
     cleanup_task = asyncio.create_task(_approval_cleanup_loop())
+    backup_task  = asyncio.create_task(_daily_backup_loop())
     # Validate critical configuration
     import warnings as _warnings
-    if not os.getenv("JWT_SECRET_KEY"):
-        _warnings.warn("JWT_SECRET_KEY not set — using insecure default. Set it with: openssl rand -hex 32")
+    _WEAK_JWT = "change-me-in-production-use-openssl-rand-hex-32"
+    jwt_key = os.getenv("JWT_SECRET_KEY", "")
+    if not jwt_key or jwt_key == _WEAK_JWT:
+        _warnings.warn("⚠️  JWT_SECRET_KEY not set or using insecure default. Run: openssl rand -hex 32")
+    elif len(jwt_key) < 32:
+        _warnings.warn("⚠️  JWT_SECRET_KEY is too short. Use at least 32 hex characters.")
     llm_keys = [os.getenv(k) for k in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY")]
     if not any(llm_keys):
         _warnings.warn("No LLM API key configured (ANTHROPIC_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY). AI features will fail.")
-    yield
-    cleanup_task.cancel()
+    # Check for .env accidentally committed to git
+    import subprocess as _sp
     try:
-        await cleanup_task
-    except asyncio.CancelledError:
+        tracked = _sp.run(["git","ls-files",".env"], capture_output=True, text=True, timeout=3).stdout.strip()
+        if tracked:
+            _warnings.warn("🚨 SECURITY: .env is tracked by git and may expose secrets. Run: git rm --cached .env")
+    except Exception:
         pass
+    yield
+    for task in (cleanup_task, backup_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 app = FastAPI(
     title="NsOps",
@@ -154,10 +187,20 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-User"],
 )
 
+# Reject request bodies larger than 10 MB to prevent DoS
+from starlette.middleware.base import BaseHTTPMiddleware
+class _LimitBodyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > 10 * 1024 * 1024:
+            from starlette.responses import JSONResponse
+            return JSONResponse({"detail": "Request body too large (max 10 MB)"}, status_code=413)
+        return await call_next(request)
+app.add_middleware(_LimitBodyMiddleware)
+
 # ── Simple in-memory rate limiter ─────────────────────────────
 import time as _time
 from collections import defaultdict as _defaultdict
-from fastapi import Request
 
 _rate_store: dict = _defaultdict(list)
 _RATE_LIMIT = 60   # requests
@@ -224,7 +267,7 @@ class AccessRequest(BaseModel):
     action: str
 
 class RoleAssignment(BaseModel):
-    user: str
+    user: str = ""
     role: str
 
 class K8sRestartRequest(BaseModel):
@@ -761,6 +804,13 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
         <span id="login-btn-text">Sign In</span>
         <span style="font-size:14px">&#8594;</span>
       </button>
+      <div id="sso-divider" style="display:none;text-align:center;margin:14px 0;color:var(--muted);font-size:.78em;position:relative">
+        <span style="background:var(--surface);padding:0 10px;position:relative;z-index:1">or continue with</span>
+        <div style="position:absolute;top:50%;left:0;right:0;height:1px;background:var(--border);z-index:0"></div>
+      </div>
+      <a id="sso-btn" href="/auth/sso/login" style="display:none;width:100%;padding:10px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:.85em;font-weight:600;text-align:center;text-decoration:none;transition:background .15s" onmouseover="this.style.background='var(--surface3)'" onmouseout="this.style.background='var(--surface2)'">
+        <span id="sso-btn-label">SSO Login</span>
+      </a>
       <p class="login-hint">Contact your administrator for access</p>
     </div>
   </div>
@@ -850,6 +900,10 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 3 8 3M12 3v4"/></svg>
           Integrations
         </div>
+        <div onclick="App.closeUserDropdown();App.openChangePasswordModal()" style="display:flex;align-items:center;gap:9px;padding:9px 14px;cursor:pointer;font-size:.82em;color:var(--text2);transition:background .12s" onmouseover="this.style.background='rgba(124,58,237,.1)'" onmouseout="this.style.background=''">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          Change Password
+        </div>
         <div style="border-top:1px solid var(--border)"></div>
         <div onclick="App.logout()" style="display:flex;align-items:center;gap:9px;padding:9px 14px;cursor:pointer;font-size:.82em;color:#f87171;transition:background .12s" onmouseover="this.style.background='rgba(239,68,68,.08)'" onmouseout="this.style.background=''">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -904,33 +958,41 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <!-- DASHBOARD -->
       <div id="s-dashboard" class="section-page active">
         <!-- Hero Banner -->
-        <div style="background:linear-gradient(135deg,rgba(124,58,237,0.12) 0%,rgba(6,182,212,0.07) 50%,rgba(124,58,237,0.04) 100%);border:1px solid rgba(124,58,237,0.18);border-radius:14px;padding:20px 24px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;position:relative;overflow:hidden">
-          <div style="position:absolute;top:-40px;right:-40px;width:180px;height:180px;border-radius:50%;background:radial-gradient(circle,rgba(124,58,237,0.18) 0%,transparent 70%);pointer-events:none"></div>
-          <div style="position:absolute;bottom:-30px;left:30%;width:120px;height:120px;border-radius:50%;background:radial-gradient(circle,rgba(6,182,212,0.1) 0%,transparent 70%);pointer-events:none"></div>
+        <div style="background:linear-gradient(135deg,rgba(124,58,237,0.13) 0%,rgba(6,182,212,0.07) 60%,rgba(124,58,237,0.04) 100%);border:1px solid rgba(124,58,237,0.2);border-radius:16px;padding:22px 28px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;position:relative;overflow:hidden">
+          <div style="position:absolute;top:-50px;right:-50px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(124,58,237,0.15) 0%,transparent 70%);pointer-events:none"></div>
+          <div style="position:absolute;bottom:-40px;left:35%;width:140px;height:140px;border-radius:50%;background:radial-gradient(circle,rgba(6,182,212,0.1) 0%,transparent 70%);pointer-events:none"></div>
+          <div style="position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(124,58,237,0.5),rgba(6,182,212,0.3),transparent)"></div>
           <div>
-            <div style="font-size:1.18em;font-weight:800;color:var(--text);letter-spacing:-.025em;margin-bottom:4px">Welcome to <span style="background:linear-gradient(135deg,#c4b5fd,#67e8f9);-webkit-background-clip:text;-webkit-text-fill-color:transparent">NsOps</span> Platform</div>
-            <div style="font-size:.82em;color:var(--text2)">AI-powered DevOps — incidents detected, triaged, and resolved autonomously</div>
+            <div style="font-size:1.22em;font-weight:800;color:var(--text);letter-spacing:-.03em;margin-bottom:5px">Welcome to <span style="background:linear-gradient(135deg,#c4b5fd,#67e8f9);-webkit-background-clip:text;-webkit-text-fill-color:transparent">NsOps</span> Platform</div>
+            <div style="font-size:.82em;color:var(--text2);max-width:380px;line-height:1.5">AI-powered incident response — detect, triage, and resolve autonomously with multi-agent intelligence</div>
+            <div style="display:flex;gap:8px;margin-top:12px">
+              <span style="font-size:.7em;padding:3px 10px;border-radius:20px;background:rgba(124,58,237,.15);border:1px solid rgba(124,58,237,.3);color:#c4b5fd;font-weight:600">⚡ LangGraph Pipeline</span>
+              <span style="font-size:.7em;padding:3px 10px;border-radius:20px;background:rgba(6,182,212,.1);border:1px solid rgba(6,182,212,.25);color:#67e8f9;font-weight:600">🧠 Claude AI</span>
+              <span style="font-size:.7em;padding:3px 10px;border-radius:20px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25);color:#4ade80;font-weight:600" id="hero-status-pill">● Live</span>
+            </div>
           </div>
-          <div style="display:flex;align-items:center;gap:24px;flex-shrink:0">
+          <div style="display:flex;align-items:center;gap:28px;flex-shrink:0">
             <div style="text-align:center">
-              <div style="font-size:1.5em;font-weight:800;color:#4ade80" id="hero-uptime">—</div>
-              <div style="font-size:.68em;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Uptime</div>
+              <div style="font-size:1.7em;font-weight:800;color:#4ade80;letter-spacing:-.02em" id="hero-uptime">—</div>
+              <div style="font-size:.65em;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:2px">Uptime</div>
             </div>
-            <div style="width:1px;height:32px;background:var(--border)"></div>
+            <div style="width:1px;height:36px;background:linear-gradient(to bottom,transparent,var(--border),transparent)"></div>
             <div style="text-align:center">
-              <div style="font-size:1.5em;font-weight:800;color:#c4b5fd" id="hero-resolved">—</div>
-              <div style="font-size:.68em;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Resolved</div>
+              <div style="font-size:1.7em;font-weight:800;color:#c4b5fd;letter-spacing:-.02em" id="hero-resolved">—</div>
+              <div style="font-size:.65em;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:2px">Resolved</div>
             </div>
-            <div style="width:1px;height:32px;background:var(--border)"></div>
+            <div style="width:1px;height:36px;background:linear-gradient(to bottom,transparent,var(--border),transparent)"></div>
             <div style="text-align:center">
-              <div style="font-size:1.5em;font-weight:800;color:#22d3ee" id="hero-ai">AI</div>
-              <div style="font-size:.68em;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Powered</div>
+              <div style="width:52px;height:52px;border-radius:50%;background:conic-gradient(#4ade80 0%,rgba(74,222,128,.15) 0%);display:flex;align-items:center;justify-content:center;position:relative" id="health-ring-wrap">
+                <div style="width:38px;height:38px;border-radius:50%;background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:.65em;font-weight:800;color:#4ade80" id="health-ring-pct">—</div>
+              </div>
+              <div style="font-size:.65em;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:4px">Health</div>
             </div>
           </div>
         </div>
         <!-- Stat Cards Row -->
         <div class="grid-4 mb-16">
-          <div class="stat-card" onclick="App.navigate('incidents')" style="border-top:2px solid var(--red);box-shadow:0 0 0 1px rgba(239,68,68,0.1),0 4px 24px rgba(0,0,0,0.35);cursor:pointer" title="View all incidents">
+          <div class="stat-card" onclick="App.navigateActiveIncidents()" style="border-top:2px solid var(--red);box-shadow:0 0 0 1px rgba(239,68,68,0.1),0 4px 24px rgba(0,0,0,0.35);cursor:pointer" title="View active incidents">
             <div class="stat-header">
               <div class="stat-icon-box" style="background:linear-gradient(135deg,rgba(239,68,68,.3),rgba(239,68,68,.12));color:#f87171;box-shadow:0 0 20px rgba(239,68,68,.2)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polyline points="9 18 15 12 9 6"/></svg>
@@ -1216,6 +1278,19 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <div id="s-incidents" class="section-page">
         <div class="section-header">
           <div><div class="section-title">Incidents</div><div class="section-sub">Run the AI pipeline to analyze and remediate incidents</div></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="App._setIncidentFilter('active')" id="btn-active-filter" style="color:#f87171;border-color:rgba(239,68,68,.3)">
+              <svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="#f87171"/></svg>
+              Active Only
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick="App._setIncidentFilter('')">All</button>
+          </div>
+        </div>
+        <!-- Active incidents alert banner -->
+        <div id="active-incidents-banner" style="display:none;margin-bottom:12px;padding:12px 16px;border-radius:10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);align-items:center;gap:10px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span id="active-incidents-banner-text" style="font-size:.83em;color:#f87171;font-weight:600"></span>
+          <button onclick="App._setIncidentFilter('')" style="margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:.78em">Show all</button>
         </div>
         <!-- Top row: form + history side by side -->
         <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:16px;align-items:start">
@@ -1252,9 +1327,10 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
             </div>
             <div class="form-group mb-12">
               <div style="display:flex;gap:16px;flex-wrap:wrap">
-                <div class="form-toggle" onclick="App.toggleAutoRemediate()">
+                <div class="form-toggle" onclick="App.toggleAutoRemediate()" id="auto-rem-wrap" title="Admin only — auto-executes actions without approval">
                   <div class="toggle-track" id="auto-rem-toggle"><div class="toggle-thumb"></div></div>
                   <span class="toggle-label">Auto-Remediate</span>
+                  <span id="auto-rem-lock" style="font-size:.7em;color:var(--muted);margin-left:2px">🔒</span>
                 </div>
                 <div class="form-toggle" onclick="App.toggleDryRun()">
                   <div class="toggle-track" id="dry-run-toggle"><div class="toggle-thumb"></div></div>
@@ -1290,12 +1366,16 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
             <!-- Filter bar -->
             <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
               <input id="inc-filter-text" type="text" placeholder="Search ID or description..." class="form-input" style="flex:1;min-width:140px;padding:5px 10px;font-size:.8em" oninput="App.filterIncidents()"/>
-              <select id="inc-filter-status" class="form-input" style="width:130px;padding:5px 8px;font-size:.8em" onchange="App.filterIncidents()">
+              <select id="inc-filter-status" class="form-input" style="width:140px;padding:5px 8px;font-size:.8em" onchange="App.filterIncidents()">
                 <option value="">All statuses</option>
-                <option value="completed">Completed</option>
-                <option value="awaiting_approval">Awaiting Approval</option>
-                <option value="escalated">Escalated</option>
-                <option value="failed">Failed</option>
+                <option value="active">🔴 Active (not done)</option>
+                <option value="running">⚙️ Running</option>
+                <option value="awaiting_approval">⏳ Awaiting Approval</option>
+                <option value="in_progress">🔄 In Progress</option>
+                <option value="escalated">🚨 Escalated</option>
+                <option value="completed">✅ Completed</option>
+                <option value="failed">❌ Failed</option>
+                <option value="unknown">❓ Unknown</option>
               </select>
               <select id="inc-filter-risk" class="form-input" style="width:110px;padding:5px 8px;font-size:.8em" onchange="App.filterIncidents()">
                 <option value="">All risks</option>
@@ -1371,7 +1451,10 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
             </div>
             <div class="card">
               <div class="card-header">
-                <div class="card-title"><span class="status-dot dot-red dot-pulse" style="margin-right:6px"></span>Active War Rooms</div>
+                <div style="display:flex;gap:6px">
+                  <button id="wr-tab-active" onclick="App.switchWarRoomTab('active')" class="btn btn-sm" style="padding:4px 10px;font-size:.75em;background:rgba(124,58,237,.18);border-color:rgba(124,58,237,.4);color:var(--primary)"><span class="status-dot dot-red dot-pulse" style="margin-right:4px"></span>Active</button>
+                  <button id="wr-tab-resolved" onclick="App.switchWarRoomTab('resolved')" class="btn btn-ghost btn-sm" style="padding:4px 10px;font-size:.75em">&#10003; Resolved</button>
+                </div>
                 <button class="btn btn-ghost btn-sm" onclick="App.loadWarRooms()">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                 </button>
@@ -2194,10 +2277,10 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <div id="s-security" class="section-page">
 
         <!-- Header -->
-        <div class="section-header">
+        <div class="section-header" style="margin-bottom:16px">
           <div>
-            <div class="section-title">Security</div>
-            <div class="section-sub">Credentials, audit trail &amp; webhook endpoints</div>
+            <div class="section-title">Security Center</div>
+            <div class="section-sub">Credentials, audit trail, policy guardrails &amp; webhooks</div>
           </div>
           <button class="btn btn-ghost btn-sm" onclick="App.loadSecrets();App.loadAudit();App.loadWebhookUrls();App.loadPolicyRules();" style="gap:6px">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -2205,75 +2288,76 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
           </button>
         </div>
 
-        <!-- Two-column layout: left = summary + creds, right = audit + webhooks -->
-        <div style="display:grid;grid-template-columns:1fr 360px;gap:16px;align-items:start">
+        <!-- Stat cards row -->
+        <div id="sec-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px"></div>
 
-          <!-- LEFT COLUMN -->
-          <div style="display:flex;flex-direction:column;gap:14px">
+        <!-- Row 1: Credentials (left) + Audit Log (right) -->
+        <div style="display:grid;grid-template-columns:1fr 1.1fr;gap:16px;margin-bottom:16px;align-items:start">
 
-            <!-- Credential health summary -->
-            <div id="sec-summary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px"></div>
-
-            <!-- Credentials card -->
-            <div class="card" style="padding:0;overflow:hidden">
-              <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
-                <div style="display:flex;align-items:center;gap:8px;font-size:.88em;font-weight:700;color:var(--text)">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                  Integration Credentials
-                </div>
-                <span style="font-size:.72em;padding:2px 8px;border-radius:12px;background:rgba(124,58,237,.1);color:#a78bfa;border:1px solid rgba(124,58,237,.2)">env vars</span>
+          <!-- Credentials card -->
+          <div class="card" style="padding:0;overflow:hidden">
+            <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:8px;font-size:.88em;font-weight:700">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                Integration Credentials
               </div>
-              <div id="secrets-list"><div class="loading-state"><div class="spinner"></div></div></div>
+              <span style="font-size:.7em;padding:2px 8px;border-radius:12px;background:rgba(124,58,237,.1);color:#a78bfa;border:1px solid rgba(124,58,237,.2)">env vars</span>
             </div>
+            <div id="secrets-list"><div class="loading-state"><div class="spinner"></div></div></div>
+          </div>
 
-          </div><!-- /left -->
-
-          <!-- RIGHT COLUMN -->
-          <div style="display:flex;flex-direction:column;gap:14px">
-
-            <!-- Audit log card -->
-            <div class="card" style="padding:0;overflow:hidden">
-              <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
-                <div style="display:flex;align-items:center;gap:8px;font-size:.88em;font-weight:700;color:var(--text)">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-                  Audit Log
-                </div>
-                <span style="font-size:.72em;color:var(--muted)">last 10 events</span>
+          <!-- Audit Log card -->
+          <div class="card" style="padding:0;overflow:hidden">
+            <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:8px;font-size:.88em;font-weight:700">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                Audit Log
               </div>
-              <div id="audit-list" style="max-height:320px;overflow-y:auto"><div class="loading-state"><div class="spinner"></div></div></div>
-            </div>
-
-            <!-- Policy Rules editor card -->
-            <div class="card" style="padding:0;overflow:hidden">
-              <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
-                <div style="display:flex;align-items:center;gap:8px;font-size:.88em;font-weight:700;color:var(--text)">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                  Policy Rules
-                </div>
-                <div style="display:flex;gap:6px">
-                  <button class="btn btn-ghost btn-sm" onclick="App.loadPolicyRules()" style="font-size:.72em;padding:3px 8px">&#8635; Reload</button>
-                  <button class="btn btn-primary btn-sm" onclick="App.savePolicyRules()" style="font-size:.72em;padding:3px 8px">&#10003; Save</button>
-                </div>
-              </div>
-              <div style="padding:12px 14px">
-                <div style="font-size:.76em;color:var(--muted);margin-bottom:8px">Edit guardrails, blocked actions and permissions. Changes take effect immediately.</div>
-                <textarea id="policy-rules-editor" rows="14" style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'SF Mono','Cascadia Code',ui-monospace,monospace;font-size:.77em;padding:10px;resize:vertical;outline:none;line-height:1.5" spellcheck="false"></textarea>
-                <div id="policy-rules-status" style="font-size:.75em;margin-top:5px;color:var(--muted)"></div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <input id="audit-search" type="text" placeholder="Filter by user or action..." oninput="App._filterAudit(this.value)"
+                  style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.75em;width:170px;outline:none">
+                <button class="btn btn-ghost btn-sm" onclick="App.loadAudit()" style="padding:3px 7px">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                </button>
               </div>
             </div>
+            <div id="audit-list" style="max-height:420px;overflow-y:auto"><div class="loading-state"><div class="spinner"></div></div></div>
+          </div>
 
-            <!-- Webhook endpoints card -->
-            <div class="card" style="padding:0;overflow:hidden">
-              <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                <span style="font-size:.88em;font-weight:700;color:var(--text)">Inbound Webhooks</span>
+        </div>
+
+        <!-- Row 2: Policy Rules (left) + Webhooks (right) -->
+        <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:16px;align-items:start">
+
+          <!-- Policy Rules card -->
+          <div class="card" style="padding:0;overflow:hidden">
+            <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:8px;font-size:.88em;font-weight:700">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                AI Policy Guardrails
               </div>
-              <div id="webhook-urls" style="padding:12px 14px"></div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span id="policy-rules-status" style="font-size:.72em;color:var(--muted)"></span>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadPolicyRules()">&#8635; Reload</button>
+                <button class="btn btn-primary btn-sm" onclick="App.savePolicyRules()">&#10003; Save Changes</button>
+              </div>
             </div>
+            <div id="policy-rules-ui" style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
+              <div style="font-size:.8em;color:var(--muted);grid-column:1/-1">Loading policy rules...</div>
+            </div>
+          </div>
 
-          </div><!-- /right -->
+          <!-- Webhooks card -->
+          <div class="card" style="padding:0;overflow:hidden">
+            <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              <span style="font-size:.88em;font-weight:700">Inbound Webhooks</span>
+            </div>
+            <div id="webhook-urls" style="padding:14px 18px"></div>
+          </div>
 
-        </div><!-- /grid -->
+        </div>
+
       </div>
 
     </div><!-- /content -->
@@ -2281,6 +2365,27 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
 </div><!-- /app -->
 
 <!-- MODALS -->
+
+<!-- Incident Detail Modal -->
+<div class="modal-overlay" id="incident-detail-modal" onclick="if(event.target===this)App.closeModal('incident-detail-modal')" style="z-index:1100">
+  <div class="modal" style="max-width:780px;width:95vw;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-header" style="flex-shrink:0">
+      <div class="modal-title" id="inc-modal-title">Incident Detail</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button id="inc-modal-rerun" class="btn btn-primary btn-sm" style="display:none" onclick="App._incModalRerun()">&#9654; Re-run Pipeline</button>
+        <button id="inc-modal-warroom" class="btn btn-ghost btn-sm" style="display:none" onclick="App._incModalWarRoom()">&#9873; War Room</button>
+        <button id="inc-modal-postmortem" class="btn btn-ghost btn-sm" style="display:none" onclick="App._incModalPostMortem()">&#128221; Post-Mortem</button>
+        <button class="modal-close" onclick="App.closeModal('incident-detail-modal')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="incident-detail-body" style="overflow-y:auto;flex:1;padding:0 2px 2px">
+      <div class="loading-state" style="padding:48px"><div class="spinner"></div></div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="approve-modal">
   <div class="modal">
     <div class="modal-header">
@@ -2330,7 +2435,8 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <select id="invite-role" class="form-input">
         <option value="viewer">Viewer — Read-only access</option>
         <option value="developer" selected>Developer — Manage incidents and infra</option>
-        <option value="admin">Admin — Full platform access</option>
+        <option value="admin" class="super-admin-only" style="display:none">Admin — Full platform access</option>
+        <option value="super_admin" class="super-admin-only" style="display:none">Super Admin — Manage admins</option>
       </select>
     </div>
     <button class="btn btn-primary" onclick="App.submitInvite()" style="width:100%;justify-content:center;padding:10px">
@@ -2339,6 +2445,35 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
     </button>
   </div>
 </div>
+<!-- Change Password Modal -->
+<div class="modal-overlay" id="change-password-modal">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-header">
+      <div class="modal-title">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        Change Password
+      </div>
+      <button class="modal-close" onclick="App.closeModal('change-password-modal')">&#10005;</button>
+    </div>
+    <div class="form-group mb-10">
+      <label class="form-label">Current Password</label>
+      <input type="password" id="cp-current" class="form-input" placeholder="Enter current password" autocomplete="current-password"/>
+    </div>
+    <div class="form-group mb-10">
+      <label class="form-label">New Password</label>
+      <input type="password" id="cp-new" class="form-input" placeholder="At least 8 characters" autocomplete="new-password"/>
+    </div>
+    <div class="form-group mb-14">
+      <label class="form-label">Confirm New Password</label>
+      <input type="password" id="cp-confirm" class="form-input" placeholder="Repeat new password" autocomplete="new-password"/>
+    </div>
+    <button class="btn btn-primary" id="cp-submit-btn" onclick="App.submitChangePassword()" style="width:100%;justify-content:center">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+      Update Password
+    </button>
+  </div>
+</div>
+
 <!-- Mobile sidebar overlay -->
 <div id="mobile-overlay" onclick="App.toggleMobileMenu()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:150;backdrop-filter:blur(2px)"></div>
 
@@ -2536,7 +2671,7 @@ const App = {
     else if(section==='security'){this.loadSecrets();this.loadAudit();this.loadWebhookUrls();this.loadPolicyRules();}
     else if(section==='cost')this.loadCostOverview();
     else if(section==='warroom')this.loadWarRooms();
-    else if(section==='incidents')this.loadIncidents();
+    else if(section==='incidents'){this.loadIncidents();this._initIncidentForm();}
     else if(section==='chat')this.restoreChatHistory();
   },
 
@@ -2603,6 +2738,7 @@ const App = {
     document.getElementById('login-screen').style.display='flex';
     document.getElementById('app').style.display='none';
     setTimeout(()=>document.getElementById('login-pass').focus(),100);
+    this.checkSSOAvailable();
   },
   showApp(){
     document.getElementById('login-screen').style.display='none';
@@ -2624,6 +2760,25 @@ const App = {
     const icon=document.getElementById('pw-toggle');
     if(inp.type==='password'){inp.type='text';icon.style.opacity='1';icon.title='Hide password';}
     else{inp.type='password';icon.style.opacity='.5';icon.title='Show password';}
+  },
+
+  async checkSSOAvailable(){
+    try{
+      const r=await fetch('/auth/sso/status',{method:'GET'});
+      if(!r.ok)return;
+      const d=await r.json();
+      if(d.configured){
+        const div=document.getElementById('sso-divider');
+        const btn=document.getElementById('sso-btn');
+        if(div)div.style.display='block';
+        if(btn){
+          btn.style.display='block';
+          const label=document.getElementById('sso-btn-label');
+          const provider=(d.provider||'SSO').charAt(0).toUpperCase()+(d.provider||'sso').slice(1);
+          if(label)label.textContent=`Sign in with ${provider}`;
+        }
+      }
+    }catch(e){}
   },
 
   async login(){
@@ -2730,6 +2885,12 @@ const App = {
       html+=`</div>`;
       if(issues.length){html+=`<div style="margin-top:10px">`+issues.map(i=>`<div style="padding:6px 10px;background:rgba(248,113,113,.07);border-left:2px solid var(--red);border-radius:0 6px 6px 0;font-size:.78em;margin-bottom:4px;color:var(--text2)">${i}</div>`).join('')+`</div>`;}
       document.getElementById('dash-health').innerHTML=html;
+      // Update health ring
+      const healthyCount=allIntegrations.filter(({key})=>sources.some(s=>s.toLowerCase().includes(key))||isOk).length;
+      const pct=Math.round((healthyCount/allIntegrations.length)*100);
+      const ring=document.getElementById('health-ring-wrap');
+      const rpct=document.getElementById('health-ring-pct');
+      if(ring){const c=pct>=80?'#4ade80':pct>=50?'#fbbf24':'#f87171';ring.style.background=`conic-gradient(${c} ${pct}%,rgba(255,255,255,.06) ${pct}%)`;if(rpct){rpct.textContent=pct+'%';rpct.style.color=c;}}
       // Update topbar status
       const ts=document.getElementById('topbar-status');
       if(isOk){ts.className='topbar-status';ts.innerHTML='<span class="status-dot dot-green dot-pulse"></span> All Systems Operational';}
@@ -3167,7 +3328,28 @@ const App = {
     if(m)m.style.display='none';
   },
 
+  _isAdmin(){
+    const r=localStorage.getItem('nexusops_role')||'viewer';
+    return r==='admin'||r==='super_admin';
+  },
+  _isDeveloperPlus(){
+    const r=localStorage.getItem('nexusops_role')||'viewer';
+    return ['developer','admin','super_admin'].includes(r);
+  },
+
+  _initIncidentForm(){
+    const isAdmin=this._isAdmin();
+    const wrap=document.getElementById('auto-rem-wrap');
+    const lock=document.getElementById('auto-rem-lock');
+    if(wrap){wrap.style.opacity=isAdmin?'1':'0.45';wrap.style.cursor=isAdmin?'pointer':'not-allowed';}
+    if(lock)lock.style.display=isAdmin?'none':'inline';
+  },
+
   toggleAutoRemediate(){
+    if(!this._isAdmin()){
+      this.toast('Auto-Remediate requires admin or super_admin role','error');
+      return;
+    }
     if(!this.autoRemediate){
       if(!confirm('Enable Auto-Remediate?\\n\\nThis will allow the pipeline to automatically execute infrastructure actions (restarts, scaling) without waiting for approval.\\n\\nOnly enable this if you trust the AI to act autonomously on your infrastructure.')){return;}
     }
@@ -3389,10 +3571,21 @@ const App = {
       </div>
 
       <!-- Awaiting approval banner -->
-      ${status==='awaiting_approval'?`<div style="margin:12px 0;padding:10px 14px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);border-radius:8px;display:flex;align-items:center;gap:10px">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        <span style="font-size:.83em;color:#fbbf24;font-weight:600">Remediation plan is waiting for approval.</span>
-        <button class="btn btn-sm" onclick="App.navigate('approvals')" style="margin-left:auto;padding:4px 10px;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.3);color:#fbbf24;border-radius:6px;font-size:.77em;cursor:pointer">View Approvals &#8594;</button>
+      ${(status==='awaiting_approval'||d.requires_human_approval)?`<div style="margin:12px 0;padding:12px 16px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);border-radius:10px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <span style="font-size:.84em;color:#fbbf24;font-weight:700">Awaiting Human Approval</span>
+          <button class="btn btn-sm" onclick="App.closeModal('incident-detail-modal');App.navigate('approvals')" style="margin-left:auto;padding:5px 12px;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.35);color:#fbbf24;border-radius:7px;font-size:.78em;cursor:pointer;font-weight:600">Review in Approvals →</button>
+        </div>
+        <div style="font-size:.78em;color:var(--muted);line-height:1.5">
+          The AI has analysed this incident and proposed ${(plan.actions||[]).length} action${(plan.actions||[]).length!==1?'s':''} below.
+          ${d._requested_by?` Requested by <b style="color:var(--text2)">${d._requested_by}</b>.`:''}
+          An admin or super_admin must approve before execution.
+        </div>
+      </div>`:''}
+
+      ${d._approval_id&&!['admin','super_admin'].includes(localStorage.getItem('nexusops_role')||'')?`<div style="margin:8px 0;padding:8px 12px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px;font-size:.78em;color:var(--muted)">
+        🔒 You can view this plan but only an admin can approve or reject it.
       </div>`:''}
 
 
@@ -3434,20 +3627,54 @@ const App = {
 
   _incidentItems: [],
 
+  // Statuses that count as "active" (not done)
+  _DONE_STATUSES: new Set(['completed','resolved','closed','done']),
+
+  _setIncidentFilter(status){
+    const sel=document.getElementById('inc-filter-status');
+    if(sel)sel.value=status;
+    const ab=document.getElementById('btn-active-filter');
+    if(ab)ab.style.background=status==='active'?'rgba(239,68,68,.15)':'';
+    this.filterIncidents();
+  },
+
+  navigateActiveIncidents(){
+    this.navigate('incidents');
+    this._pendingIncidentFilter='active';
+  },
+
+  // Normalise a raw status string → lowercase slug (underscores, no spaces)
+  _normaliseStatus(s){
+    return (s||'unknown').toLowerCase().trim().replace(/\s+/g,'_');
+  },
+
   filterIncidents(){
     const text=(document.getElementById('inc-filter-text')?.value||'').toLowerCase();
-    const status=(document.getElementById('inc-filter-status')?.value||'').toLowerCase();
-    const risk=(document.getElementById('inc-filter-risk')?.value||'').toLowerCase();
+    const statusVal=(document.getElementById('inc-filter-status')?.value||'').toLowerCase();
+    const riskVal=(document.getElementById('inc-filter-risk')?.value||'').toLowerCase();
     const sort=document.getElementById('inc-sort')?.value||'newest';
     const el=document.getElementById('active-incidents');
+    const banner=document.getElementById('active-incidents-banner');
     if(!el)return;
 
     let items=[...this._incidentItems];
+    const isActive=statusVal==='active';
 
-    // Filter
-    if(text)items=items.filter(i=>(i._id||'').toLowerCase().includes(text)||(i._desc||'').toLowerCase().includes(text));
-    if(status)items=items.filter(i=>(i._status||'').replace(/ /g,'_')===status);
-    if(risk)items=items.filter(i=>(i._risk||'')===risk);
+    // Text search
+    if(text)items=items.filter(i=>
+      (i._id||'').toLowerCase().includes(text)||
+      (i._desc||'').toLowerCase().includes(text)
+    );
+
+    // Status filter — _status is already a normalised slug
+    if(isActive){
+      items=items.filter(i=>!this._DONE_STATUSES.has(i._status));
+    } else if(statusVal){
+      items=items.filter(i=>i._status===statusVal);
+    }
+
+    // Risk filter
+    if(riskVal)items=items.filter(i=>i._risk===riskVal);
 
     // Sort
     const riskOrder={critical:0,high:1,medium:2,low:3};
@@ -3455,7 +3682,23 @@ const App = {
     else if(sort==='oldest')items.sort((a,b)=>(a._ts||0)-(b._ts||0));
     else if(sort==='risk')items.sort((a,b)=>(riskOrder[a._risk]??9)-(riskOrder[b._risk]??9));
 
-    if(!items.length){el.innerHTML='<div class="empty-state"><p>No incidents match the filter</p></div>';return;}
+    // Banner
+    if(banner){
+      if(isActive&&items.length){
+        banner.style.display='flex';banner.style.flexDirection='row';
+        const bt=document.getElementById('active-incidents-banner-text');
+        if(bt)bt.textContent=`${items.length} active incident${items.length!==1?'s':''} require attention`;
+      }else{
+        banner.style.display='none';
+      }
+    }
+
+    if(!items.length){
+      el.innerHTML=isActive
+        ?'<div class="empty-state"><div class="empty-icon" style="font-size:1.6em">✅</div><p style="color:#4ade80">No active incidents — all clear!</p></div>'
+        :'<div class="empty-state"><p>No incidents match the filter</p></div>';
+      return;
+    }
     el.innerHTML=items.map(i=>i._html).join('');
   },
 
@@ -3465,68 +3708,118 @@ const App = {
     if(el)el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
     this._incidentItems=[];
     try{
-      const r=await this.api('GET','/memory/incidents?limit=50');
-      if(r&&r.ok){
-        const d=await r.json();
-        const items=d.incidents||d.results||[];
-        if(!items.length){
-          if(el)el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No incidents in history</p></div>';
-          if(statsEl)statsEl.innerHTML='';
-          return;
-        }
-        // Summary stats
-        const total=items.length;
-        const critical=items.filter(i=>(i.risk_level||i.risk||'').toLowerCase()==='critical').length;
-        const high=items.filter(i=>(i.risk_level||i.risk||'').toLowerCase()==='high').length;
-        const awaiting=items.filter(i=>(i.status||'')==='awaiting_approval').length;
-        if(statsEl)statsEl.innerHTML=`
-          <div style="flex:1;min-width:80px;padding:8px 12px;background:var(--surface2);border-radius:8px;text-align:center">
-            <div style="font-size:1.3em;font-weight:700;color:var(--text)">${total}</div>
-            <div style="font-size:.72em;color:var(--text2)">Total</div>
-          </div>
-          ${critical?`<div style="flex:1;min-width:80px;padding:8px 12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:8px;text-align:center">
-            <div style="font-size:1.3em;font-weight:700;color:#f87171">${critical}</div>
-            <div style="font-size:.72em;color:var(--text2)">Critical</div>
-          </div>`:''}
-          ${high?`<div style="flex:1;min-width:80px;padding:8px 12px;background:rgba(248,113,113,.06);border:1px solid rgba(248,113,113,.15);border-radius:8px;text-align:center">
-            <div style="font-size:1.3em;font-weight:700;color:#fb923c">${high}</div>
-            <div style="font-size:.72em;color:var(--text2)">High</div>
-          </div>`:''}
-          ${awaiting?`<div style="flex:1;min-width:80px;padding:8px 12px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);border-radius:8px;text-align:center">
-            <div style="font-size:1.3em;font-weight:700;color:#fbbf24">${awaiting}</div>
-            <div style="font-size:.72em;color:var(--text2)">Awaiting</div>
-          </div>`:''}`;
-        // Table rows — build items with metadata for filtering
-        const rowItems=items.map(i=>{
-          const id=i.id||'unknown';
-          const rawDesc=i.description||i.summary||'';
-          const desc=rawDesc.substring(0,50)+(rawDesc.length>50?'…':'');
-          // Parse payload JSON if stored as string
-          let payload={};try{payload=typeof i.payload==='string'?JSON.parse(i.payload):i.payload||{};}catch(e){}
-          const risk=(i.risk||i.risk_level||payload.risk||'—').toLowerCase();
-          const status=(i.status||payload.status||'—').replace(/_/g,' ');
-          const actionCount=payload.actions_executed!==undefined?payload.actions_executed:(i.action_count||(i.actions?i.actions.length:0)||'—');
-          const riskCls=risk==='critical'||risk==='high'?'badge-red':risk==='medium'?'badge-amber':risk!=='—'?'badge-green':'';
-          const statusCls=status==='completed'?'badge-green':status==='awaiting approval'?'badge-amber':status==='failed'||status==='escalated'?'badge-red':status!=='—'?'badge-cyan':'';
-          // Date/time — top-level created_at (new) or inside payload (legacy)
-          const rawTs=i.created_at||payload.created_at||i.requested_at||'';
-          let dateStr='—';let timeStr='';let tsMs=0;
-          if(rawTs){try{const dt=new Date(rawTs);dateStr=dt.toLocaleDateString();timeStr=dt.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});tsMs=dt.getTime();}catch(e){}}
-          const fullDesc=payload.description||rawDesc||'';
-          const html=`<div style="display:grid;grid-template-columns:1fr 1.6fr 75px 80px 55px 110px;gap:8px;padding:8px;border-bottom:1px solid var(--border);cursor:pointer;font-size:.79em;align-items:center;transition:background .12s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" onclick="App.viewIncidentResult('${id}',this)">
-            <span style="font-weight:600;font-family:monospace;color:var(--cyan);font-size:.84em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${id}">${id}</span>
-            <span style="color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${fullDesc}">${fullDesc.substring(0,50)+(fullDesc.length>50?'…':'')||'—'}</span>
-            <span>${riskCls?`<span class="badge ${riskCls}" style="font-size:.7em;padding:1px 5px">${risk}</span>`:risk}</span>
-            <span>${statusCls?`<span class="badge ${statusCls}" style="font-size:.7em;padding:2px 5px">${status}</span>`:status}</span>
-            <span style="text-align:center;color:var(--text2)">${actionCount}</span>
-            <span style="color:var(--text2);font-size:.78em;line-height:1.4">${dateStr}${timeStr?`<br><span style="color:var(--muted)">${timeStr}</span>`:''}</span>
-          </div>`;
-          return {_id:id,_desc:fullDesc,_risk:risk==='—'?'':risk,_status:status,_ts:tsMs,_html:html};
-        });
-        this._incidentItems=rowItems;
-        if(el)el.innerHTML=rowItems.length?rowItems.map(i=>i._html).join(''):'<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No incidents in history</p></div>';
-      }else if(el)el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No incidents in history</p></div>';
-    }catch(e){if(el)el.innerHTML='<div class="empty-state"><p>Could not load incidents</p></div>';}
+      // Fetch incidents + pending approvals in parallel
+      const [r, ar]=await Promise.all([
+        this.api('GET','/memory/incidents?limit=100'),
+        this.api('GET','/approvals/pending').catch(()=>null)
+      ]);
+      if(!r||!r.ok){
+        if(el)el.innerHTML='<div class="empty-state"><p>Could not load incidents</p></div>';
+        return;
+      }
+      const d=await r.json();
+      const raw=d.incidents||d.results||[];
+
+      // Build set of incident IDs that have pending approvals
+      const pendingApprovalIds=new Set();
+      if(ar&&ar.ok){
+        try{const ad=await ar.json();(ad.approvals||[]).forEach(a=>{if(a.incident_id)pendingApprovalIds.add(a.incident_id);});}catch(e){}
+      }
+      if(!raw.length){
+        if(el)el.innerHTML='<div class="empty-state"><div class="empty-icon">✅</div><p>No incidents in history</p></div>';
+        if(statsEl)statsEl.innerHTML='';
+        return;
+      }
+
+      // ── Parse & normalise each record ────────────────────────────
+      const rowItems=raw.map(i=>{
+        // Safely parse payload
+        let p={};
+        try{p=typeof i.payload==='string'?JSON.parse(i.payload):(i.payload&&typeof i.payload==='object'?i.payload:{});}catch(e){}
+
+        const id=(i.id||p.incident_id||'unknown').toString();
+
+        // Description: prefer payload.description, then top-level
+        const fullDesc=(p.description||i.description||i.summary||p.summary||'').toString();
+
+        // Risk: normalise to lowercase slug
+        const rawRisk=(i.risk||i.risk_level||p.risk||p.risk_level||'').toString().toLowerCase().trim();
+        const risk=rawRisk||'unknown';
+
+        // Status: normalise to lowercase slug (underscores)
+        // Override with awaiting_approval if this incident has a pending approval
+        const rawStatus=pendingApprovalIds.has(id)?'awaiting_approval':(i.status||p.status||'').toString();
+        const status=this._normaliseStatus(rawStatus)||'unknown';
+
+        // Actions count
+        const actionCount=p.actions_executed!==undefined?p.actions_executed
+          :(i.action_count!==undefined?i.action_count
+          :(p.actions_taken!==undefined?p.actions_taken
+          :(Array.isArray(i.actions)?i.actions.length:'—')));
+
+        // Timestamp
+        const rawTs=i.created_at||p.created_at||i.requested_at||p.requested_at||'';
+        let dateStr='—';let timeStr='';let tsMs=0;
+        if(rawTs){try{const dt=new Date(rawTs);if(!isNaN(dt)){dateStr=dt.toLocaleDateString();timeStr=dt.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});tsMs=dt.getTime();}}catch(e){}}
+
+        // Badge colours
+        const riskCls=risk==='critical'||risk==='high'?'badge-red':risk==='medium'?'badge-amber':risk==='low'?'badge-green':'';
+        const statusColor=
+          status==='completed'||status==='resolved'?'#4ade80':
+          status==='failed'||status==='escalated'?'#f87171':
+          status==='awaiting_approval'?'#fbbf24':
+          status==='running'||status==='in_progress'?'#06b6d4':'#94a3b8';
+        const statusLabel=status.replace(/_/g,' ');
+
+        // Escape id for onclick (avoid quote issues)
+        const safeId=id.replace(/'/g,"\\'");
+        const html=`<div style="display:grid;grid-template-columns:1fr 1.6fr 70px 110px 50px 100px;gap:8px;padding:9px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:.79em;align-items:center;transition:background .12s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" onclick="App.openIncidentDetail(this.dataset.iid)" data-iid="${id.replace(/"/g,'&quot;')}">
+          <span style="font-weight:600;font-family:monospace;color:var(--cyan);font-size:.84em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${id}">${id}</span>
+          <span style="color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${fullDesc}">${(fullDesc.substring(0,55)+(fullDesc.length>55?'…':''))||'—'}</span>
+          <span>${riskCls?`<span class="badge ${riskCls}" style="font-size:.7em;padding:1px 5px">${risk}</span>`:`<span style="color:var(--muted);font-size:.78em">${risk}</span>`}</span>
+          <span><span style="font-size:.7em;padding:2px 7px;border-radius:10px;background:${statusColor}18;color:${statusColor};border:1px solid ${statusColor}30;font-weight:600;white-space:nowrap">${statusLabel}</span></span>
+          <span style="text-align:center;color:var(--text2)">${actionCount}</span>
+          <span style="color:var(--text2);font-size:.78em;line-height:1.4">${dateStr}${timeStr?`<br><span style="color:var(--muted)">${timeStr}</span>`:''}</span>
+        </div>`;
+
+        return {_id:id, _desc:fullDesc, _risk:risk, _status:status, _ts:tsMs, _html:html};
+      });
+
+      // ── Summary stats (after parsing) ──────────────────────────
+      const total=rowItems.length;
+      const active=rowItems.filter(i=>!this._DONE_STATUSES.has(i._status)).length;
+      const critical=rowItems.filter(i=>i._risk==='critical').length;
+      const awaiting=rowItems.filter(i=>i._status==='awaiting_approval').length;
+      if(statsEl)statsEl.innerHTML=`
+        <div onclick="App._setIncidentFilter('')" style="flex:1;min-width:70px;padding:7px 10px;background:var(--surface2);border-radius:8px;text-align:center;cursor:pointer">
+          <div style="font-size:1.2em;font-weight:700;color:var(--text)">${total}</div>
+          <div style="font-size:.7em;color:var(--text2)">Total</div>
+        </div>
+        <div onclick="App._setIncidentFilter('active')" style="flex:1;min-width:70px;padding:7px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:8px;text-align:center;cursor:pointer" title="Click to filter active">
+          <div style="font-size:1.2em;font-weight:700;color:#f87171">${active}</div>
+          <div style="font-size:.7em;color:var(--text2)">Active</div>
+        </div>
+        ${critical?`<div onclick="App._setIncidentFilter('');document.getElementById('inc-filter-risk').value='critical';App.filterIncidents();" style="flex:1;min-width:70px;padding:7px 10px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.15);border-radius:8px;text-align:center;cursor:pointer">
+          <div style="font-size:1.2em;font-weight:700;color:#f87171">${critical}</div>
+          <div style="font-size:.7em;color:var(--text2)">Critical</div>
+        </div>`:''}
+        ${awaiting?`<div onclick="App._setIncidentFilter('awaiting_approval')" style="flex:1;min-width:70px;padding:7px 10px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);border-radius:8px;text-align:center;cursor:pointer">
+          <div style="font-size:1.2em;font-weight:700;color:#fbbf24">${awaiting}</div>
+          <div style="font-size:.7em;color:var(--text2)">Awaiting</div>
+        </div>`:''}`;
+
+      this._incidentItems=rowItems;
+      if(el)el.innerHTML=rowItems.map(i=>i._html).join('');
+
+      // Apply pending filter
+      if(this._pendingIncidentFilter){
+        this._setIncidentFilter(this._pendingIncidentFilter);
+        this._pendingIncidentFilter=null;
+      }
+    }catch(e){
+      if(el)el.innerHTML='<div class="empty-state"><p>Could not load incidents</p></div>';
+      console.error('loadIncidents error:',e);
+    }
   },
 
   async viewIncidentResult(incidentId, rowEl){
@@ -3586,16 +3879,353 @@ const App = {
     }
   },
 
+  // ── Incident Detail Modal ─────────────────────────────────────
+  _incModalData:null,
+
+  async openIncidentDetail(incidentId){
+    this._incModalData=null;
+    document.getElementById('incident-detail-modal').classList.add('open');
+    document.getElementById('inc-modal-title').innerHTML=`<span style="font-family:monospace;color:var(--cyan)">${incidentId}</span>`;
+    document.getElementById('inc-modal-rerun').style.display='none';
+    document.getElementById('inc-modal-warroom').style.display='none';
+    document.getElementById('inc-modal-postmortem').style.display='none';
+    const body=document.getElementById('incident-detail-body');
+    body.innerHTML='<div class="loading-state" style="padding:48px"><div class="spinner"></div></div>';
+    try{
+      const r=await this.api('GET',`/incidents/${encodeURIComponent(incidentId)}/result`);
+      if(!r||!r.ok){
+        body.innerHTML='<div style="padding:32px;text-align:center;color:var(--muted);font-size:.84em">No stored data for this incident.<br><br><button id="inc-modal-fillbtn" class="btn btn-primary btn-sm">Fill &amp; Re-run Pipeline</button></div>';
+        const fb=body.querySelector('#inc-modal-fillbtn');
+        if(fb)fb.onclick=()=>{App.closeModal('incident-detail-modal');const el=document.getElementById('inc-id');if(el)el.value=incidentId;const rb=document.getElementById('run-inc-btn');if(rb)rb.scrollIntoView({behavior:'smooth'});};
+        return;
+      }
+      const d=await r.json();
+
+      // Enrich with pending approval data if plan.actions is empty
+      try{
+        const ar=await this.api('GET','/approvals/pending');
+        if(ar&&ar.ok){
+          const ad=await ar.json();
+          const ap=(ad.approvals||[]).find(a=>a.incident_id===incidentId);
+          if(ap){
+            // Merge approval actions into plan
+            if(!d.plan)d.plan={};
+            if(!d.plan.actions||!d.plan.actions.length)d.plan.actions=ap.actions||[];
+            if(!d.plan.root_cause&&ap.plan_summary)d.plan.root_cause=ap.plan_summary;
+            if(!d.plan.summary&&ap.plan_summary)d.plan.summary=ap.plan_summary;
+            if(!d.plan.risk&&ap.risk_score)d.plan.risk=ap.risk_score>=0.8?'high':ap.risk_score>=0.5?'medium':'low';
+            if(!d.plan.confidence&&ap.risk_score)d.plan.confidence=ap.risk_score;
+            // Mark as awaiting approval
+            d.status='awaiting_approval';
+            d.requires_human_approval=true;
+            d._approval_id=ap.correlation_id;
+            d._requested_by=ap.requested_by;
+            d._requested_at=ap.requested_at;
+          }
+        }
+      }catch(e){}
+
+      this._incModalData={id:incidentId,desc:d.description||'',d};
+      document.getElementById('inc-modal-rerun').style.display='';
+      document.getElementById('inc-modal-warroom').style.display='';
+      document.getElementById('inc-modal-postmortem').style.display='';
+      // Show Go to Approvals button if pending
+      if(d._approval_id){
+        const ab=document.getElementById('inc-modal-warroom');
+        if(ab){ab.textContent='⏳ Go to Approvals';ab.onclick=()=>{App.closeModal('incident-detail-modal');App.navigate('approvals');};}
+      }
+      this.renderIncidentResult(body,d,incidentId,false);
+    }catch(e){body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--red);font-size:.84em">Error: ${e.message}</div>`;}
+  },
+
+  _renderIncidentDetailModal(id,d){
+    const plan=d.plan||{};
+    const risk=(plan.risk||d.risk||'unknown').toLowerCase();
+    const status=(d.status||'—').replace(/_/g,' ');
+    const conf=Math.round((plan.confidence||0)*100);
+    const desc=d.description||plan.description||'';
+    const createdAt=d.created_at?new Date(d.created_at).toLocaleString():'';
+    const riskCls=risk==='critical'||risk==='high'?'badge-red':risk==='medium'?'badge-amber':risk!=='unknown'?'badge-green':'';
+    const statusCls=status==='completed'?'badge-green':status==='failed'||status==='escalated'?'badge-red':status==='awaiting approval'?'badge-amber':'badge-cyan';
+    const actions=d.actions_taken||plan.actions||d.actions||[];
+    const findings=plan.findings||plan.metrics||[];
+    const rootCause=plan.root_cause||plan.summary||d.summary||'';
+    const rec=plan.recommendations||[];
+
+    const pill=(text,cls)=>`<span class="badge ${cls}" style="font-size:.75em">${text}</span>`;
+    const sectionHdr=(title,icon)=>`<div style="display:flex;align-items:center;gap:8px;margin:20px 0 10px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+      <span style="font-size:.95em">${icon}</span>
+      <span style="font-size:.83em;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)">${title}</span>
+    </div>`;
+
+    return `<div style="padding:20px">
+      <!-- Header badges -->
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        ${riskCls?pill(risk+' risk',riskCls):''}
+        ${pill(status,statusCls)}
+        ${d.from_memory?pill('📂 from history','badge-cyan'):''}
+        ${createdAt?`<span style="margin-left:auto;font-size:.75em;color:var(--muted)">${createdAt}</span>`:''}
+      </div>
+
+      <!-- Description -->
+      ${desc?`<div style="font-size:.88em;color:var(--text2);line-height:1.6;padding:12px 14px;background:var(--surface2);border-radius:8px;margin-bottom:4px">${desc}</div>`:''}
+
+      <!-- Confidence bar -->
+      ${conf?`${sectionHdr('AI Confidence','🎯')}
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="flex:1;height:8px;background:var(--surface2);border-radius:4px;overflow:hidden">
+          <div style="height:100%;width:${conf}%;background:${conf>=70?'#4ade80':conf>=40?'#fbbf24':'#f87171'};border-radius:4px;transition:width .5s"></div>
+        </div>
+        <span style="font-size:.85em;font-weight:700;color:${conf>=70?'#4ade80':conf>=40?'#fbbf24':'#f87171'};min-width:36px">${conf}%</span>
+      </div>`:''}
+
+      <!-- Root Cause -->
+      ${rootCause?`${sectionHdr('Root Cause / Analysis','🔍')}
+      <div style="font-size:.84em;color:var(--text2);line-height:1.7;padding:12px 14px;background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.15);border-radius:8px;white-space:pre-wrap">${rootCause}</div>`:''}
+
+      <!-- Findings/Metrics -->
+      ${findings&&findings.length?`${sectionHdr('Findings','📊')}
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${findings.map(f=>`<div style="display:flex;align-items:flex-start;gap:8px;padding:8px 12px;background:var(--surface2);border-radius:6px;font-size:.82em">
+          <span style="color:#a78bfa;margin-top:1px">▸</span>
+          <span style="color:var(--text2)">${typeof f==='string'?f:JSON.stringify(f)}</span>
+        </div>`).join('')}
+      </div>`:''}
+
+      <!-- Actions taken -->
+      ${actions&&actions.length?`${sectionHdr('Actions Taken','⚡')}
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${actions.map((a,i)=>{
+          const aName=typeof a==='string'?a:(a.action||a.name||JSON.stringify(a));
+          const aResult=a.result||a.output||'';
+          const aOk=a.success!==false&&a.ok!==false;
+          return`<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:var(--surface2);border-radius:8px;border-left:3px solid ${aOk?'#4ade80':'#f87171'}">
+            <span style="font-size:.7em;padding:2px 6px;border-radius:10px;background:${aOk?'rgba(74,222,128,.12)':'rgba(248,113,113,.12)'};color:${aOk?'#4ade80':'#f87171'};font-weight:700;white-space:nowrap;flex-shrink:0;margin-top:1px">${i+1} ${aOk?'✓':'✗'}</span>
+            <div style="flex:1">
+              <div style="font-size:.82em;font-weight:600;color:var(--text)">${aName}</div>
+              ${aResult?`<div style="font-size:.76em;color:var(--muted);margin-top:3px">${typeof aResult==='string'?aResult:JSON.stringify(aResult)}</div>`:''}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`:''}
+
+      <!-- Recommendations -->
+      ${rec&&rec.length?`${sectionHdr('Recommendations','💡')}
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${rec.map(r=>`<div style="display:flex;align-items:flex-start;gap:8px;padding:8px 12px;background:rgba(34,197,94,.05);border:1px solid rgba(34,197,94,.15);border-radius:6px;font-size:.82em">
+          <span style="color:#4ade80;margin-top:1px">→</span>
+          <span style="color:var(--text2)">${typeof r==='string'?r:JSON.stringify(r)}</span>
+        </div>`).join('')}
+      </div>`:''}
+
+      ${!rootCause&&!actions.length&&!findings.length?`<div style="padding:32px;text-align:center;color:var(--muted);font-size:.84em">
+        <div style="font-size:2em;margin-bottom:8px">📂</div>
+        Incident recorded but detailed analysis not stored.<br>Re-run the pipeline to generate a full report.
+      </div>`:''}
+    </div>`;
+  },
+
+  _incModalRerun(){
+    if(!this._incModalData)return;
+    const id=this._incModalData.id;
+    const desc=this._incModalData.desc;
+    this.closeModal('incident-detail-modal');
+    // Navigate to incidents section first, then pre-fill and scroll
+    this.navigate('incidents');
+    setTimeout(()=>{
+      const idEl=document.getElementById('inc-id');
+      const descEl=document.getElementById('inc-desc');
+      if(idEl)idEl.value=id;
+      if(descEl&&desc)descEl.value=desc;
+      const btn=document.getElementById('run-inc-btn');
+      if(btn){btn.scrollIntoView({behavior:'smooth',block:'center'});btn.classList.add('btn-pulse');setTimeout(()=>btn.classList.remove('btn-pulse'),2000);}
+      this.toast('Pre-filled — click Run Pipeline to re-analyse','info');
+    },350);
+  },
+  _incModalWarRoom(){
+    if(!this._incModalData)return;
+    this.closeModal('incident-detail-modal');
+    this.createWarRoomFromIncident(this._incModalData.id,this._incModalData.desc);
+  },
+  async _incModalPostMortem(){
+    if(!this._incModalData)return;
+    const id=this._incModalData.id;
+    const d=this._incModalData.d||{};
+    // Render post-mortem inline in the modal body — don't close modal
+    const body=document.getElementById('incident-detail-body');
+    if(body)body.innerHTML='<div class="loading-state" style="padding:48px"><div class="spinner"></div><div style="margin-top:12px;font-size:.82em;color:var(--muted)">Generating post-mortem report…</div></div>';
+    try{
+      const plan=d.plan||{};
+      const payload={
+        incident_id:id,
+        description:d.description||plan.summary||'',
+        root_cause:plan.root_cause||'',
+        severity:plan.risk==='critical'?'SEV1':plan.risk==='high'?'SEV2':plan.risk==='medium'?'SEV3':'SEV4',
+        actions_taken:d.executed_actions||[],
+        errors:d.errors||[],
+        save_to_disk:true,
+      };
+      const resp=await this.api('POST',`/incidents/${id}/post-mortem`,payload,45000);
+      const r=resp&&resp.ok?await resp.json():null;
+      if(r&&(r.root_cause||r.impact)){
+        if(body)body.innerHTML=this._renderPostMortemModal(r);
+      }else{
+        if(body)body.innerHTML='<div style="padding:32px;text-align:center;color:var(--red);font-size:.84em">Post-mortem generation failed — check LLM configuration</div>';
+      }
+    }catch(e){
+      if(body)body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--red);font-size:.84em">Error: ${e.message}</div>`;
+    }
+  },
+  // ─────────────────────────────────────────────────────────────
+
+  _renderPostMortemModal(r){
+    // Same as _renderPostMortem but with Download PDF + Send to Slack + Back button
+    const sev=r.severity||'SEV2';
+    const sevColor={'SEV1':'#ef4444','SEV2':'#f97316','SEV3':'#f59e0b','SEV4':'#22c55e'}[sev]||'#94a3b8';
+    const now=new Date(r.generated_at||Date.now()).toLocaleString();
+    const dur=r.duration_minutes>0?`${Math.round(r.duration_minutes)} min`:'< 1 min';
+    const incId=this._incModalData?.id||r.incident_id||'';
+
+    const section=(title,icon,content)=>`
+      <div style="margin-bottom:24px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+          <span style="font-size:1em">${icon}</span>
+          <span style="font-size:.88em;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)">${title}</span>
+        </div>
+        ${content}
+      </div>`;
+
+    const bullet=(items,emptyMsg='None identified.')=>items&&items.length
+      ? `<ul style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px">${items.map(i=>`<li style="font-size:.85em;line-height:1.5">${i}</li>`).join('')}</ul>`
+      : `<p style="font-size:.84em;color:var(--muted);font-style:italic">${emptyMsg}</p>`;
+
+    const actionItems=r.action_items&&r.action_items.length?`
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${r.action_items.map((a,i)=>{
+          const pc={'P1':'#ef4444','P2':'#f97316','P3':'#22c55e'}[a.priority]||'#94a3b8';
+          return`<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface2);border-radius:8px;border-left:3px solid ${pc}">
+            <span style="font-size:.78em;font-weight:700;color:${pc};width:24px;flex-shrink:0">${a.priority}</span>
+            <span style="flex:1;font-size:.84em;font-weight:500">${a.title}</span>
+            <span style="font-size:.76em;color:var(--muted);white-space:nowrap">${a.owner||'TBD'}</span>
+            <span style="font-size:.74em;color:var(--muted);white-space:nowrap">${a.due_date||'TBD'}</span>
+          </div>`;
+        }).join('')}
+      </div>`
+      : `<p style="font-size:.84em;color:var(--muted);font-style:italic">No action items recorded.</p>`;
+
+    const timeline=r.timeline&&r.timeline.length?`
+      <div style="display:flex;flex-direction:column;gap:0">
+        ${r.timeline.map((e,i)=>`
+        <div style="display:flex;gap:12px;padding:8px 0;${i<r.timeline.length-1?'border-bottom:1px solid var(--border)':''}">
+          <div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0">
+            <div style="width:10px;height:10px;border-radius:50%;background:var(--cyan);flex-shrink:0;margin-top:4px"></div>
+            ${i<r.timeline.length-1?'<div style="width:1px;flex:1;background:var(--border);margin-top:4px"></div>':''}
+          </div>
+          <div style="flex:1;padding-bottom:${i<r.timeline.length-1?'8':'0'}px">
+            <div style="font-size:.74em;color:var(--muted);font-family:monospace">${e.timestamp||''}</div>
+            <div style="font-size:.84em;font-weight:500;margin-top:2px">${e.event||''}</div>
+            ${e.actor&&e.actor!=='system'?`<div style="font-size:.74em;color:var(--cyan);margin-top:2px">by ${e.actor}</div>`:''}
+          </div>
+        </div>`).join('')}
+      </div>`
+      : `<p style="font-size:.84em;color:var(--muted);font-style:italic">No timeline recorded.</p>`;
+
+    const pmId='pm-modal-content-'+Date.now();
+    // Store markdown + incId for Slack send (used by onclick handlers set via JS below)
+    const mdStr=r.markdown||'';
+
+    const html=`<div id="${pmId}" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden">
+      <!-- Header -->
+      <div style="background:linear-gradient(135deg,rgba(124,58,237,.12),rgba(59,130,246,.08));padding:20px 24px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span>📋</span>
+              <span style="font-size:.7em;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)">Post-Mortem Report</span>
+            </div>
+            <h2 style="font-size:1.05em;font-weight:700;margin:0 0 10px;word-break:break-word">${r.title||'Incident Post-Mortem'}</h2>
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              <span class="badge" style="background:${sevColor}18;color:${sevColor};border:1px solid ${sevColor}40;font-size:.7em;font-weight:700">${sev}</span>
+              <span style="font-size:.74em;color:var(--muted)">🔖 ${r.incident_id||incId}</span>
+              <span style="font-size:.74em;color:var(--muted)">⏱ ${dur}</span>
+              <span style="font-size:.74em;color:var(--muted)">🗓 ${now}</span>
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;flex-shrink:0">
+            <button id="pm-back-btn" class="btn btn-ghost btn-sm">← Back</button>
+            <button id="pm-copy-btn" class="btn btn-ghost btn-sm">📋 Copy MD</button>
+            <button id="pm-slack-btn" class="btn btn-ghost btn-sm">💬 Send to Slack</button>
+            <button id="pm-download-btn" class="btn btn-primary btn-sm">⬇ Download PDF</button>
+          </div>
+        </div>
+      </div>
+      <!-- Body -->
+      <div style="padding:24px">
+        ${section('Executive Summary','📊',`<p style="font-size:.86em;line-height:1.7;margin:0">${r.impact||r.summary||'See incident description.'}</p>`)}
+        ${section('Timeline','🕐',timeline)}
+        ${section('Root Cause','🔍',`<div style="padding:14px 16px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.2);border-radius:8px;font-size:.85em;line-height:1.6">${r.root_cause||'Not determined.'}</div>`)}
+        ${section('Contributing Factors','⚠️',bullet(r.contributing_factors))}
+        ${section('Resolution','✅',`<p style="font-size:.85em;line-height:1.7;margin:0">${r.resolution||'See incident notes.'}</p>`)}
+        ${section('Action Items','📌',actionItems)}
+        ${section('Lessons Learned','💡',bullet(r.lessons_learned,'None recorded.'))}
+        ${section('Prevention Steps','🛡️',bullet(r.prevention_steps,'None recorded.'))}
+      </div>
+      <!-- Footer -->
+      <div style="padding:12px 24px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface2)">
+        <span style="font-size:.73em;color:var(--muted)">Auto-generated by NexusOps AI · Blameless post-mortem</span>
+        <span style="font-size:.73em;color:var(--muted)">${now}</span>
+      </div>
+    </div>`;
+
+    // Attach event handlers after render (in next tick)
+    setTimeout(()=>{
+      const backBtn=document.getElementById('pm-back-btn');
+      if(backBtn) backBtn.onclick=()=>{
+        if(this._incModalData) this.openIncidentDetail(this._incModalData.id);
+      };
+      const copyBtn=document.getElementById('pm-copy-btn');
+      if(copyBtn) copyBtn.onclick=()=>{
+        navigator.clipboard.writeText(mdStr).then(()=>this.toast('Markdown copied!','success')).catch(()=>this.toast('Copy failed','error'));
+      };
+      const slackBtn=document.getElementById('pm-slack-btn');
+      if(slackBtn) slackBtn.onclick=async()=>{
+        slackBtn.disabled=true;slackBtn.textContent='Sending...';
+        try{
+          const text=`📋 *Post-Mortem: ${r.title||incId}*\n*Severity:* ${sev}\n*Duration:* ${dur}\n\n*Root Cause:*\n${r.root_cause||'See report'}\n\n*Resolution:*\n${r.resolution||'See report'}\n\nFull report generated by NexusOps AI`;
+          const resp=await this.api('POST','/incidents/'+incId+'/postmortem-slack',{message:text,incident_id:incId,title:r.title||'Post-Mortem'});
+          if(resp&&resp.ok){this.toast('Post-mortem sent to Slack!','success');}
+          else{this.toast('Slack not configured or send failed','error');}
+        }catch(e){this.toast('Error: '+e.message,'error');}
+        finally{slackBtn.disabled=false;slackBtn.textContent='💬 Send to Slack';}
+      };
+      const dlBtn=document.getElementById('pm-download-btn');
+      if(dlBtn) dlBtn.onclick=()=>{
+        // Use print dialog for PDF, or fallback to markdown download
+        const blob=new Blob([mdStr],{type:'text/markdown'});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');
+        a.href=url;a.download=`postmortem-${incId||'report'}.md`;
+        document.body.appendChild(a);a.click();
+        setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},500);
+        this.toast('Post-mortem downloaded as Markdown','success');
+      };
+    },50);
+
+    return html;
+  },
+
   rerunIncident(incidentId, description){
     const idEl=document.getElementById('inc-id');
     const descEl=document.getElementById('inc-desc');
     if(idEl)idEl.value=incidentId;
     if(descEl&&description)descEl.value=description;
-    document.getElementById('run-inc-btn').scrollIntoView({behavior:'smooth',block:'nearest'});
+    const btn=document.getElementById('run-inc-btn');
+    if(btn)btn.scrollIntoView({behavior:'smooth',block:'center'});
     this.toast('Pre-filled incident — click Run Pipeline to re-analyze','info');
   },
 
   async sendActionForApproval(btn){
+    if(!this._isAdmin()){this.toast('Only admin or super_admin can send actions for approval','error');return;}
     try{
       const action=JSON.parse(btn.dataset.action);
       const incidentId=btn.dataset.incident;
@@ -3760,27 +4390,54 @@ const App = {
     finally{btn.disabled=false;btn.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg> Open War Room';}
   },
 
+  _warRoomTab: 'active',
+
+  switchWarRoomTab(tab){
+    this._warRoomTab=tab;
+    const active=document.getElementById('wr-tab-active');
+    const resolved=document.getElementById('wr-tab-resolved');
+    if(active&&resolved){
+      if(tab==='active'){
+        active.style.background='rgba(124,58,237,.18)';active.style.borderColor='rgba(124,58,237,.4)';active.style.color='var(--primary)';
+        resolved.style.background='';resolved.style.borderColor='';resolved.style.color='';
+      } else {
+        resolved.style.background='rgba(74,222,128,.12)';resolved.style.borderColor='rgba(74,222,128,.3)';resolved.style.color='#4ade80';
+        active.style.background='';active.style.borderColor='';active.style.color='';
+      }
+    }
+    this.loadWarRooms();
+  },
+
   async loadWarRooms(){
     const el=document.getElementById('warroom-list');
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    const isResolved=this._warRoomTab==='resolved';
     try{
-      const r=await this.api('GET','/warroom/active');
+      const r=await this.api('GET', isResolved ? '/warroom/resolved' : '/warroom/active');
       const d=r&&r.ok?await r.json():{war_rooms:[]};
       const rooms=d.war_rooms||[];
-      if(!rooms.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9876;</div><p>No active war rooms</p><p style="color:var(--muted);font-size:.8em">Create one to get started</p></div>';return;}
+      if(!rooms.length){
+        el.innerHTML=isResolved
+          ? '<div class="empty-state"><div class="empty-icon">&#10003;</div><p>No resolved war rooms yet</p></div>'
+          : '<div class="empty-state"><div class="empty-icon">&#9876;</div><p>No active war rooms</p><p style="color:var(--muted);font-size:.8em">Create one to get started</p></div>';
+        return;
+      }
       const sevColor={critical:'var(--red)',high:'var(--amber)',medium:'var(--cyan)',low:'var(--green)'};
       el.innerHTML=rooms.map(wr=>{
-        const col=sevColor[wr.severity||'high']||'var(--amber)';
+        const col=isResolved?'var(--green)':(sevColor[wr.severity||'high']||'var(--amber)');
         const ch=wr.slack_channel?`<span class="badge badge-green" style="font-size:.72em">&#35;${(wr.slack_channel||'').replace('#','')}</span>`:'';
         const pts=wr.participants>0?`<span style="font-size:.74em;color:var(--muted)">${wr.participants} participant${wr.participants!==1?'s':''}</span>`:'';
-        return`<div style="padding:12px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" onclick="App.openWarRoom('${wr.war_room_id}','${wr.incident_id||''}','${(wr.description||'').replace(/'/g,'&apos;').replace(/"/g,'&quot;')}','${wr.slack_channel||''}')">
+        const resolvedBadge=isResolved?`<span class="badge badge-green" style="font-size:.7em">&#10003; Resolved</span>`:'';
+        const clickable=!isResolved?`cursor:pointer`:`cursor:default`;
+        const onclick=!isResolved?`onclick="App.openWarRoom('${wr.war_room_id}','${wr.incident_id||''}','${(wr.description||'').replace(/'/g,'&apos;').replace(/"/g,'&quot;')}','${wr.slack_channel||''}')"`:'' ;
+        return`<div style="padding:12px 14px;border-bottom:1px solid var(--border);${clickable};transition:background .15s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" ${onclick}>
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
             <span style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0"></span>
             <span style="font-weight:600;font-size:.88em">${wr.incident_id||wr.war_room_id}</span>
-            ${ch}
+            ${ch}${resolvedBadge}
           </div>
           <div style="font-size:.8em;color:var(--muted);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${wr.description||''}</div>
-          <div style="display:flex;gap:8px;align-items:center">${pts}</div>
+          <div style="display:flex;gap:8px;align-items:center">${pts}${wr.created_at?`<span style="font-size:.72em;color:var(--muted)">${new Date(wr.created_at).toLocaleDateString()}</span>`:''}</div>
         </div>`;
       }).join('');
     }catch(e){el.innerHTML='<div class="empty-state"><p>Could not load war rooms</p></div>';}
@@ -4077,7 +4734,9 @@ const App = {
               <span>Expires: <b style="${expiring?'color:var(--red)':''}">${exp}</b></span>
             </div>
           </div>
-          <button class="btn btn-primary btn-sm" onclick="App.openApproval('${a.correlation_id}')" style="flex-shrink:0;white-space:nowrap">Review &amp; Decide</button>
+          <button class="btn btn-primary btn-sm" onclick="App.openApproval('${a.correlation_id}')" style="flex-shrink:0;white-space:nowrap">
+            ${this._isAdmin()?'Review &amp; Decide':'🔒 View Only'}
+          </button>
         </div>`;
       }).join('');
     }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
@@ -4118,6 +4777,10 @@ const App = {
   },
 
   async openApproval(correlationId){
+    if(!this._isAdmin()){
+      this._showPermissionDenied('Approvals','Only admin or super_admin can review and decide on approval requests.','Your role: '+( localStorage.getItem('nexusops_role')||'viewer')+' — contact an admin to take action on this request.');
+      return;
+    }
     this.currentApprovalId=correlationId;
     this._approvalStatus=null;
     try{
@@ -4197,13 +4860,28 @@ const App = {
       const r=await this.api('POST','/approvals/'+this.currentApprovalId+'/approve',{approved_action_indices:indices});
       if(r&&r.ok){
         this.toast('Actions approved! Click "Resume Pipeline" to execute.','success');
-        // Show resume button
+        // Show approved badge in modal title area
+        const titleEl=document.getElementById('approve-modal-title');
+        if(titleEl&&!titleEl.querySelector('.approved-badge')){
+          const badge=document.createElement('span');
+          badge.className='approved-badge';
+          badge.style.cssText='margin-left:10px;padding:2px 10px;border-radius:20px;background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3);font-size:.7em;font-weight:700;letter-spacing:.05em;vertical-align:middle';
+          badge.textContent='✓ APPROVED';
+          titleEl.appendChild(badge);
+        }
+        // Show resume button, hide approve/reject
         document.getElementById('btn-approve').style.display='none';
         document.getElementById('btn-reject').style.display='none';
         document.getElementById('btn-resume').style.display='';
+        // Disable all checkboxes (read-only after approval)
+        document.querySelectorAll('#approve-modal-body input[type=checkbox]').forEach(c=>{c.disabled=true;});
         this._approvalStatus='approved';
         this.loadApprovals();
-      }else this.toast('Approval failed','error');
+      }else{
+        const d=r?await r.json():{};
+        if(r&&r.status===403)this.toast('Permission denied — developer or above required to approve actions','error');
+        else this.toast('Approval failed: '+(d.detail||'unknown error'),'error');
+      }
     }catch(e){this.toast('Error: '+e.message,'error');}
     finally{btn.disabled=false;btn.textContent='Approve Selected Actions';}
   },
@@ -4215,6 +4893,11 @@ const App = {
     try{
       const r=await this.api('POST','/approvals/'+this.currentApprovalId+'/reject',{reason});
       if(r&&r.ok){this.toast('Request rejected','info');this.closeModal('approve-modal');this.loadApprovals();}
+      else{
+        const d=r?await r.json():{};
+        if(r&&r.status===403)this.toast('Permission denied — developer or above required to reject actions','error');
+        else this.toast('Rejection failed: '+(d.detail||'unknown error'),'error');
+      }
     }catch(e){this.toast('Error: '+e.message,'error');}
   },
 
@@ -4229,29 +4912,55 @@ const App = {
         const incidentId=d.incident_id;
         const executed=d.executed_actions||[];
         const statusLabel=(d.status||'completed').replace(/_/g,' ');
-        this.closeModal('approve-modal');
-        this.loadApprovals();
-        // Navigate to incidents and show the execution result
-        this.navigate('incidents');
+        // Show execution summary in modal body briefly
+        const modalBody=document.getElementById('approve-modal-body');
+        if(modalBody){
+          const okCount=executed.filter(a=>a.status==='success'||a.status==='completed').length;
+          const failCount=executed.filter(a=>a.status==='failed'||a.status==='error').length;
+          modalBody.innerHTML=`<div style="padding:32px;text-align:center">
+            <div style="font-size:2.5em;margin-bottom:12px">${failCount>0?'⚠️':'✅'}</div>
+            <div style="font-size:1em;font-weight:700;margin-bottom:6px">${failCount>0?'Completed with errors':'Pipeline Executed Successfully'}</div>
+            <div style="font-size:.84em;color:var(--muted);margin-bottom:16px">${executed.length} action${executed.length!==1?'s':''} executed · ${okCount} succeeded · ${failCount} failed</div>
+            <div style="display:flex;flex-direction:column;gap:6px;max-width:360px;margin:0 auto">
+              ${executed.map(a=>{
+                const isOk=a.status==='success'||a.status==='completed';
+                const clr=isOk?'#4ade80':'#f87171';
+                return`<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--surface2);border-radius:8px;border-left:3px solid ${clr}">
+                  <span style="color:${clr}">${isOk?'✓':'✗'}</span>
+                  <span style="font-size:.82em">${a.type||a.action_type||'action'}</span>
+                  <span style="font-size:.78em;color:var(--muted);margin-left:auto">${a.status}</span>
+                </div>`;
+              }).join('')}
+            </div>
+            <div style="font-size:.76em;color:var(--muted);margin-top:16px">Redirecting to incident view…</div>
+          </div>`;
+          // Hide action buttons
+          document.getElementById('btn-resume').style.display='none';
+        }
+        // Close modal and navigate after a brief delay
+        setTimeout(()=>{this.closeModal('approve-modal');this.loadApprovals();},2200);
         setTimeout(()=>{
-          const resultEl=document.getElementById('inc-result');
-          if(resultEl){
-            this.renderIncidentResult(resultEl,d,incidentId,false);
-            resultEl.scrollIntoView({behavior:'smooth',block:'nearest'});
-          }
-          // Pre-fill incident ID
-          const idEl=document.getElementById('inc-id');
-          if(idEl&&incidentId)idEl.value=incidentId;
-        },300);
-        // Build toast with execution summary
-        const execSummary=executed.map(a=>{
-          const r=a.result||{};
-          if(r.previous_state&&r.current_state) return `${a.type}: ${r.previous_state} → ${r.current_state}`;
-          if(r.action) return r.action;
-          return `${a.type}: ${a.status}`;
-        }).join(', ');
-        this.toast(`Executed — ${execSummary||statusLabel}`,'success');
-        setTimeout(()=>this.loadIncidents(),500);
+          // Navigate to incidents and show the execution result
+          this.navigate('incidents');
+          setTimeout(()=>{
+            const resultEl=document.getElementById('inc-result');
+            if(resultEl){
+              this.renderIncidentResult(resultEl,d,incidentId,false);
+              resultEl.scrollIntoView({behavior:'smooth',block:'nearest'});
+            }
+            const idEl=document.getElementById('inc-id');
+            if(idEl&&incidentId)idEl.value=incidentId;
+          },300);
+          // Build toast with execution summary
+          const execSummary=executed.map(a=>{
+            const rv=a.result||{};
+            if(rv.previous_state&&rv.current_state) return `${a.type}: ${rv.previous_state} → ${rv.current_state}`;
+            if(rv.action) return rv.action;
+            return `${a.type}: ${a.status}`;
+          }).join(', ');
+          this.toast(`Executed — ${execSummary||statusLabel}`,'success');
+          setTimeout(()=>this.loadIncidents(),500);
+        },2500);
       }else{const e=await r.json().catch(()=>({}));this.toast('Resume failed: '+(e.detail||'Unknown'),'error');}
     }catch(e){this.toast('Error: '+e.message,'error');}
     finally{btn.disabled=false;btn.innerHTML='&#9654; Resume Pipeline';}
@@ -5520,7 +6229,7 @@ const App = {
   // ── USERS ────────────────────────────────────────────────────────
   _usersCache:[],
   async loadUsers(){
-    if(this.role==='admin'){
+    if(this.role==='admin'||this.role==='super_admin'){
       await this._loadAdminUsersView();
     } else {
       this._loadMyProfileView();
@@ -5558,42 +6267,79 @@ const App = {
       const users=d.users||[];
       this._usersCache=users;
       // Stats
+      const superAdmins=users.filter(u=>u.role==='super_admin').length;
       const admins=users.filter(u=>u.role==='admin').length;
       const devs=users.filter(u=>u.role==='developer').length;
       const viewers=users.filter(u=>u.role==='viewer').length;
+      const statCards=[
+        {label:'Total Members',val:users.length,color:'var(--purple)',bg:'rgba(124,58,237,.12)',filter:'all',icon:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`},
+        {label:'Admins',val:admins+(superAdmins>0?` <span style="font-size:.6em;color:#a78bfa">+${superAdmins} super</span>`:''),color:'#f87171',bg:'rgba(239,68,68,.1)',filter:'admin',icon:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`},
+        {label:'Developers',val:devs,color:'var(--cyan2)',bg:'rgba(6,182,212,.1)',filter:'developer',icon:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`},
+        {label:'Viewers',val:viewers,color:'#94a3b8',bg:'rgba(148,163,184,.1)',filter:'viewer',icon:`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`},
+      ];
       statsEl.style.display='grid';
       statsEl.style.gridTemplateColumns='repeat(4,1fr)';
       statsEl.style.gap='12px';
-      statsEl.innerHTML=[
-        {label:'Total Members',val:users.length,color:'var(--purple)',icon:'&#128101;'},
-        {label:'Admins',val:admins,color:'#f87171',icon:'&#9733;'},
-        {label:'Developers',val:devs,color:'var(--cyan2)',icon:'&#128187;'},
-        {label:'Viewers',val:viewers,color:'var(--muted)',icon:'&#128065;'},
-      ].map(s=>`<div class="card" style="padding:16px 18px;display:flex;align-items:center;gap:12px">
-        <div style="font-size:1.6em">${s.icon}</div>
-        <div><div style="font-size:1.5em;font-weight:700;color:${s.color}">${s.val}</div>
-        <div style="font-size:.78em;color:var(--muted)">${s.label}</div></div>
-      </div>`).join('');
-      // Table
-      main.innerHTML=`<div class="card" style="padding:0;overflow:hidden">
-        <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
-          <div class="card-title">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-            Team Members
+      statsEl.innerHTML=statCards.map(s=>`
+        <div class="card" onclick="App._filterUsersByRole('${s.filter}')" style="padding:18px;cursor:pointer;border:1px solid var(--border);transition:all .18s;position:relative;overflow:hidden"
+          onmouseover="this.style.borderColor='${s.color}';this.style.boxShadow='0 0 0 1px ${s.color}33'"
+          onmouseout="this.style.borderColor='var(--border)';this.style.boxShadow='none'">
+          <div style="position:absolute;top:0;left:0;right:0;height:2px;background:${s.color};opacity:.6"></div>
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px">
+            <div style="width:36px;height:36px;border-radius:9px;background:${s.bg};color:${s.color};display:flex;align-items:center;justify-content:center">${s.icon}</div>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:var(--muted);margin-top:4px"><polyline points="9 18 15 12 9 6"/></svg>
           </div>
-          <input id="users-search" type="text" placeholder="Search..." style="padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.8em;width:180px" oninput="App.filterUsers(this.value)">
+          <div style="font-size:1.8em;font-weight:800;color:${s.color};line-height:1">${s.val}</div>
+          <div style="font-size:.75em;color:var(--muted);margin-top:4px;font-weight:500">${s.label}</div>
+        </div>`).join('');
+      // Table with role filter pills
+      main.innerHTML=`<div class="card" style="padding:0;overflow:hidden">
+        <div style="padding:14px 18px 0;border-bottom:1px solid var(--border)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              Team Members
+            </div>
+            <input id="users-search" type="text" placeholder="&#128269; Search by name..." style="padding:6px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.8em;width:200px;outline:none" oninput="App.filterUsers(this.value)">
+          </div>
+          <div id="role-filter-pills" style="display:flex;gap:6px;padding-bottom:12px;flex-wrap:wrap">
+            ${['all','super_admin','admin','developer','viewer'].map((r,i)=>{
+              const cnt=r==='all'?users.length:users.filter(u=>u.role===r).length;
+              const colors={all:'var(--purple)',super_admin:'#a78bfa',admin:'#f87171',developer:'var(--cyan2)',viewer:'#94a3b8'};
+              const label={all:'All',super_admin:'Super Admin',admin:'Admin',developer:'Developer',viewer:'Viewer'}[r];
+              return`<button id="rfpill-${r}" onclick="App._filterUsersByRole('${r}')" style="padding:4px 12px;border-radius:20px;border:1px solid ${i===0?colors[r]:'var(--border)'};background:${i===0?colors[r]+'22':'transparent'};color:${i===0?colors[r]:'var(--muted)'};font-size:.75em;font-weight:600;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:5px">
+                ${label}<span style="background:${i===0?colors[r]+'33':'var(--border)'};padding:1px 6px;border-radius:10px;font-size:.85em">${cnt}</span>
+              </button>`;
+            }).join('')}
+          </div>
         </div>
         <div id="users-table"></div>
       </div>`;
+      this._usersCache=users;
+      this._activeRoleFilter='all';
       this._renderUsersTable(users);
-      // My account at bottom for admin
-      sec.innerHTML=`<div class="card" style="padding:0;overflow:hidden">
-        <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
-          <div class="card-title">&#9881; Admin Account</div>
+      // Pending invites + my account
+      sec.innerHTML=`
+        <div class="card" style="padding:0;overflow:hidden;margin-bottom:16px">
+          <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
+            <div class="card-title">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              Pending Invites
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="App._loadPendingInvites()">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            </button>
+          </div>
+          <div id="pending-invites-list" style="padding:16px"></div>
         </div>
-        <div style="padding:20px" id="admin-account-inner"></div>
-      </div>`;
+        <div class="card" style="padding:0;overflow:hidden">
+          <div class="card-header" style="padding:14px 18px 12px;border-bottom:1px solid var(--border)">
+            <div class="card-title">&#9881; My Account</div>
+          </div>
+          <div style="padding:20px" id="admin-account-inner"></div>
+        </div>`;
       document.getElementById('admin-account-inner').innerHTML=this._buildAccountHTML();
+      this._loadPendingInvites();
     }catch(e){main.innerHTML=`<div class="card"><div class="empty-state" style="padding:32px"><p>Error: ${e.message}</p></div></div>`;}
   },
 
@@ -5613,16 +6359,20 @@ const App = {
     // Profile card
     main.innerHTML=`<div class="card" style="padding:28px">${this._buildAccountHTML()}</div>`;
     // Access info card
-    const roleDesc={'developer':'You can run incidents, approve actions, and deploy changes. You cannot manage users or edit secrets.',
+    const roleDesc={
+      'super_admin':'You have full platform control including managing and removing admin accounts. You can assign any role.',
+      'admin':'You have full access to incidents, deployments, user management, and secrets. You cannot promote users to admin — only a super_admin can.',
+      'developer':'You can run incidents, approve actions, and deploy changes. You cannot manage users or edit secrets.',
       'viewer':'You have read-only access to dashboards and monitoring. Contact an admin to request elevated access.'};
+    const needsMore=this.role==='viewer'||this.role==='developer';
     sec.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
       <div class="card" style="padding:20px">
         <div style="font-weight:600;margin-bottom:12px;font-size:.9em">&#128274; Access Level</div>
         <p style="font-size:.83em;color:var(--text2);line-height:1.6;margin:0">${roleDesc[this.role]||'Standard platform access.'}</p>
-        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+        ${needsMore?`<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
           <div style="font-size:.75em;color:var(--muted);margin-bottom:6px;font-weight:600;text-transform:uppercase">Need more access?</div>
           <p style="font-size:.8em;color:var(--text2);margin:0">Contact your NsOps administrator to request a role change.</p>
-        </div>
+        </div>`:''}
       </div>
       <div class="card" style="padding:20px">
         <div style="font-weight:600;margin-bottom:12px;font-size:.9em">&#128640; Quick Actions</div>
@@ -5637,29 +6387,32 @@ const App = {
   },
 
   _buildAccountHTML(){
-    const roleColor=this.role==='admin'?'#f87171':this.role==='developer'?'var(--cyan2)':'var(--muted)';
+    const roleColor={'super_admin':'#a78bfa','admin':'#f87171','developer':'var(--cyan2)','viewer':'#94a3b8'}[this.role]||'var(--muted)';
     const perms={
-      'admin':   ['View all data','Run incidents','Manage users','Approve actions','Deploy changes','Edit secrets','Configure integrations'],
-      'developer':['View all data','Run incidents','Approve actions','Deploy changes'],
-      'viewer':  ['View dashboards','View monitoring','Read-only access']
+      'super_admin':['Full platform control','Manage & remove admins','Approve all actions','Run incident pipeline','Deploy & rollback','Manage users & roles','Edit secrets','Configure integrations'],
+      'admin':      ['View all data','Run incidents','Manage users','Approve actions','Deploy changes','Edit secrets','Configure integrations'],
+      'developer':  ['View all data','Run incidents','Approve actions','Deploy changes'],
+      'viewer':     ['View dashboards','View monitoring','Read-only access']
     };
     const myPerms=perms[this.role]||perms['viewer'];
+    const isAdmin=this.role==='admin'||this.role==='super_admin';
     return`<div style="display:grid;grid-template-columns:auto 1fr;gap:24px;align-items:start">
-      <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--purple),var(--cyan2));display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:700">${(this.username||'?')[0].toUpperCase()}</div>
+      <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,${roleColor}88,${roleColor}44);border:2px solid ${roleColor}44;display:flex;align-items:center;justify-content:center;font-size:1.5em;font-weight:700">${(this.username||'?')[0].toUpperCase()}</div>
       <div>
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
           <div style="font-size:1.15em;font-weight:700">${this.username}</div>
-          <span style="font-size:.75em;font-weight:600;color:${roleColor};background:${roleColor}22;padding:3px 12px;border-radius:12px;text-transform:capitalize">${this.role}</span>
+          <span style="font-size:.75em;font-weight:600;color:${roleColor};background:${roleColor}22;padding:3px 12px;border-radius:12px;text-transform:capitalize;border:1px solid ${roleColor}33">${this.role.replace('_',' ')}</span>
         </div>
         <div style="color:var(--muted);font-size:.82em;margin-bottom:18px">NsOps Platform · Active Session</div>
         <div style="font-size:.75em;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em">Permissions</div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:${this.role==='admin'?'20px':'0'}">
-          ${myPerms.map(p=>`<span style="font-size:.78em;padding:4px 11px;border-radius:12px;background:var(--bg3);color:var(--text2);border:1px solid var(--border)">&#10003; ${p}</span>`).join('')}
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:${isAdmin?'20px':'0'}">
+          ${myPerms.map(p=>`<span style="font-size:.78em;padding:4px 11px;border-radius:12px;background:${roleColor}11;color:${roleColor};border:1px solid ${roleColor}33">&#10003; ${p}</span>`).join('')}
         </div>
-        ${this.role==='admin'?`<div style="padding-top:18px;border-top:1px solid var(--border)">
-          <div style="font-size:.75em;color:var(--muted);margin-bottom:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em">Admin Controls</div>
+        ${isAdmin?`<div style="padding-top:18px;border-top:1px solid var(--border)">
+          <div style="font-size:.75em;color:var(--muted);margin-bottom:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em">Quick Controls</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-sm" onclick="App.openInviteModal()">&#43; Invite User</button>
+            <button class="btn btn-ghost btn-sm" onclick="App.navigate('approvals')">&#10003; Approvals</button>
             <button class="btn btn-ghost btn-sm" onclick="App.navigate('security')">&#128274; Security</button>
             <button class="btn btn-ghost btn-sm" onclick="App.navigate('integrations')">&#128279; Integrations</button>
             <button class="btn btn-ghost btn-sm" onclick="App.navigate('monitoring')">&#128200; Monitoring</button>
@@ -5673,7 +6426,18 @@ const App = {
     const el=document.getElementById('users-table');
     if(!el)return;
     if(!users.length){el.innerHTML='<div class="empty-state" style="padding:32px"><p>No users found</p></div>';return;}
-    const roleColors={'admin':'#f87171','developer':'var(--cyan2)','viewer':'var(--muted)'};
+    const isSuperAdmin=this.role==='super_admin';
+    const roleColors={'super_admin':'#a78bfa','admin':'#f87171','developer':'var(--cyan2)','viewer':'var(--muted)'};
+    // Build role options based on caller's role
+    const roleOpts=(cur)=>{
+      const opts=[
+        {v:'viewer',l:'Viewer'},
+        {v:'developer',l:'Developer'},
+        {v:'admin',l:'Admin'},
+      ];
+      if(isSuperAdmin) opts.push({v:'super_admin',l:'Super Admin'});
+      return opts.map(o=>`<option value="${o.v}" ${cur===o.v?'selected':''}>${o.l}</option>`).join('');
+    };
     el.innerHTML=`<div class="table-wrap"><table style="width:100%">
       <thead><tr>
         <th style="padding:10px 18px;font-size:.73em;color:var(--muted);font-weight:600;text-transform:uppercase">User</th>
@@ -5685,6 +6449,9 @@ const App = {
       <tbody>${users.map(u=>{
         const rc=roleColors[u.role]||'var(--muted)';
         const isMe=u.username===this.username;
+        const isProtected=(u.role==='admin'||u.role==='super_admin')&&!isSuperAdmin;
+        const canChange=!isMe&&!isProtected;
+        const canDelete=!isMe&&!isProtected;
         return`<tr style="border-top:1px solid var(--border)">
           <td style="padding:12px 18px">
             <div style="display:flex;align-items:center;gap:10px">
@@ -5698,47 +6465,200 @@ const App = {
           <td style="padding:12px 18px"><span style="font-size:.78em;font-weight:600;color:${rc};background:${rc}22;padding:3px 10px;border-radius:12px">${u.role}</span></td>
           <td style="padding:12px 18px;color:var(--muted);font-size:.82em">${(u.created_at||'').substring(0,10)||'—'}</td>
           <td style="padding:12px 18px">
-            <select onchange="App.changeUserRole('${u.username}',this.value)" ${isMe?'disabled title="Cannot change your own role"':''} style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.8em;cursor:pointer">
-              <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
-              <option value="developer" ${u.role==='developer'?'selected':''}>Developer</option>
-              <option value="viewer" ${u.role==='viewer'?'selected':''}>Viewer</option>
-            </select>
+            ${canChange
+              ? `<select onchange="App.changeUserRole('${u.username}',this.value)" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.8em;cursor:pointer">${roleOpts(u.role)}</select>`
+              : `<span style="font-size:.75em;color:var(--muted)">${isMe?'(you)':'super_admin only'}</span>`
+            }
           </td>
           <td style="padding:12px 18px">
-            <button class="btn btn-danger btn-sm" onclick="App.deleteUser('${u.username}')" ${isMe?'disabled title="Cannot remove yourself"':''}>Remove</button>
+            ${canDelete
+              ? `<button class="btn btn-danger btn-sm" onclick="App.deleteUser('${u.username}')">Remove</button>`
+              : `<button class="btn btn-sm" disabled style="opacity:.4;cursor:not-allowed">${isMe?'(you)':'Protected'}</button>`
+            }
           </td>
         </tr>`;
       }).join('')}</tbody></table></div>`;
   },
   filterUsers(q){
     const f=q.toLowerCase();
-    this._renderUsersTable(f?this._usersCache.filter(u=>u.username.includes(f)||u.role.includes(f)):this._usersCache);
+    let list=this._activeRoleFilter&&this._activeRoleFilter!=='all'
+      ?this._usersCache.filter(u=>u.role===this._activeRoleFilter)
+      :this._usersCache;
+    if(f) list=list.filter(u=>u.username.includes(f)||(u.email||'').includes(f)||u.role.includes(f));
+    this._renderUsersTable(list);
+  },
+  _filterUsersByRole(role){
+    this._activeRoleFilter=role;
+    // Update pill styles
+    const roleColors={all:'var(--purple)',super_admin:'#a78bfa',admin:'#f87171',developer:'var(--cyan2)',viewer:'#94a3b8'};
+    ['all','super_admin','admin','developer','viewer'].forEach(r=>{
+      const pill=document.getElementById('rfpill-'+r);
+      if(!pill)return;
+      const active=r===role;
+      const c=roleColors[r];
+      pill.style.borderColor=active?c:'var(--border)';
+      pill.style.background=active?c+'22':'transparent';
+      pill.style.color=active?c:'var(--muted)';
+    });
+    const q=(document.getElementById('users-search')||{}).value||'';
+    this.filterUsers(q);
   },
   async changeUserRole(username,role){
     const r=await this.api('PUT','/users/'+username+'/role',{role});
-    if(r&&r.ok){this.toast('Role updated for '+username,'success');this._loadAdminUsersView();}
-    else this.toast('Failed to update role','error');
+    if(r&&r.ok){this.toast('Role updated for '+username,'success');this.loadUsers();}
+    else{
+      let msg='Failed to update role';
+      try{const d=await r.json();msg=d.detail||msg;}catch(e){}
+      this.toast(msg,'error');
+      this.loadUsers(); // re-render to reset dropdown
+    }
   },
 
   async deleteUser(username){
     if(!confirm('Delete user '+username+'?')) return;
     const r=await this.api('DELETE','/users/'+username);
     if(r&&r.ok){this.toast('User deleted','success');this.loadUsers();}
-    else this.toast('Failed to delete user','error');
+    else{
+      let msg='Failed to delete user';
+      try{const d=await r.json();msg=d.detail||msg;}catch(e){}
+      this.toast(msg,'error');
+    }
   },
 
-  openInviteModal(){document.getElementById('invite-modal').classList.add('open');},
+  openInviteModal(){
+    // Show admin/super_admin role options only to super_admin
+    const isSuperAdmin = this.role === 'super_admin';
+    document.querySelectorAll('#invite-role .super-admin-only').forEach(opt=>{
+      opt.style.display = isSuperAdmin ? '' : 'none';
+    });
+    document.getElementById('invite-modal').classList.add('open');
+  },
+
+  openChangePasswordModal(){
+    ['cp-current','cp-new','cp-confirm'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+    document.getElementById('change-password-modal').classList.add('open');
+  },
+
+  async submitChangePassword(){
+    const current=document.getElementById('cp-current').value;
+    const newPw=document.getElementById('cp-new').value;
+    const confirm=document.getElementById('cp-confirm').value;
+    if(!current||!newPw||!confirm){this.toast('All fields are required','error');return;}
+    if(newPw.length<8){this.toast('New password must be at least 8 characters','error');return;}
+    if(newPw!==confirm){this.toast('New passwords do not match','error');return;}
+    const btn=document.getElementById('cp-submit-btn');
+    btn.disabled=true;btn.textContent='Updating...';
+    try{
+      const r=await this.api('POST','/auth/change-password',{current_password:current,new_password:newPw});
+      if(r&&r.ok){
+        this.toast('Password updated successfully','success');
+        this.closeModal('change-password-modal');
+      } else {
+        const d=await r.json().catch(()=>({}));
+        this.toast(d.detail||'Failed to update password','error');
+      }
+    }catch(e){this.toast('Error: '+e.message,'error');}
+    finally{btn.disabled=false;btn.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> Update Password';}
+  },
 
   async submitInvite(){
     const username=document.getElementById('invite-username').value.trim();
     const email=document.getElementById('invite-email').value.trim();
     const role=document.getElementById('invite-role').value;
-    if(!username){this.toast('Username required','error');return;}
+    if(!username||!email){this.toast('Username and email are required','error');return;}
+    if(!/^[^@]+@[^@]+\.[^@]+$/.test(email)){this.toast('Enter a valid email address','error');return;}
+    const btn=document.querySelector('#invite-modal .btn-primary');
+    if(btn){btn.disabled=true;btn.textContent='Sending...';}
     try{
       const r=await this.api('POST','/users/invite',{username,email,role});
-      if(r&&r.ok){const d=await r.json();this.toast('Invite sent! OTP: '+d.otp,'success');this.closeModal('invite-modal');this.loadUsers();}
-      else this.toast('Failed to create invite','error');
+      if(r&&r.ok){
+        const d=await r.json();
+        this.closeModal('invite-modal');
+        // Show success info — setup link only, no OTP
+        const msg=d.email_sent
+          ?`Invite email sent to <b>${email}</b>. Link expires in 48 hours.`
+          :`Email not configured. Share this setup link with <b>${username}</b>:<br><br><input type="text" value="${d.setup_link}" readonly onclick="this.select()" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--cyan2);font-size:.78em;cursor:pointer;font-family:monospace">`;
+        this._showInfoModal('Invite Created',msg);
+        this.loadUsers();
+      } else {
+        const d=await r.json().catch(()=>({}));
+        this.toast(d.detail||'Failed to create invite','error');
+      }
     }catch(e){this.toast('Error: '+e.message,'error');}
+    finally{if(btn){btn.disabled=false;btn.textContent='Send Invite';}}
+  },
+  async _loadPendingInvites(){
+    const el=document.getElementById('pending-invites-list');
+    if(!el)return;
+    el.innerHTML='<div style="font-size:.8em;color:var(--muted)">Loading...</div>';
+    try{
+      const r=await this.api('GET','/users/invites');
+      if(!r||!r.ok){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">Unable to load invites</div>';return;}
+      const d=await r.json();
+      const invites=d.invites||[];
+      if(!invites.length){el.innerHTML='<div style="font-size:.82em;color:var(--muted);text-align:center;padding:12px 0">No pending invites</div>';return;}
+      const appUrl=window.location.origin;
+      el.innerHTML=invites.map(inv=>{
+        const hoursLeft=Math.max(0,Math.round((new Date(inv.expires_at)-Date.now())/3600000));
+        const expColor=hoursLeft<6?'#f87171':hoursLeft<24?'#fbbf24':'#4ade80';
+        const roleColors={super_admin:'#a78bfa',admin:'#f87171',developer:'var(--cyan2)',viewer:'#94a3b8'};
+        const rc=roleColors[inv.role]||'var(--muted)';
+        return`<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.025);margin-bottom:6px">
+          <div style="width:32px;height:32px;border-radius:50%;background:rgba(124,58,237,.15);color:#a78bfa;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.78em;font-weight:700">${(inv.username||'?').slice(0,2).toUpperCase()}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:.83em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${inv.username}</div>
+            <div style="font-size:.72em;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${inv.email}</div>
+          </div>
+          <span style="font-size:.68em;font-weight:600;color:${rc};background:${rc}18;padding:2px 7px;border-radius:10px;flex-shrink:0">${inv.role}</span>
+          <span style="font-size:.68em;color:${expColor};flex-shrink:0;white-space:nowrap" title="Invite expires at ${inv.expires_at}">⏱ Expires in ${hoursLeft}h</span>
+          <button onclick="App._resendInvite('${inv.full_token}','${inv.username}','${inv.email}','${inv.role}')" title="Resend invite" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text2);cursor:pointer;font-size:.75em;flex-shrink:0">Resend</button>
+          <button onclick="App._cancelInvite('${inv.full_token}')" title="Cancel invite" style="padding:5px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:transparent;color:#f87171;cursor:pointer;font-size:.75em;flex-shrink:0">✕</button>
+        </div>`;
+      }).join('');
+    }catch(e){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">Error loading invites</div>';}
+  },
+  async _cancelInvite(token){
+    if(!confirm('Cancel this invite?'))return;
+    const r=await this.api('DELETE','/users/invites/'+token);
+    if(r&&r.ok){this.toast('Invite cancelled','success');this._loadPendingInvites();}
+    else this.toast('Failed to cancel','error');
+  },
+  async _resendInvite(token,username,email,role){
+    // Cancel old invite and create a new one
+    await this.api('DELETE','/users/invites/'+token);
+    const r=await this.api('POST','/users/invite',{username,email,role});
+    if(r&&r.ok){
+      const d=await r.json();
+      const msg=d.email_sent
+        ?`Invite resent to <b>${email}</b>. New link expires in 48 hours.`
+        :`Email not configured. Share this new setup link:<br><br><input type="text" value="${d.setup_link}" readonly onclick="this.select()" style="width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--cyan2);font-size:.78em;cursor:pointer;font-family:monospace">`;
+      this._showInfoModal('Invite Resent',msg);
+      this._loadPendingInvites();
+    } else this.toast('Failed to resend invite','error');
+  },
+  _showPermissionDenied(action,reason,hint=''){
+    const role=localStorage.getItem('nexusops_role')||'viewer';
+    const roleColors={super_admin:'#a78bfa',admin:'#60a5fa',developer:'#34d399',viewer:'#94a3b8'};
+    const rc=roleColors[role]||'#94a3b8';
+    this._showInfoModal('Permission Denied',`
+      <div style="text-align:center;padding:16px 0 8px">
+        <div style="font-size:2.5em;margin-bottom:8px">🔒</div>
+        <div style="font-size:.95em;font-weight:700;color:var(--text);margin-bottom:6px">${action}</div>
+        <div style="font-size:.83em;color:var(--text2);margin-bottom:16px;line-height:1.6">${reason}</div>
+        <div style="display:inline-flex;align-items:center;gap:8px;padding:8px 16px;background:${rc}12;border:1px solid ${rc}30;border-radius:8px;margin-bottom:12px">
+          <span style="font-size:.7em;padding:2px 8px;border-radius:10px;background:${rc}20;color:${rc};font-weight:700;border:1px solid ${rc}40">${role}</span>
+          <span style="font-size:.8em;color:var(--muted)">Your current role</span>
+        </div>
+        ${hint?`<div style="font-size:.78em;color:var(--muted);line-height:1.5">${hint}</div>`:''}
+      </div>`);
+  },
+
+  _showInfoModal(title,html){
+    let m=document.getElementById('_info-modal');
+    if(!m){m=document.createElement('div');m.id='_info-modal';m.className='modal-overlay';m.innerHTML=`<div class="modal" style="max-width:440px"><div class="modal-header"><div class="modal-title" id="_info-title"></div><button class="modal-close" onclick="document.getElementById('_info-modal').classList.remove('open')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div id="_info-body" style="font-size:.88em;color:var(--text2);line-height:1.7;padding-top:4px"></div></div>`;document.body.appendChild(m);}
+    document.getElementById('_info-title').textContent=title;
+    document.getElementById('_info-body').innerHTML=html;
+    m.classList.add('open');
   },
 
   // ── SECURITY ─────────────────────────────────────────────────────
@@ -5815,73 +6735,214 @@ const App = {
   async loadAudit(){
     const el=document.getElementById('audit-list');
     if(!el)return;
-    el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
+    el.innerHTML='<div class="loading-state" style="padding:24px"><div class="spinner"></div></div>';
     try{
-      const r=await this.api('GET','/audit/log?limit=20');
+      const r=await this.api('GET','/audit/log?limit=50');
       if(!r||!r.ok){el.innerHTML='<div style="padding:24px;text-align:center;font-size:.82em;color:var(--muted)">Audit log unavailable</div>';return;}
-      const d=await r.json();const logs=d.entries||d.logs||[];
-      if(!logs.length){
-        el.innerHTML='<div style="padding:32px 16px;text-align:center;font-size:.82em;color:var(--muted)">No audit entries yet</div>';
-        return;
-      }
-      el.innerHTML=logs.map(l=>{
-        const ts=l.timestamp||l.ts||'';
-        const date=ts?ts.substring(0,10):'';
-        const time=ts?ts.substring(11,19):'--';
-        const user=l.user||'system';
-        const action=l.action||l.event||'--';
-        const ok=l.result&&(l.result.success||l.result.ok);
-        return`<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border);transition:background .12s" onmouseover="this.style.background='rgba(255,255,255,.02)'" onmouseout="this.style.background=''">
-          <div style="display:flex;flex-direction:column;align-items:flex-end;flex-shrink:0;min-width:52px">
-            <span style="font-size:.72em;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace">${time}</span>
-            ${date?`<span style="font-size:.65em;color:var(--muted);opacity:.6">${date}</span>`:''}
-          </div>
-          <div style="width:6px;height:6px;border-radius:50%;background:${ok?'#22c55e':'#64748b'};flex-shrink:0"></div>
-          <span style="flex:1;font-size:.8em;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${action}">${action}</span>
-          <span style="font-size:.72em;color:var(--muted);flex-shrink:0">${user}</span>
-        </div>`;
-      }).join('');
+      const d=await r.json();
+      this._auditCache=d.entries||d.logs||[];
+      this._renderAuditEntries(this._auditCache);
+      // Update sec stat cards
+      this._updateSecStats(this._auditCache);
     }catch(e){el.innerHTML='<div style="padding:24px;text-align:center;font-size:.82em;color:var(--muted)">Error loading audit log</div>';}
+  },
+  _filterAudit(q){
+    if(!this._auditCache)return;
+    const f=q.toLowerCase();
+    const list=f?this._auditCache.filter(l=>(l.user||'').toLowerCase().includes(f)||(l.action||'').toLowerCase().includes(f)):this._auditCache;
+    this._renderAuditEntries(list);
+  },
+  _renderAuditEntries(logs){
+    const el=document.getElementById('audit-list');
+    if(!el)return;
+    if(!logs.length){
+      el.innerHTML=`<div style="padding:40px 16px;text-align:center">
+        <div style="font-size:2em;margin-bottom:8px;opacity:.3">📋</div>
+        <div style="font-size:.82em;color:var(--muted)">No audit entries yet.<br>Actions like role changes, logins, and policy updates will appear here.</div>
+      </div>`;
+      return;
+    }
+    const actionColors={assign_role:'#a78bfa',revoke_role:'#f87171',change_own_password:'#fbbf24',login:'#4ade80',logout:'#94a3b8',change_password:'#fbbf24',revoke_all_tokens:'#f87171',backup_chromadb:'#06b6d4'};
+    el.innerHTML=logs.map(l=>{
+      const ts=(l.timestamp||l.ts||'').replace('T',' ').substring(0,19);
+      const user=l.user||'system';
+      const action=l.action||l.event||'—';
+      const ok=!l.result||(l.result.success!==false&&l.result.ok!==false);
+      const ac=actionColors[action]||'#94a3b8';
+      const initials=(user||'?').slice(0,2).toUpperCase();
+      const params=l.params?Object.entries(l.params).filter(([k])=>k!=='password').map(([k,v])=>`${k}: ${typeof v==='object'?JSON.stringify(v):v}`).join(' · '):'';
+      return`<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);transition:background .1s" onmouseover="this.style.background='rgba(255,255,255,.018)'" onmouseout="this.style.background=''">
+        <div style="width:28px;height:28px;border-radius:50%;background:${ac}22;border:1px solid ${ac}44;display:flex;align-items:center;justify-content:center;font-size:.65em;font-weight:700;color:${ac};flex-shrink:0;margin-top:1px">${initials}</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:7px;margin-bottom:2px">
+            <span style="font-size:.8em;font-weight:600;color:var(--text)">${user}</span>
+            <span style="font-size:.72em;padding:1px 8px;border-radius:10px;background:${ac}18;color:${ac};border:1px solid ${ac}30;font-weight:600">${action.replace(/_/g,' ')}</span>
+            <span style="margin-left:auto;font-size:.68em;color:var(--muted);white-space:nowrap;font-family:ui-monospace,monospace">${ts}</span>
+          </div>
+          ${params?`<div style="font-size:.72em;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${params}</div>`:''}
+        </div>
+        <div style="width:6px;height:6px;border-radius:50%;background:${ok?'#22c55e':'#f87171'};flex-shrink:0;margin-top:6px" title="${ok?'success':'failed'}"></div>
+      </div>`;
+    }).join('');
+  },
+  _updateSecStats(logs){
+    const el=document.getElementById('sec-summary');
+    if(!el)return;
+    const roleChanges=logs.filter(l=>l.action==='assign_role'||l.action==='revoke_role').length;
+    const logins=logs.filter(l=>l.action==='login').length;
+    const failed=logs.filter(l=>l.result&&l.result.success===false).length;
+    const cards=[
+      {label:'Audit Events',val:logs.length,color:'#06b6d4',icon:`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`},
+      {label:'Role Changes',val:roleChanges,color:'#a78bfa',icon:`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>`},
+      {label:'Login Events',val:logins,color:'#4ade80',icon:`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>`},
+      {label:'Failed Actions',val:failed,color:failed>0?'#f87171':'#4ade80',icon:`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`},
+    ];
+    el.innerHTML=cards.map(c=>`
+      <div class="card" style="padding:14px 16px;border-top:2px solid ${c.color};display:flex;align-items:center;gap:12px">
+        <div style="width:34px;height:34px;border-radius:9px;background:${c.color}18;color:${c.color};display:flex;align-items:center;justify-content:center;flex-shrink:0">${c.icon}</div>
+        <div>
+          <div style="font-size:1.5em;font-weight:800;color:${c.color};line-height:1">${c.val}</div>
+          <div style="font-size:.73em;color:var(--muted);margin-top:2px">${c.label}</div>
+        </div>
+      </div>`).join('');
   },
 
   async loadPolicyRules(){
-    const el=document.getElementById('policy-rules-editor');
+    const ui=document.getElementById('policy-rules-ui');
     const st=document.getElementById('policy-rules-status');
-    if(!el)return;
+    if(!ui)return;
     try{
       const r=await this.api('GET','/policies/rules');
-      if(r&&r.ok){
-        const d=await r.json();
-        el.value=JSON.stringify(d,null,2);
-        if(st)st.innerHTML='<span style="color:var(--green)">&#10003; Loaded</span>';
-      }else{
-        if(st)st.innerHTML='<span style="color:var(--red)">Failed to load rules</span>';
-      }
-    }catch(e){if(st)st.innerHTML=`<span style="color:var(--red)">Error: ${e.message}</span>`;}
+      if(!r||!r.ok){ui.innerHTML='<div style="color:var(--red);font-size:.8em">Failed to load rules</div>';return;}
+      const d=await r.json();
+      this._policyData=d;
+      this._renderPolicyUI(d);
+      if(st)st.innerHTML='<span style="color:#4ade80">&#10003; Loaded</span>';
+    }catch(e){ui.innerHTML=`<div style="color:var(--red);font-size:.8em">Error: ${e.message}</div>`;}
+  },
+
+  _renderPolicyUI(d){
+    const ui=document.getElementById('policy-rules-ui');
+    if(!ui)return;
+    const isSuperAdmin=(localStorage.getItem('nexusops_role')||'')==='super_admin';
+    const blocked=d.blocked_actions||[];
+    const guardrails=d.guardrails||{};
+
+    // Show/hide save button based on role
+    const saveBtn=document.querySelector('[onclick="App.savePolicyRules()"]');
+    if(saveBtn)saveBtn.style.display=isSuperAdmin?'':'none';
+
+    const section=(title,icon,color,content)=>`
+      <div style="border:1px solid ${color}28;border-radius:10px;overflow:hidden;background:${color}05">
+        <div style="padding:11px 16px;background:${color}0e;border-bottom:1px solid ${color}22;display:flex;align-items:center;gap:8px">
+          <span>${icon}</span>
+          <span style="font-size:.83em;font-weight:700;color:${color}">${title}</span>
+          ${!isSuperAdmin?`<span style="margin-left:auto;font-size:.68em;padding:2px 7px;border-radius:10px;background:rgba(148,163,184,.1);color:var(--muted);border:1px solid var(--border)">read-only</span>`:''}
+        </div>
+        <div style="padding:16px">${content}</div>
+      </div>`;
+
+    // Blocked actions
+    const removeBtn=(a)=>isSuperAdmin?`<button onclick="App._removeBlockedAction('${a}')" style="background:none;border:none;color:#f87171;cursor:pointer;padding:0;line-height:1;font-size:1em">×</button>`:'';
+    const blockedHtml=`
+      <div style="font-size:.75em;color:var(--muted);margin-bottom:10px">These actions are <b style="color:#f87171">permanently blocked</b> — the AI can never execute them regardless of role or confidence.</div>
+      <div id="blocked-tags" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+        ${blocked.map(a=>`<span style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);color:#f87171;font-size:.75em;font-weight:600">
+          🚫 ${a} ${removeBtn(a)}
+        </span>`).join('')}
+      </div>
+      ${isSuperAdmin?`<div style="display:flex;gap:6px">
+        <input id="new-blocked-action" type="text" placeholder="e.g. wipe_database" style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.78em;outline:none">
+        <button onclick="App._addBlockedAction()" class="btn btn-sm" style="background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.3);font-size:.75em">+ Block</button>
+      </div>`:'<div style="font-size:.72em;color:var(--muted);padding:6px 0">Only super_admin can modify blocked actions.</div>'}`;
+
+    // Guardrails
+    const gFields=[
+      {key:'max_replicas',label:'Max Replicas',type:'number',hint:'Max pods the AI can scale to'},
+      {key:'min_replicas',label:'Min Replicas',type:'number',hint:'AI cannot scale below this'},
+      {key:'max_actions_per_run',label:'Max Actions / Run',type:'number',hint:'Hard cap on actions per pipeline run'},
+    ];
+    const nsRemoveBtn=(ns)=>isSuperAdmin?`<button onclick="App._removeNamespace('${ns}')" style="background:none;border:none;color:#fbbf24;cursor:pointer;padding:0;line-height:1">×</button>`:'';
+    const guardrailsHtml=`
+      <div style="font-size:.75em;color:var(--muted);margin-bottom:12px">Safety limits applied to every pipeline execution.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+        ${gFields.map(f=>`<div>
+          <label style="font-size:.73em;color:var(--muted);font-weight:600;display:block;margin-bottom:4px">${f.label}</label>
+          <input id="gr-${f.key}" type="${f.type}" value="${guardrails[f.key]??''}" ${isSuperAdmin?'':'readonly'} style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:${isSuperAdmin?'var(--bg2)':'var(--bg3,var(--bg2))'};color:${isSuperAdmin?'var(--text1)':'var(--muted)'};font-size:.82em;outline:none;cursor:${isSuperAdmin?'text':'not-allowed'}">
+          <div style="font-size:.68em;color:var(--muted);margin-top:2px">${f.hint}</div>
+        </div>`).join('')}
+      </div>
+      <div>
+        <label style="font-size:.73em;color:var(--muted);font-weight:600;display:block;margin-bottom:6px">Restricted Namespaces (K8s)</label>
+        <div id="ns-tags" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">
+          ${(guardrails.restricted_namespaces||[]).map(ns=>`<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);color:#fbbf24;font-size:.73em;font-weight:600">
+            ⎈ ${ns} ${nsRemoveBtn(ns)}
+          </span>`).join('')}
+        </div>
+        ${isSuperAdmin?`<div style="display:flex;gap:6px">
+          <input id="new-namespace" type="text" placeholder="e.g. production" style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.78em;outline:none">
+          <button onclick="App._addNamespace()" class="btn btn-sm" style="background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.28);font-size:.75em">+ Add</button>
+        </div>`:'<div style="font-size:.72em;color:var(--muted);padding:6px 0">Only super_admin can add namespaces.</div>'}
+      </div>`;
+
+    ui.innerHTML=
+      section('Blocked Actions — Never Execute','🚫','#f87171',blockedHtml)+
+      section('Guardrails & Limits','⚙️','#fbbf24',guardrailsHtml);
+  },
+
+  _addBlockedAction(){
+    if((localStorage.getItem('nexusops_role')||'')!=='super_admin'){this.toast('Only super_admin can modify policy rules','error');return;}
+    const inp=document.getElementById('new-blocked-action');
+    const val=(inp.value||'').trim().toLowerCase().replace(/\s+/g,'_');
+    if(!val)return;
+    const blocked=this._policyData.blocked_actions||[];
+    if(blocked.includes(val)){this.toast('Already blocked','error');return;}
+    this._policyData.blocked_actions=[...blocked,val];
+    inp.value='';
+    this._renderPolicyUI(this._policyData);
+  },
+  _removeBlockedAction(action){
+    if((localStorage.getItem('nexusops_role')||'')!=='super_admin'){this.toast('Only super_admin can modify policy rules','error');return;}
+    this._policyData.blocked_actions=(this._policyData.blocked_actions||[]).filter(a=>a!==action);
+    this._renderPolicyUI(this._policyData);
+  },
+  _addNamespace(){
+    if((localStorage.getItem('nexusops_role')||'')!=='super_admin'){this.toast('Only super_admin can modify policy rules','error');return;}
+    const inp=document.getElementById('new-namespace');
+    const val=(inp.value||'').trim().toLowerCase();
+    if(!val)return;
+    const ns=this._policyData.guardrails.restricted_namespaces||[];
+    if(ns.includes(val)){this.toast('Already restricted','error');return;}
+    this._policyData.guardrails.restricted_namespaces=[...ns,val];
+    inp.value='';
+    this._renderPolicyUI(this._policyData);
+  },
+  _removeNamespace(ns){
+    if((localStorage.getItem('nexusops_role')||'')!=='super_admin'){this.toast('Only super_admin can modify policy rules','error');return;}
+    this._policyData.guardrails.restricted_namespaces=(this._policyData.guardrails.restricted_namespaces||[]).filter(n=>n!==ns);
+    this._renderPolicyUI(this._policyData);
   },
 
   async savePolicyRules(){
-    const el=document.getElementById('policy-rules-editor');
+    if((localStorage.getItem('nexusops_role')||'')!=='super_admin'){this.toast('Only super_admin can save policy rules','error');return;}
     const st=document.getElementById('policy-rules-status');
-    if(!el)return;
-    let parsed;
-    try{parsed=JSON.parse(el.value);}catch(e){
-      if(st)st.innerHTML=`<span style="color:var(--red)">Invalid JSON: ${e.message}</span>`;
-      this.toast('Invalid JSON — fix the syntax before saving','error');
-      return;
-    }
+    // Collect guardrail values from inputs
+    ['max_replicas','min_replicas','max_actions_per_run'].forEach(k=>{
+      const el=document.getElementById('gr-'+k);
+      if(el&&el.value!=='') this._policyData.guardrails[k]=parseInt(el.value)||this._policyData.guardrails[k];
+    });
     if(st)st.innerHTML='<span style="color:var(--muted)">Saving...</span>';
     try{
-      const r=await this.api('PUT','/policies/rules',parsed);
+      const r=await this.api('PUT','/policies/rules',this._policyData);
       if(r&&r.ok){
         this.toast('Policy rules saved','success');
-        if(st)st.innerHTML='<span style="color:var(--green)">&#10003; Saved</span>';
+        if(st)st.innerHTML='<span style="color:#4ade80">&#10003; Saved</span>';
       }else{
         const d=r?await r.json():{};
         this.toast('Save failed: '+(d.detail||'unknown error'),'error');
-        if(st)st.innerHTML=`<span style="color:var(--red)">&#10007; ${d.detail||'Save failed'}</span>`;
+        if(st)st.innerHTML=`<span style="color:#f87171">&#10007; ${d.detail||'Save failed'}</span>`;
       }
-    }catch(e){this.toast('Error: '+e.message,'error');if(st)st.innerHTML=`<span style="color:var(--red)">Error: ${e.message}</span>`;}
+    }catch(e){this.toast('Error: '+e.message,'error');if(st)st.innerHTML=`<span style="color:#f87171">Error: ${e.message}</span>`;}
   },
 
   loadWebhookUrls(){
@@ -5950,29 +7011,36 @@ def _resolve_auth(
         username = x_user.strip().lower()
     if not username:
         username = "anonymous"
-    role = jwt_role if jwt_role else get_user_role(username)
+    # Always use live role from DB so role changes take effect immediately
+    role = get_user_role(username) if username != "anonymous" else (jwt_role or "viewer")
     # Attach whether a (bad) token was attempted — used by stricter guards
     ctx = AuthContext(username=username, role=role)
     ctx._bad_token = token_provided and username == "anonymous" and not jwt_role
     return ctx
 
+def require_super_admin(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    if getattr(auth, "_bad_token", False):
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+    if auth.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Super-admin access required")
+    return auth
+
 def require_admin(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
     if getattr(auth, "_bad_token", False):
         raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
-    if auth.role not in ("admin",):
+    if auth.role not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Admin access required")
     return auth
 
 def require_developer(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
     if getattr(auth, "_bad_token", False):
         raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
-    if auth.role not in ("admin", "developer"):
-        raise HTTPException(status_code=403, detail="Role 'developer' or 'admin' required")
+    if auth.role not in ("super_admin", "admin", "developer"):
+        raise HTTPException(status_code=403, detail="Role 'developer' or above required")
     return auth
 
 def require_viewer(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
-    # Viewer endpoints allow anonymous access — even a bad token degrades gracefully
-    if auth.role not in ("admin", "developer", "viewer"):
+    if auth.role not in ("super_admin", "admin", "developer", "viewer"):
         raise HTTPException(status_code=403, detail="Authentication required")
     return auth
 
@@ -5995,12 +7063,9 @@ def auth_me(
     # Try JWT first
     username = None
     if credentials and credentials.credentials:
-        try:
-            from app.core.auth import decode_token
-            payload = decode_token(credentials.credentials)
-            username = payload.get("sub")
-        except Exception:
-            pass
+        from app.core.auth import decode_token
+        payload = decode_token(credentials.credentials)  # raises 401 if invalid/revoked
+        username = payload.get("sub")
     if not username:
         username = (x_user or user or "nagaraj").strip().lower()
     role = get_user_role(username)
@@ -6008,16 +7073,37 @@ def auth_me(
     return {"username": username, "user": username, "role": role, "permissions": perms}
 
 
+_login_failures: dict[str, list[float]] = {}
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
+
 @app.post("/auth/token", tags=["auth"])
-def login(form: OAuth2PasswordRequestForm = Depends()):
+def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     from app.security.users import authenticate, user_exists
     from app.security.rbac import get_user_role
     from app.core.auth import create_token
     username = form.username.strip().lower()
+    now = _time.time()
+    # Brute-force check
+    attempts = _login_failures.get(username, [])
+    recent = [t for t in attempts if now - t < _LOGIN_LOCKOUT_SECONDS]
+    if len(recent) >= _LOGIN_MAX_ATTEMPTS:
+        retry_after = int(_LOGIN_LOCKOUT_SECONDS - (now - recent[0]))
+        raise HTTPException(status_code=429, detail=f"Too many failed login attempts. Try again in {retry_after}s.")
     if not user_exists(username) or not authenticate(username, form.password):
+        recent.append(now)
+        _login_failures[username] = recent[-_LOGIN_MAX_ATTEMPTS:]
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    # Success — clear failures
+    _login_failures.pop(username, None)
     role = get_user_role(username)
     token = create_token(username, role)
+    try:
+        from app.core.audit import audit_log as _al
+        _al(user=username, action="login", params={"method": "password", "role": role},
+            result={"success": True}, source="auth")
+    except Exception:
+        pass
     return {"access_token": token, "token_type": "bearer", "role": role, "username": username}
 
 
@@ -6037,12 +7123,13 @@ def list_users_endpoint(auth: AuthContext = Depends(require_admin)):
 
 @app.post("/users", tags=["users"])
 def create_user_endpoint(req: UserCreateRequest, auth: AuthContext = Depends(require_admin)):
+    """Direct user creation (admin only). Use /users/invite for email-verified onboarding."""
     from app.security.users import create_user as _create
     from app.security.rbac import assign_role
     result = _create(req.username, req.password, created_by=auth.username)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["error"])
-    assign_role(req.username, req.role)
+    assign_role(req.username, req.role, changed_by=auth.username)
     return {"success": True, "username": req.username.lower(), "role": req.role}
 
 @app.delete("/users/{username}", tags=["users"])
@@ -6050,20 +7137,43 @@ def delete_user_endpoint(username: str, auth: AuthContext = Depends(require_admi
     if username.strip().lower() == auth.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
     from app.security.users import delete_user as _delete
-    from app.security.rbac import revoke_role
+    from app.security.rbac import revoke_role, get_user_role, PROTECTED_ROLES
+    target_role = get_user_role(username.strip().lower())
+    if target_role in PROTECTED_ROLES and auth.role != "super_admin":
+        raise HTTPException(status_code=403, detail=f"Only a super_admin can delete a user with role '{target_role}'")
     result = _delete(username)
     if not result["success"]:
         raise HTTPException(status_code=404, detail=result["error"])
-    revoke_role(username)
+    revoke_role(username, changed_by=auth.username)
     return {"success": True, "username": username}
 
 @app.put("/users/{username}/role", tags=["users"])
 def set_user_role_endpoint(username: str, req: RoleAssignment, auth: AuthContext = Depends(require_admin)):
     from app.security.rbac import assign_role
-    result = assign_role(username, req.role)
+    # req.user may be the path username; req.role is the new role
+    result = assign_role(username, req.role, changed_by=auth.username, changer_role=auth.role)
     if not result["success"]:
-        raise HTTPException(status_code=400, detail=result.get("reason", "Failed"))
+        raise HTTPException(status_code=403, detail=result.get("reason", "Failed"))
     return result
+
+class SelfPasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+@app.post("/auth/change-password", tags=["auth"])
+def change_own_password(req: SelfPasswordChangeRequest, auth: AuthContext = Depends(require_viewer)):
+    """Allow any authenticated user to change their own password by verifying current password first."""
+    from app.security.users import authenticate, change_password
+    if not authenticate(auth.username, req.current_password):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    result = change_password(auth.username, req.new_password)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to update password"))
+    from app.core.audit import audit_log
+    audit_log(user=auth.username, action="change_own_password", params={}, result={"success": True}, source="api")
+    return {"success": True, "message": "Password updated successfully"}
 
 @app.put("/users/{username}/password", tags=["users"])
 def reset_password_endpoint(username: str, req: PasswordChangeRequest, auth: AuthContext = Depends(require_admin)):
@@ -6073,24 +7183,236 @@ def reset_password_endpoint(username: str, req: PasswordChangeRequest, auth: Aut
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
+# ── SSO / OAuth2 endpoints ─────────────────────────────────────────────────
+
+@app.get("/auth/sso/status", tags=["auth"])
+def sso_status():
+    """Return whether SSO is configured — used by the login page to show/hide the SSO button."""
+    from app.core.auth import SSO_PROVIDER
+    return {"configured": bool(SSO_PROVIDER), "provider": SSO_PROVIDER or ""}
+
+@app.get("/auth/sso/login", tags=["auth"])
+def sso_login():
+    """Redirect to the configured SSO provider (Google or GitHub)."""
+    from app.core.auth import get_sso_login_url, SSO_PROVIDER
+    import secrets as _sec
+    if not SSO_PROVIDER:
+        raise HTTPException(status_code=400, detail="SSO is not configured. Set SSO_PROVIDER, SSO_CLIENT_ID, SSO_CLIENT_SECRET, SSO_REDIRECT_URI in .env")
+    state = _sec.token_urlsafe(16)
+    url = get_sso_login_url(state=state)
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=url)
+
+@app.get("/auth/sso/callback", tags=["auth"])
+def sso_callback(code: str = "", error: str = ""):
+    """OAuth2 callback — exchange code for a platform JWT."""
+    from fastapi.responses import HTMLResponse
+
+    def _error_page(msg: str) -> HTMLResponse:
+        return HTMLResponse(status_code=400, content=f"""<!doctype html><html>
+<head><title>SSO Error</title>
+<style>body{{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0f172a}}
+.box{{background:#1e293b;color:#f1f5f9;padding:2rem 3rem;border-radius:12px;text-align:center;max-width:420px}}
+h2{{color:#f87171;margin-top:0}}a{{color:#60a5fa;text-decoration:none}}</style></head>
+<body><div class="box"><h2>SSO Login Failed</h2><p>{msg}</p><br><a href="/">← Back to Login</a></div></body></html>""")
+
+    if error:
+        return _error_page(f"Google returned an error: <b>{error}</b>")
+    if not code:
+        return _error_page("Missing authorization code.")
+
+    from app.core.auth import exchange_sso_code, create_token, SSO_DEFAULT_ROLE
+    from app.security.users import user_exists, create_user as _create_user, find_user_by_email, _users
+    from app.security.rbac import get_user_role, assign_role
+    from app.security.invite import get_invite_by_email
+    import os
+
+    try:
+        user_info = exchange_sso_code(code)
+    except Exception as e:
+        return _error_page(str(e))
+
+    email    = user_info["email"].strip().lower()
+    username = user_info["username"]
+
+    # ── Invite gate (if SSO_REQUIRE_INVITE=true, email must be pre-invited) ──
+    if os.getenv("SSO_REQUIRE_INVITE", "false").lower() == "true":
+        import json as _json
+        from pathlib import Path as _Path
+        _inv_path = _Path(__file__).resolve().parents[1] / "security" / "invites.json"
+        try:
+            inv_data = _json.loads(_inv_path.read_text())
+        except Exception:
+            inv_data = {}
+        invited_emails = {v.get("email", "").lower() for v in inv_data.values() if isinstance(v, dict)}
+        if email not in invited_emails:
+            return _error_page(
+                f"<b>{email}</b> has not been invited to this platform.<br>"
+                "Ask an admin to send you an invite first."
+            )
+
+    # ── Email already linked to an existing account ───────────────────────────
+    existing_by_email = find_user_by_email(email)
+    if existing_by_email:
+        # Email is linked — log in as that user (whether SSO-only or password user)
+        username = existing_by_email
+        # Ensure email is stored (backfill for older records)
+        if not _users[username].get("email"):
+            _users[username]["email"] = email
+            from app.security.users import _save as _users_save
+            _users_save()
+    elif user_exists(username):
+        # Username taken by a different email — conflict
+        existing_info = _users.get(username, {})
+        existing_email = existing_info.get("email", "")
+        if existing_info.get("sso_only"):
+            # Same SSO provider, different email somehow — just log in
+            pass
+        else:
+            return _error_page(
+                f"The username <b>{username}</b> is already taken by a different account "
+                f"({'linked to ' + existing_email if existing_email else 'password-based'}).<br>"
+                "Contact an admin to link your Google account to your existing account."
+            )
+    else:
+        # New user — check for a pre-invite to get the assigned role
+        invite = get_invite_by_email(email)
+        role_to_assign = invite["role"] if invite and invite.get("role") else SSO_DEFAULT_ROLE
+        _create_user(username, password=None, created_by="sso", email=email)
+        assign_role(username, role_to_assign, changed_by="sso")
+
+    role  = get_user_role(username)
+    token = create_token(username, role)
+    try:
+        from app.core.audit import audit_log as _al
+        _al(user=username, action="login", params={"method": "sso_google", "role": role},
+            result={"success": True}, source="auth")
+    except Exception:
+        pass
+    return HTMLResponse(content=f"""<!doctype html><html><body>
+<script>
+  localStorage.setItem('nexusops_token', '{token}');
+  localStorage.setItem('nexusops_user', '{username}');
+  localStorage.setItem('nexusops_role', '{role}');
+  window.location.href = '/';
+</script></body></html>""")
+
+@app.post("/auth/logout", tags=["auth"])
+def logout(credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
+           auth: AuthContext = Depends(require_viewer)):
+    """Revoke the current token so it cannot be reused even before expiry."""
+    from app.core.auth import blacklist_token
+    if credentials and credentials.credentials:
+        blacklist_token(credentials.credentials)
+    try:
+        from app.core.audit import audit_log as _al
+        _al(user=auth.username, action="logout", params={"role": auth.role},
+            result={"success": True}, source="auth")
+    except Exception:
+        pass
+    return {"success": True, "message": "Logged out and token revoked"}
+
+@app.post("/auth/revoke-all", tags=["auth"])
+def revoke_all_tokens(auth: AuthContext = Depends(require_admin)):
+    """Admin: revoke ALL tokens for a specific user (forces re-login)."""
+    from app.core.auth import revoke_all_user_tokens
+    from pydantic import BaseModel as _BM
+    class RevokeReq(_BM):
+        username: str
+    # Can't use request body easily with Depends — use query param
+    raise HTTPException(status_code=422, detail="Use POST /auth/revoke-all/{username}")
+
+@app.post("/auth/revoke-all/{username}", tags=["auth"])
+def revoke_all_user(username: str, auth: AuthContext = Depends(require_admin)):
+    """Admin: invalidate all existing tokens for a user (forces re-login)."""
+    from app.core.auth import revoke_all_user_tokens
+    revoke_all_user_tokens(username)
+    from app.core.audit import audit_log
+    audit_log(user=auth.username, action="revoke_all_tokens",
+              params={"target_user": username}, result={"success": True}, source="api")
+    return {"success": True, "message": f"All tokens for '{username}' have been revoked"}
+
+# ── ChromaDB backup endpoints ───────────────────────────────────────────────
+
+@app.post("/admin/backup/chromadb", tags=["admin"])
+def trigger_backup(auth: AuthContext = Depends(require_admin)):
+    """Manually trigger a ChromaDB backup."""
+    from app.memory.vector_db import backup_chromadb
+    result = backup_chromadb()
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Backup failed"))
+    return result
+
+@app.get("/admin/backup/list", tags=["admin"])
+def list_backups(auth: AuthContext = Depends(require_admin)):
+    """List available ChromaDB backups."""
+    from app.memory.vector_db import get_backup_list
+    return {"backups": get_backup_list()}
+
 @app.post("/users/invite", tags=["users"])
 def invite_user_endpoint(req: UserCreateRequest, auth: AuthContext = Depends(require_admin)):
-    from app.security.invite import create_invite, send_invite_email
+    from app.security.invite import create_invite, send_invite_email, has_pending_invite, cancel_invite, get_invite_by_email
     from app.security.users import create_user as _create
-    from app.security.rbac import assign_role
+    from app.security.rbac import assign_role, PROTECTED_ROLES
+    if req.role in PROTECTED_ROLES and auth.role != "super_admin":
+        raise HTTPException(status_code=403, detail=f"Only a super_admin can invite users with role '{req.role}'")
+    email = (req.email or "").strip().lower() or req.username + "@company.com"
+    from app.security.users import find_user_by_email, user_exists, _users
+    # Block invite if email already belongs to an active account
+    existing_user = find_user_by_email(email)
+    if existing_user:
+        existing_info = _users.get(existing_user, {})
+        pw = existing_info.get("password_hash", "")
+        is_active = pw != "INVITE_PENDING" and pw  # not a pending-invite placeholder
+        if is_active:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Email '{email}' is already linked to the active account '{existing_user}'. No invite needed."
+            )
+    # Block invite if username already has an active (non-pending) account
+    if user_exists(req.username):
+        existing_info = _users.get(req.username.strip().lower(), {})
+        pw = existing_info.get("password_hash", "")
+        if pw and pw != "INVITE_PENDING":
+            raise HTTPException(
+                status_code=409,
+                detail=f"User '{req.username}' already has an active account."
+            )
+    # Cancel any existing pending invite for this email before creating a new one
+    existing_inv = get_invite_by_email(email)
+    if existing_inv:
+        cancel_invite(existing_inv["full_token"])
     result = _create(req.username, "INVITE_PENDING", created_by=auth.username)
     if not result["success"] and "already" not in result.get("error", "").lower():
         raise HTTPException(status_code=400, detail=result["error"])
-    assign_role(req.username, req.role)
-    email = req.email or req.username + "@company.com"
-    invite = create_invite(req.username, email)
+    assign_role(req.username, req.role, changed_by=auth.username)
+    invite = create_invite(req.username, email, role=req.role)
     email_result = send_invite_email(email, req.username, invite["otp"], invite["token"])
     email_sent = isinstance(email_result, dict) and email_result.get("success") is True
     import os as _os
     app_url = _os.getenv("APP_URL", "http://localhost:8000")
-    return {"success": True, "username": req.username, "otp": invite["otp"],
+    # Never expose OTP in the API response — it should only go via email
+    return {"success": True, "username": req.username,
             "email_sent": email_sent,
+            "expires_in_hours": 48,
             "setup_link": f"{app_url}/auth/setup-password?token={invite['token']}"}
+
+
+@app.get("/users/invites", tags=["users"])
+def list_invites_endpoint(auth: AuthContext = Depends(require_admin)):
+    """List all pending (non-expired) invites. OTP is never exposed."""
+    from app.security.invite import list_pending_invites
+    return {"invites": list_pending_invites()}
+
+
+@app.delete("/users/invites/{token}", tags=["users"])
+def cancel_invite_endpoint(token: str, auth: AuthContext = Depends(require_admin)):
+    """Cancel a pending invite by its full token."""
+    from app.security.invite import cancel_invite
+    ok = cancel_invite(token)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Invite not found or already expired")
+    return {"success": True}
 
 
 @app.get("/auth/setup-password", response_class=HTMLResponse, include_in_schema=False)
@@ -6838,7 +8160,7 @@ def get_policy_rules(auth: AuthContext = Depends(require_viewer)):
 
 
 @app.put("/policies/rules", tags=["policies"])
-def update_policy_rules(rules: Dict[str, Any], auth: AuthContext = Depends(require_admin)):
+def update_policy_rules(rules: Dict[str, Any], auth: AuthContext = Depends(require_super_admin)):
     """Overwrite policy rules JSON. Admin only. Changes take effect on next policy evaluation."""
     import json as _json
     from pathlib import Path as _Path
@@ -6883,13 +8205,13 @@ def security_check(req: AccessRequest):
 @app.post("/security/roles")
 def security_assign_role(req: RoleAssignment, x_user: Optional[str] = Header(default=None)):
     _rbac_guard(x_user, "manage_users")
-    result = assign_role(req.user, req.role)
+    result = assign_role(req.user, req.role, changed_by=x_user or "system")
     return {"result": result}
 
 @app.delete("/security/roles/{user}")
 def security_revoke_role(user: str, x_user: Optional[str] = Header(default=None)):
     _rbac_guard(x_user, "manage_users")
-    result = revoke_role(user)
+    result = revoke_role(user, changed_by=x_user or "system")
     return {"result": result}
 
 @app.post("/incident/run")
@@ -7963,10 +9285,11 @@ def chat(payload: ChatPayload, auth: AuthContext = Depends(require_viewer)):
     except HTTPException:
         raise
     except Exception as exc:
-        import traceback, logging
-        logging.getLogger("chat").error("Unhandled chat error: %s\n%s", exc, traceback.format_exc())
+        import traceback, logging, uuid
+        err_id = uuid.uuid4().hex[:8]
+        logging.getLogger("chat").error("Unhandled chat error [%s]: %s\n%s", err_id, exc, traceback.format_exc())
         return {
-            "reply": f"Something went wrong on the server: `{type(exc).__name__}: {exc}`. Check server logs for details.",
+            "reply": f"An unexpected error occurred. Please try again. (ref: {err_id})",
             "sources": [], "llm_provider": "none", "action_taken": None,
             "action_result": None, "action_count": _chat_action_count,
             "pending_action": None, "pending_params": None, "needs_confirm": False,
@@ -8479,7 +9802,7 @@ def security_roles_list():
 @app.post("/security/roles/assign")
 def security_roles_assign(req: RoleAssignment, x_user: Optional[str] = Header(default=None)):
     _rbac_guard(x_user, "manage_users")
-    return assign_role(req.user, req.role)
+    return assign_role(req.user, req.role, changed_by=x_user or "system")
 
 # AWS — missing endpoints
 @app.get("/aws/cloudwatch/logs")
@@ -8803,6 +10126,27 @@ def list_active_war_rooms(auth: AuthContext = Depends(require_viewer)):
     except Exception as e:
         return {"war_rooms": [], "error": str(e)}
 
+@app.get("/warroom/resolved", tags=["warroom"])
+def list_resolved_war_rooms(auth: AuthContext = Depends(require_viewer)):
+    try:
+        from app.incident.war_room_intelligence import _war_rooms
+        rooms = [
+            {
+                "war_room_id":   wr.war_room_id,
+                "incident_id":   wr.incident_id,
+                "description":   wr.incident_description,
+                "slack_channel": wr.slack_channel,
+                "created_at":    wr.created_at,
+                "participants":  len(wr.participants),
+                "severity":      wr.pipeline_state.get("severity", "low"),
+            }
+            for wr in _war_rooms.values()
+            if wr.pipeline_state.get("status") == "resolved"
+        ]
+        return {"war_rooms": rooms}
+    except Exception as e:
+        return {"war_rooms": [], "error": str(e)}
+
 @app.get("/warroom/{war_room_id}/timeline", tags=["warroom"])
 def get_war_room_timeline(war_room_id: str, auth: AuthContext = Depends(require_viewer)):
     """Return the chronological event timeline for a war room."""
@@ -8872,6 +10216,30 @@ def send_war_room_slack_message(war_room_id: str, req: SlackSendRequest, auth: A
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/warroom/{war_room_id}/resolve", tags=["warroom"])
+def resolve_war_room(war_room_id: str, auth: AuthContext = Depends(require_developer)):
+    """Mark a war room as resolved and remove it from the active list."""
+    try:
+        from app.incident.war_room_intelligence import _war_rooms, _wr_save
+        wr = _war_rooms.get(war_room_id)
+        if not wr:
+            raise HTTPException(status_code=404, detail=f"War room {war_room_id} not found")
+        wr.pipeline_state["status"] = "resolved"
+        _wr_save()
+        # Optionally notify Slack
+        try:
+            from app.integrations.slack import post_message
+            if wr.slack_channel:
+                post_message(channel=wr.slack_channel, text=f":white_check_mark: War room for *{wr.incident_id}* marked as resolved by {auth.username}.")
+        except Exception:
+            pass
+        return {"success": True, "war_room_id": war_room_id, "resolved_by": auth.username}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ── Post-Mortem ────────────────────────────────────────────────────────────────
 
@@ -8953,6 +10321,22 @@ def generate_post_mortem_endpoint(
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Post-mortem generation failed: {e}")
+
+@app.post("/incidents/{incident_id}/postmortem-slack", tags=["incidents"])
+def send_postmortem_to_slack(incident_id: str, req: dict, auth: AuthContext = Depends(require_viewer)):
+    """Send a post-mortem summary to Slack."""
+    try:
+        from app.integrations.slack import post_message
+        from app.core.config import settings
+        message = req.get("message", "")
+        channel = settings.SLACK_CHANNEL or "#incidents"
+        result = post_message(channel=channel, text=message)
+        if result:
+            return {"success": True, "channel": channel}
+        return {"success": False, "error": "Slack not configured or send failed"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # /chat/v2 is retired — /chat now uses the intelligent engine directly
 

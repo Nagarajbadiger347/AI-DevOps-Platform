@@ -21,21 +21,75 @@ from typing import Tuple
 # ---------------------------------------------------------------------------
 _redis_client = None
 _redis_available = False
+_redis_last_check: float = 0.0
+_REDIS_RETRY_INTERVAL = 30  # seconds between reconnect attempts
 
 def _get_redis():
-    global _redis_client, _redis_available
-    if _redis_client is not None:
+    """Return a live Redis client, or None if unavailable.
+
+    Supports:
+    - Single node:  REDIS_URL=redis://localhost:6379
+    - Sentinel HA:  REDIS_SENTINEL_HOSTS=host1:26379,host2:26379
+                    REDIS_SENTINEL_MASTER=mymaster
+
+    Re-checks connectivity every 30 s so the app recovers automatically
+    when Redis comes back after a failure.
+    """
+    global _redis_client, _redis_available, _redis_last_check
+
+    now = time.time()
+
+    # Live client — periodic liveness probe
+    if _redis_client is not None and _redis_available:
+        if now - _redis_last_check > _REDIS_RETRY_INTERVAL:
+            try:
+                _redis_client.ping()
+                _redis_last_check = now
+            except Exception:
+                import logging
+                logging.getLogger("ratelimit").warning(
+                    "Redis connection lost — rate limiter falling back to in-memory store"
+                )
+                _redis_available = False
+                _redis_client = None
         return _redis_client if _redis_available else None
+
+    # Don't hammer a down Redis — retry only every 30 s
+    if not _redis_available and (now - _redis_last_check) < _REDIS_RETRY_INTERVAL:
+        return None
+    _redis_last_check = now
+
     try:
         import redis as redis_py
-        url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-        client = redis_py.from_url(url, socket_connect_timeout=2, socket_timeout=2)
+
+        # Sentinel HA mode
+        sentinel_hosts_raw = os.environ.get("REDIS_SENTINEL_HOSTS", "")
+        if sentinel_hosts_raw:
+            sentinel_hosts = [
+                (h.split(":")[0], int(h.split(":")[1]))
+                for h in sentinel_hosts_raw.split(",")
+                if ":" in h
+            ]
+            master_name = os.environ.get("REDIS_SENTINEL_MASTER", "mymaster")
+            sentinel = redis_py.Sentinel(sentinel_hosts, socket_timeout=2, socket_connect_timeout=2)
+            client = sentinel.master_for(master_name, socket_timeout=2)
+        else:
+            url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+            client = redis_py.from_url(url, socket_connect_timeout=2, socket_timeout=2)
+
         client.ping()
         _redis_client = client
         _redis_available = True
-    except Exception:
+        import logging
+        logging.getLogger("ratelimit").info("Redis connected successfully")
+    except Exception as exc:
+        import logging
+        logging.getLogger("ratelimit").info(
+            "Redis unavailable (%s) — using in-memory rate limiter", exc
+        )
         _redis_available = False
         _redis_client = None
+
     return _redis_client if _redis_available else None
 
 
