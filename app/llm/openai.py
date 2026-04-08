@@ -33,18 +33,23 @@ class OpenAIProvider(BaseLLM):
         *,
         system: str = "You are an expert DevOps AI assistant.",
         max_tokens: int = 2048,
+        messages: list | None = None,
+        temperature: float = 0.7,
     ) -> LLMResponse:
         if _client is None:
             raise RuntimeError(
                 "OpenAI provider unavailable — add OPENAI_API_KEY to .env"
             )
+        # Build structured message list with full history
+        msg_list = [{"role": "system", "content": system}]
+        if messages:
+            msg_list.extend(messages)
+        msg_list.append({"role": "user", "content": prompt})
         resp = _client.chat.completions.create(
             model=_OPENAI_MODEL,
             max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": prompt},
-            ],
+            temperature=temperature,
+            messages=msg_list,
         )
         choice = resp.choices[0]
         return LLMResponse(

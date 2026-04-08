@@ -995,3 +995,147 @@ def get_rds_instance_detail(db_instance_id: str) -> dict:
     except (BotoCoreError, ClientError) as e:
         return {"success": False, "error": str(e)}
 
+
+# ── Cost Analysis ─────────────────────────────────────────────
+
+def get_cost_by_service(days: int = 30, region: str = "") -> dict:
+    """Get AWS cost breakdown by service for the last N days using Cost Explorer."""
+    import datetime as _dt
+    try:
+        ce = boto3.client("ce", region_name=region or "us-east-1")
+        end   = _dt.date.today()
+        start = end - _dt.timedelta(days=days)
+        resp = ce.get_cost_and_usage(
+            TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
+            Granularity="MONTHLY",
+            Metrics=["UnblendedCost"],
+            GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
+        )
+        services = []
+        total = 0.0
+        for period in resp.get("ResultsByTime", []):
+            for group in period.get("Groups", []):
+                svc   = group["Keys"][0]
+                cost  = float(group["Metrics"]["UnblendedCost"]["Amount"])
+                if cost > 0.001:
+                    services.append({"service": svc, "cost_usd": round(cost, 4)})
+                    total += cost
+        services.sort(key=lambda x: x["cost_usd"], reverse=True)
+        # Daily and monthly projection
+        daily_avg = total / days if days else 0
+        monthly_projection = daily_avg * 30
+        return {
+            "success": True,
+            "period_days": days,
+            "total_usd": round(total, 2),
+            "daily_avg_usd": round(daily_avg, 4),
+            "monthly_projection_usd": round(monthly_projection, 2),
+            "by_service": services[:20],
+        }
+    except (BotoCoreError, ClientError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def get_cost_optimization_data(region: str = "") -> dict:
+    """Collect data needed to generate cost optimization recommendations.
+
+    Gathers EC2 instance types, RDS configs, Lambda settings, ECS task counts,
+    and S3 bucket counts to identify common cost saving opportunities.
+    """
+    result: dict = {"success": True, "findings": []}
+
+    # EC2 — look for small/micro instances that might be over/under-provisioned
+    try:
+        ec2_resp = list_ec2_instances(region=region)
+        instances = ec2_resp.get("instances", [])
+        if instances:
+            running = [i for i in instances if i.get("state") == "running"]
+            stopped = [i for i in instances if i.get("state") == "stopped"]
+            result["ec2"] = {
+                "total": len(instances),
+                "running": len(running),
+                "stopped": len(stopped),
+                "types": [{"id": i.get("id"), "name": i.get("name", ""), "type": i.get("type", ""), "state": i.get("state")} for i in instances],
+            }
+            if stopped:
+                result["findings"].append({
+                    "type": "stopped_ec2",
+                    "impact": "medium",
+                    "detail": f"{len(stopped)} stopped EC2 instance(s) — still incur EBS storage charges",
+                    "action": "Delete or snapshot-and-terminate if no longer needed",
+                })
+    except Exception:
+        pass
+
+    # RDS — check for Multi-AZ dev instances, storage autoscaling
+    try:
+        rds_resp = list_rds_instances(region=region)
+        dbs = rds_resp.get("instances", [])
+        if dbs:
+            result["rds"] = {"instances": dbs}
+            for db in dbs:
+                if db.get("multi_az") and any(env in (db.get("id", "")).lower() for env in ["dev", "test", "staging", "stg"]):
+                    result["findings"].append({
+                        "type": "rds_multi_az_dev",
+                        "impact": "high",
+                        "detail": f"RDS {db.get('id')} looks like a dev/test DB but has Multi-AZ enabled (doubles cost)",
+                        "action": "Disable Multi-AZ for non-production RDS instances to cut RDS costs in half",
+                    })
+    except Exception:
+        pass
+
+    # Lambda — check for high memory allocations
+    try:
+        lam_resp = list_lambda_functions(region=region)
+        fns = lam_resp.get("functions", [])
+        if fns:
+            result["lambda"] = {"count": len(fns)}
+            high_mem = [f for f in fns if int(f.get("memory_mb", 0) or 0) >= 1024]
+            if high_mem:
+                result["findings"].append({
+                    "type": "lambda_high_memory",
+                    "impact": "medium",
+                    "detail": f"{len(high_mem)} Lambda function(s) have ≥1GB memory allocated: {', '.join(f.get('name','') for f in high_mem[:3])}",
+                    "action": "Profile these functions and reduce memory if utilization is low — Lambda charges per GB-second",
+                })
+    except Exception:
+        pass
+
+    # S3 — just count buckets for awareness
+    try:
+        s3_resp = list_s3_buckets()
+        buckets = s3_resp.get("buckets", [])
+        if buckets:
+            result["s3"] = {"bucket_count": len(buckets)}
+            if len(buckets) > 10:
+                result["findings"].append({
+                    "type": "s3_many_buckets",
+                    "impact": "low",
+                    "detail": f"You have {len(buckets)} S3 buckets — check for buckets with no lifecycle policies",
+                    "action": "Add S3 lifecycle rules to transition old objects to Glacier or delete them automatically",
+                })
+    except Exception:
+        pass
+
+    # ECS — look for services with 0 running tasks
+    try:
+        ecs_resp = list_ecs_services()
+        services = ecs_resp.get("services", [])
+        idle = [s for s in services if s.get("running_count", 0) == 0 and s.get("desired_count", 0) > 0]
+        if idle:
+            result["findings"].append({
+                "type": "ecs_idle_services",
+                "impact": "medium",
+                "detail": f"{len(idle)} ECS service(s) have 0 running tasks but desired > 0: {', '.join(s.get('name','') for s in idle[:3])}",
+                "action": "Investigate why these services aren't starting — they may be misconfigured or can be scaled to 0",
+            })
+    except Exception:
+        pass
+
+    return result
+
+
+def get_cloudwatch_alarms() -> dict:
+    """Alias for list_cloudwatch_alarms — returns alarms in a consistent format."""
+    return list_cloudwatch_alarms()
+

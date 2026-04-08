@@ -1,5 +1,8 @@
 import re
 import os
+import asyncio
+import logging
+import datetime as _datetime
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -8,7 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Header, Depends, Request
 from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Any, Optional, Dict
 
@@ -61,6 +64,7 @@ from app.integrations.github import (
 from app.memory.vector_db import store_incident, search_similar_incidents
 from app.security.rbac import check_access, assign_role, revoke_role
 
+logger = logging.getLogger(__name__)
 
 # ── RBAC helper ───────────────────────────────────────────────
 
@@ -219,6 +223,34 @@ _PENDING_PIPELINE_STATES: dict = {}
 _RECENT_RESULTS: dict = {}
 _MAX_CACHED_RESULTS = 50
 
+# ── War Room state — delegated to shared store ────────────────
+from app.incident.war_room_store import (
+    WAR_ROOMS as _WAR_ROOMS,
+    save      as _wr_save,
+    create    as _create_war_room,
+    answer    as _answer_war_room_question,
+    timeline  as _wr_timeline,
+)
+
+def _wr_timeline(war_room_id: str) -> list:
+    wr = _WAR_ROOMS.get(war_room_id)
+    if not wr:
+        return []
+    events = [{"timestamp": wr.created_at, "event": f"War room created for {wr.incident_id}: {wr.incident_description}", "actor": "system", "source": "war_room"}]
+    for a in (wr.pipeline_state.get("actions_taken") or wr.pipeline_state.get("executed_actions") or []):
+        if isinstance(a, dict):
+            events.append({"timestamp": a.get("executed_at", wr.created_at), "event": f"Action: {a.get('type','?')} — {a.get('description','')}", "actor": "pipeline", "source": "pipeline_state"})
+    try:
+        from app.chat.memory import get_history
+        for msg in get_history(f"war_room::{war_room_id}", max_messages=100):
+            role = getattr(msg, "role", "")
+            if role in ("user", "assistant"):
+                events.append({"timestamp": getattr(msg, "timestamp", ""), "event": getattr(msg, "content", "")[:200], "actor": role, "source": "conversation"})
+    except Exception:
+        pass
+    events.sort(key=lambda e: e.get("timestamp") or "")
+    return events
+
 def _inc(key: str, amount: int = 1):
     _METRICS[key] += amount
 
@@ -315,9 +347,10 @@ class IncidentRunRequest(BaseModel):
     aws_cfg:        Optional[Dict[str, Any]] = None
     k8s_cfg:        Optional[Dict[str, Any]] = None
     slack_channel:  str  = "#incidents"
-    dry_run:        bool = False          # if True, simulate pipeline without executing actions
-    llm_provider:   str  = ""
-    metadata:       Optional[Dict[str, Any]] = None
+    dry_run:             bool = False
+    llm_provider:        str  = ""
+    create_slack_channel: bool = False    # if True, create #inc-<id> channel and post analysis
+    metadata:            Optional[Dict[str, Any]] = None
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def dashboard(request: Request = None):
@@ -1336,6 +1369,10 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
                   <div class="toggle-track" id="dry-run-toggle"><div class="toggle-thumb"></div></div>
                   <span class="toggle-label">Dry Run <small style="color:var(--muted)">(preview only)</small></span>
                 </div>
+                <div class="form-toggle" onclick="App.toggleSlackChannel()">
+                  <div class="toggle-track" id="slack-ch-toggle"><div class="toggle-thumb"></div></div>
+                  <span class="toggle-label">Create Slack Channel</span>
+                </div>
               </div>
             </div>
             <div style="display:flex;gap:8px">
@@ -1934,13 +1971,24 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
             </div>
           </div>
           <div class="chat-input-row" style="flex-shrink:0;padding:10px 0 2px;border-top:1px solid var(--border)">
-            <div class="chat-input-wrap">
-              <textarea class="chat-input" id="chat-input" placeholder="Ask anything about your infrastructure..." rows="1"
-                onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.sendChat()}"
-                oninput="this.style.height='';this.style.height=Math.min(this.scrollHeight,160)+'px'"></textarea>
-              <button class="chat-send-btn" onclick="App.sendChat()" title="Send (Enter)">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-              </button>
+            <input type="file" id="chat-img-input" accept="image/*" style="display:none" onchange="App.onChatImageSelected(this)" />
+            <div class="chat-input-wrap" style="flex-direction:column;padding:6px 10px">
+              <div id="chat-img-preview" style="display:none;padding:0 0 6px;font-size:.78em;color:var(--text2);align-items:center;gap:8px">
+                <img id="chat-img-thumb" style="max-height:52px;border-radius:6px;border:1px solid var(--border)" />
+                <button onclick="App.clearChatImage()" style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:6px;padding:2px 7px;cursor:pointer;font-size:.78em" title="Remove image">Remove</button>
+              </div>
+              <div style="display:flex;align-items:flex-end;gap:8px;width:100%">
+                <button id="chat-img-btn" onclick="document.getElementById('chat-img-input').click()" title="Attach image (screenshot, diagram, etc.)" style="background:var(--surface);border:1px solid var(--border);color:var(--text2);cursor:pointer;padding:5px 7px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;gap:4px;font-size:.74em;transition:all .15s">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                  Image
+                </button>
+                <textarea class="chat-input" id="chat-input" placeholder="Ask anything about your infrastructure..." rows="1"
+                  onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.sendChat()}"
+                  oninput="this.style.height='';this.style.height=Math.min(this.scrollHeight,160)+'px'"></textarea>
+                <button class="chat-send-btn" onclick="App.sendChat()" title="Send (Enter)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -2375,6 +2423,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
         <button id="inc-modal-rerun" class="btn btn-primary btn-sm" style="display:none" onclick="App._incModalRerun()">&#9654; Re-run Pipeline</button>
         <button id="inc-modal-warroom" class="btn btn-ghost btn-sm" style="display:none" onclick="App._incModalWarRoom()">&#9873; War Room</button>
         <button id="inc-modal-postmortem" class="btn btn-ghost btn-sm" style="display:none" onclick="App._incModalPostMortem()">&#128221; Post-Mortem</button>
+        <button id="inc-modal-delete" class="btn btn-ghost btn-sm" style="display:none;color:#f87171;border-color:rgba(248,113,113,0.35)" onclick="App._incModalDelete()">&#128465; Delete</button>
         <button class="modal-close" onclick="App.closeModal('incident-detail-modal')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
@@ -2543,16 +2592,20 @@ const App = {
     localStorage.setItem('nexusops_llm',val);
     const sel=document.getElementById('global-llm-select');
     if(sel) sel.value=val;
+    // Persist to server so pipeline + agents use the same provider
+    this.api('POST','/settings/llm',{provider:val}).catch(()=>{});
   },
 
   async syncLLMStatus(){
     try{
+      // Restore saved provider to server on page load
+      const saved=localStorage.getItem('nexusops_llm')||'';
+      if(saved) this.api('POST','/settings/llm',{provider:saved}).catch(()=>{});
       const r=await this.api('GET','/llm/status');
       if(!r||!r.ok) return;
       const d=await r.json();
       const active=d.active||'';
       // If user has no saved preference OR saved Groq but Claude is now available, auto-upgrade
-      const saved=localStorage.getItem('nexusops_llm')||'';
       if(!saved || (saved==='groq' && active==='anthropic')){
         this.setGlobalLLM('');  // blank = Auto (best available)
       }
@@ -3210,7 +3263,7 @@ const App = {
       const ec2El=document.getElementById('mon-ec2-health');
       if(r&&r.ok&&ec2El){
         const d=await r.json();
-        const insts=d.instances||[];
+        const insts=d.instances||d.ec2_instances?.instances||[];
         const stopped=insts.filter(i=>i.state!=='running');
         if(!insts.length){ec2El.innerHTML='<div style="font-size:.8em;color:var(--muted)">No instances found</div>';}
         else{ec2El.innerHTML=`<div style="font-size:.8em;margin-bottom:8px;color:var(--text2)">${insts.length} instances — <span style="color:${stopped.length?'var(--red)':'var(--green)'}">${insts.length-stopped.length} running</span>${stopped.length?`, <span style="color:var(--red)">${stopped.length} stopped</span>`:''}</div>`
@@ -3281,6 +3334,13 @@ const App = {
     const t=document.getElementById('dry-run-toggle');
     t.classList.toggle('on',this.dryRun);
     if(this.dryRun)this.toast('Dry Run ON — pipeline will preview actions only','info');
+  },
+
+  toggleSlackChannel(){
+    this.createSlackChannel=!this.createSlackChannel;
+    const t=document.getElementById('slack-ch-toggle');
+    if(t)t.classList.toggle('on',this.createSlackChannel);
+    this.toast(this.createSlackChannel?'Slack channel will be created after pipeline':'Slack channel disabled for this run','info');
   },
 
   // ── MOBILE MENU ──────────────────────────────────────────────────
@@ -3417,7 +3477,7 @@ const App = {
     stageTimer=setTimeout(advanceStage, stageTimes[0]);
 
     try{
-      const r=await this.api('POST','/incidents/run',{incident_id:id,description:desc,severity:sev,auto_remediate:this.autoRemediate,dry_run:isDry,hours,llm_provider:this.globalLLM,metadata:{user:this.username,role:this.role}});
+      const r=await this.api('POST','/incidents/run',{incident_id:id,description:desc,severity:sev,auto_remediate:this.autoRemediate,dry_run:isDry,hours,llm_provider:this.globalLLM,create_slack_channel:!!this.createSlackChannel,metadata:{user:this.username,role:this.role}});
       clearTimeout(stageTimer);
       if(!r){renderStages(STAGES.length-1,{done:'❌ Request failed'});return;}
       const d=await r.json();
@@ -3570,18 +3630,21 @@ const App = {
         <span class="data-src-badge ${ghOk?'data-src-ok':'data-src-miss'}">${ghOk?'&#10003;':'&#10005;'} GitHub</span>
       </div>
 
-      <!-- Awaiting approval banner -->
-      ${(status==='awaiting_approval'||d.requires_human_approval)?`<div style="margin:12px 0;padding:12px 16px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);border-radius:10px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          <span style="font-size:.84em;color:#fbbf24;font-weight:700">Awaiting Human Approval</span>
-          <button class="btn btn-sm" onclick="App.closeModal('incident-detail-modal');App.navigate('approvals')" style="margin-left:auto;padding:5px 12px;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.35);color:#fbbf24;border-radius:7px;font-size:.78em;cursor:pointer;font-weight:600">Review in Approvals →</button>
+      <!-- Awaiting approval / Approved-ready banner — populated async below -->
+      <div id="inc-approval-banner-${id.replace(/[^a-z0-9]/gi,'_')}"></div>
+
+      <!-- Rejection banner -->
+      ${(status==='rejected'||d._rejected_by)?`<div style="margin:12px 0;padding:12px 16px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);border-radius:10px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+          <span style="font-size:.84em;color:#f87171;font-weight:700">Approval Rejected</span>
+          ${d._rejected_at?`<span style="margin-left:auto;font-size:.75em;color:var(--muted)">${new Date(d._rejected_at).toLocaleString()}</span>`:''}
         </div>
-        <div style="font-size:.78em;color:var(--muted);line-height:1.5">
-          The AI has analysed this incident and proposed ${(plan.actions||[]).length} action${(plan.actions||[]).length!==1?'s':''} below.
-          ${d._requested_by?` Requested by <b style="color:var(--text2)">${d._requested_by}</b>.`:''}
-          An admin or super_admin must approve before execution.
+        <div style="font-size:.82em;line-height:1.6">
+          ${d._rejected_by?`<span style="color:var(--text2)">Rejected by <b style="color:#f87171">${d._rejected_by}</b></span>`:''}
+          ${d._rejection_reason?`<span style="margin-left:8px;color:var(--muted)">— ${d._rejection_reason}</span>`:''}
         </div>
+        ${d._requested_by?`<div style="font-size:.78em;color:var(--muted);margin-top:4px">Originally requested by <b style="color:var(--text2)">${d._requested_by}</b></div>`:''}
       </div>`:''}
 
       ${d._approval_id&&!['admin','super_admin'].includes(localStorage.getItem('nexusops_role')||'')?`<div style="margin:8px 0;padding:8px 12px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px;font-size:.78em;color:var(--muted)">
@@ -3618,11 +3681,68 @@ const App = {
       </div>`:''}
 
       <!-- Actions -->
-      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;align-items:center">
         <button class="btn btn-secondary btn-sm" onclick="App.createWarRoomFromIncident('${id}','${(plan.summary||'').replace(/'/g,'&apos;')}')">&#9876; Create War Room</button>
         <button class="btn btn-ghost btn-sm" onclick="App.generatePostMortem('${id}')">&#128221; Post-Mortem</button>
+        <button class="btn btn-ghost btn-sm" onclick="App.closeIncidentResult()" style="color:var(--muted)">&#10005; Close</button>
+        <button class="btn btn-ghost btn-sm" style="margin-left:auto;color:#f87171;border-color:rgba(248,113,113,0.4)" onclick="App.deleteIncident('${id}')">&#128465; Delete</button>
       </div>
     </div>`;
+
+    // Async: check real approval status and update banner
+    if(status==='awaiting_approval'||d.requires_human_approval){
+      const bannerId='inc-approval-banner-'+id.replace(/[^a-z0-9]/gi,'_');
+      this._refreshApprovalBanner(bannerId, id, (plan.actions||[]).length, d._requested_by);
+    }
+  },
+
+  async _refreshApprovalBanner(bannerId, incidentId, nActions, requestedBy){
+    const bannerEl=document.getElementById(bannerId);
+    if(!bannerEl) return;
+    // Show loading state
+    bannerEl.innerHTML=`<div style="margin:12px 0;padding:12px 16px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);border-radius:10px;display:flex;align-items:center;gap:10px">
+      <div class="spinner" style="width:14px;height:14px;border-width:2px"></div>
+      <span style="font-size:.82em;color:#fbbf24">Checking approval status…</span>
+    </div>`;
+    try{
+      const r=await this.api('GET','/approvals/pending');
+      const d=r&&r.ok?await r.json():{};
+      const approvals=d.approvals||[];
+      const match=approvals.find(a=>a.incident_id===incidentId);
+      if(match&&match.status==='approved'){
+        // Show green Resume Pipeline banner
+        bannerEl.innerHTML=`<div style="margin:12px 0;padding:12px 16px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.35);border-radius:10px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <span style="font-size:.84em;color:#4ade80;font-weight:700">&#10003; Approved — ready to execute</span>
+            <span style="font-size:.76em;color:var(--muted);margin-left:4px">by ${match.approved_by||'admin'}</span>
+            <button class="btn btn-sm btn-resume-inline" onclick="App.resumePipelineById('${match.correlation_id}')" style="margin-left:auto;padding:5px 14px;background:var(--green);color:#000;border-radius:7px;font-size:.78em;font-weight:700;cursor:pointer">&#9654; Resume Pipeline</button>
+          </div>
+          <div style="font-size:.78em;color:var(--muted);margin-top:6px">Click Resume Pipeline to execute the ${nActions} approved action${nActions!==1?'s':''}.</div>
+        </div>`;
+      } else if(match&&match.status==='rejected'){
+        bannerEl.innerHTML=`<div style="margin:12px 0;padding:12px 16px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);border-radius:10px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+            <span style="font-size:.84em;color:#f87171;font-weight:700">&#10005; Approval Rejected</span>
+            <span style="font-size:.76em;color:var(--muted);margin-left:4px">by ${match.approved_by||'admin'}</span>
+          </div>
+          ${match.rejection_reason?`<div style="font-size:.78em;color:var(--muted);margin-top:6px">Reason: ${match.rejection_reason}</div>`:''}
+        </div>`;
+      } else {
+        // Still pending
+        bannerEl.innerHTML=`<div style="margin:12px 0;padding:12px 16px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);border-radius:10px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <span style="font-size:.84em;color:#fbbf24;font-weight:700">Awaiting Human Approval</span>
+            <button class="btn btn-sm" onclick="App.closeModal('incident-detail-modal');App.navigate('approvals')" style="margin-left:auto;padding:5px 12px;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.35);color:#fbbf24;border-radius:7px;font-size:.78em;cursor:pointer;font-weight:600">Review in Approvals →</button>
+          </div>
+          <div style="font-size:.78em;color:var(--muted);line-height:1.5">
+            The AI has proposed ${nActions} action${nActions!==1?'s':''}. ${requestedBy?`Requested by <b style="color:var(--text2)">${requestedBy}</b>.`:''} An admin must approve before execution.
+          </div>
+        </div>`;
+      }
+    }catch(e){bannerEl.innerHTML='';}
   },
 
   _incidentItems: [],
@@ -3720,19 +3840,50 @@ const App = {
       const d=await r.json();
       const raw=d.incidents||d.results||[];
 
-      // Build set of incident IDs that have pending approvals
+      // Build map of incident IDs → approval status (pending/approved/rejected)
       const pendingApprovalIds=new Set();
+      const approvalStatusMap={};  // incidentId → {status, correlation_id, approved_by, rejection_reason}
+      let approvalData=[];
       if(ar&&ar.ok){
-        try{const ad=await ar.json();(ad.approvals||[]).forEach(a=>{if(a.incident_id)pendingApprovalIds.add(a.incident_id);});}catch(e){}
+        try{
+          const ad=await ar.json();
+          approvalData=ad.approvals||[];
+          approvalData.forEach(a=>{
+            if(a.incident_id){
+              approvalStatusMap[a.incident_id]=a;
+              if(a.status==='pending') pendingApprovalIds.add(a.incident_id);
+            }
+          });
+        }catch(e){}
       }
-      if(!raw.length){
+
+      // Fallback: if ChromaDB is empty but approvals exist, synthesise rows from approvals
+      let allRaw=[...raw];
+      if(!allRaw.length && approvalData.length){
+        allRaw=approvalData.map(a=>({
+          id: a.incident_id,
+          description: a.plan_summary||'',
+          risk: a.risk_score>=0.8?'critical':a.risk_score>=0.5?'high':'medium',
+          status: a.status==='pending'?'awaiting_approval':a.status,
+          created_at: a.requested_at||'',
+          payload: {
+            description: a.plan_summary||'',
+            root_cause: '',
+            actions_executed: 0,
+            status: a.status==='pending'?'awaiting_approval':a.status,
+            confidence: a.risk_score||0.5,
+            created_at: a.requested_at||'',
+          },
+        }));
+      }
+
+      if(!allRaw.length){
         if(el)el.innerHTML='<div class="empty-state"><div class="empty-icon">✅</div><p>No incidents in history</p></div>';
         if(statsEl)statsEl.innerHTML='';
         return;
       }
-
       // ── Parse & normalise each record ────────────────────────────
-      const rowItems=raw.map(i=>{
+      const rowItems=allRaw.map(i=>{
         // Safely parse payload
         let p={};
         try{p=typeof i.payload==='string'?JSON.parse(i.payload):(i.payload&&typeof i.payload==='object'?i.payload:{});}catch(e){}
@@ -3747,9 +3898,14 @@ const App = {
         const risk=rawRisk||'unknown';
 
         // Status: normalise to lowercase slug (underscores)
-        // Override with awaiting_approval if this incident has a pending approval
-        const rawStatus=pendingApprovalIds.has(id)?'awaiting_approval':(i.status||p.status||'').toString();
-        const status=this._normaliseStatus(rawStatus)||'unknown';
+        // Use approval status if one exists for this incident
+        const approvalEntry=approvalStatusMap[id];
+        let rawStatus=i.status||p.status||'';
+        if(approvalEntry){
+          if(approvalEntry.status==='pending') rawStatus='awaiting_approval';
+          else if(approvalEntry.status==='approved') rawStatus='awaiting_approval'; // approved but not yet resumed
+        }
+        const status=this._normaliseStatus(rawStatus.toString())||'unknown';
 
         // Actions count
         const actionCount=p.actions_executed!==undefined?p.actions_executed
@@ -3773,13 +3929,16 @@ const App = {
 
         // Escape id for onclick (avoid quote issues)
         const safeId=id.replace(/'/g,"\\'");
-        const html=`<div style="display:grid;grid-template-columns:1fr 1.6fr 70px 110px 50px 100px;gap:8px;padding:9px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:.79em;align-items:center;transition:background .12s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" onclick="App.openIncidentDetail(this.dataset.iid)" data-iid="${id.replace(/"/g,'&quot;')}">
-          <span style="font-weight:600;font-family:monospace;color:var(--cyan);font-size:.84em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${id}">${id}</span>
-          <span style="color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${fullDesc}">${(fullDesc.substring(0,55)+(fullDesc.length>55?'…':''))||'—'}</span>
-          <span>${riskCls?`<span class="badge ${riskCls}" style="font-size:.7em;padding:1px 5px">${risk}</span>`:`<span style="color:var(--muted);font-size:.78em">${risk}</span>`}</span>
-          <span><span style="font-size:.7em;padding:2px 7px;border-radius:10px;background:${statusColor}18;color:${statusColor};border:1px solid ${statusColor}30;font-weight:600;white-space:nowrap">${statusLabel}</span></span>
-          <span style="text-align:center;color:var(--text2)">${actionCount}</span>
-          <span style="color:var(--text2);font-size:.78em;line-height:1.4">${dateStr}${timeStr?`<br><span style="color:var(--muted)">${timeStr}</span>`:''}</span>
+        const html=`<div style="display:grid;grid-template-columns:1fr 1.6fr 70px 110px 50px 100px 36px;gap:8px;padding:9px 10px;border-bottom:1px solid var(--border);font-size:.79em;align-items:center;transition:background .12s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''">
+          <span style="font-weight:600;font-family:monospace;color:var(--cyan);font-size:.84em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer" title="${id}" onclick="App.openIncidentDetail('${id.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">${id}</span>
+          <span style="color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer" title="${fullDesc}" onclick="App.openIncidentDetail('${id.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">${(fullDesc.substring(0,55)+(fullDesc.length>55?'…':''))||'—'}</span>
+          <span style="cursor:pointer" onclick="App.openIncidentDetail('${id.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">${riskCls?`<span class="badge ${riskCls}" style="font-size:.7em;padding:1px 5px">${risk}</span>`:`<span style="color:var(--muted);font-size:.78em">${risk}</span>`}</span>
+          <span style="cursor:pointer" onclick="App.openIncidentDetail('${id.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')" ><span style="font-size:.7em;padding:2px 7px;border-radius:10px;background:${statusColor}18;color:${statusColor};border:1px solid ${statusColor}30;font-weight:600;white-space:nowrap">${statusLabel}</span></span>
+          <span style="text-align:center;color:var(--text2);cursor:pointer" onclick="App.openIncidentDetail('${id.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">${actionCount}</span>
+          <span style="color:var(--text2);font-size:.78em;line-height:1.4;cursor:pointer" onclick="App.openIncidentDetail('${id.replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">${dateStr}${timeStr?`<br><span style="color:var(--muted)">${timeStr}</span>`:''}</span>
+          <span style="display:flex;align-items:center;justify-content:center">
+            <button onclick="event.stopPropagation();App.deleteIncident('${safeId.replace(/"/g,'&quot;')}')" title="Delete incident" style="background:none;border:none;cursor:pointer;color:var(--muted);padding:3px 5px;border-radius:5px;font-size:.95em;line-height:1;transition:color .15s" onmouseover="this.style.color='#f87171'" onmouseout="this.style.color='var(--muted)'">&#128465;</button>
+          </span>
         </div>`;
 
         return {_id:id, _desc:fullDesc, _risk:risk, _status:status, _ts:tsMs, _html:html};
@@ -3841,6 +4000,15 @@ const App = {
           const statusCls=status==='completed'?'badge-green':status==='failed'||status==='escalated'?'badge-red':status!=='—'?'badge-cyan':'';
           const desc=d.description||'';
           const createdAt=d.created_at?new Date(d.created_at).toLocaleString():'';
+          const rootCauseTxt=d.plan?.root_cause||d.plan?.summary||'';
+          const isPipelineFail=!rootCauseTxt||rootCauseTxt==='Analysis complete.'||rootCauseTxt==='Planning failed';
+          const displayedRootCause=isPipelineFail
+            ?`<span style="color:var(--muted);font-style:italic">Pipeline did not complete — no analysis was stored. Re-run the pipeline to analyse this incident.</span>`
+            :rootCauseTxt;
+          const confBar=conf&&!isPipelineFail?`<div class="result-section">
+              <div class="result-section-label">Confidence — ${conf}%</div>
+              <div class="conf-bar"><div class="conf-fill ${conf>=70?'high':conf>=40?'med':'low'}" style="width:${conf}%"></div></div>
+            </div>`:'';
           resultEl.innerHTML=`<div class="result-card">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
               <span style="font-weight:700;font-size:.92em">${incidentId}</span>
@@ -3851,16 +4019,14 @@ const App = {
             </div>
             ${desc?`<div style="font-size:.84em;color:var(--text2);margin-bottom:10px">${desc}</div>`:''}
             <div class="result-section">
-              <div class="result-section-label">&#128269; Root Cause / Summary</div>
-              <div class="result-root-cause">${d.plan?.root_cause||d.plan?.summary||'No analysis stored for this incident.'}</div>
+              <div class="result-section-label">&#128269; Root Cause Analysis</div>
+              <div class="result-root-cause">${displayedRootCause}</div>
             </div>
-            ${conf?`<div class="result-section">
-              <div class="result-section-label">Confidence — ${conf}%</div>
-              <div class="conf-bar"><div class="conf-fill ${conf>=70?'high':conf>=40?'med':'low'}" style="width:${conf}%"></div></div>
-            </div>`:''}
-            <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            ${confBar}
+            <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
               <button class="btn btn-primary btn-sm" onclick="App.rerunIncident('${incidentId}','${desc.replace(/'/g,'').replace(/"/g,'')}')">&#9654; Re-run Pipeline</button>
               <button class="btn btn-ghost btn-sm" onclick="App.generatePostMortem('${incidentId}')">&#128221; Post-Mortem</button>
+              <button class="btn btn-ghost btn-sm" style="margin-left:auto;color:#f87171;border-color:rgba(248,113,113,0.4)" onclick="App.deleteIncident('${incidentId}')">&#128465; Delete</button>
             </div>
           </div>`;
         } else {
@@ -3894,6 +4060,47 @@ const App = {
     try{
       const r=await this.api('GET',`/incidents/${encodeURIComponent(incidentId)}/result`);
       if(!r||!r.ok){
+        // Check if there's an approval record for this incident before giving up
+        try{
+          const apr=await this.api('GET','/approvals/pending');
+          if(apr&&apr.ok){
+            const apd=await apr.json();
+            const ap=(apd.approvals||[]).find(a=>a.incident_id===incidentId);
+            if(ap){
+              // Reconstruct result from approval record
+              const synth={
+                incident_id: incidentId,
+                description: ap.plan_summary||'',
+                status: ap.status==='pending'?'awaiting_approval':'awaiting_approval',
+                requires_human_approval: true,
+                plan:{actions:ap.actions||[],summary:ap.plan_summary||'',risk:ap.risk_score>=0.8?'high':ap.risk_score>=0.5?'medium':'low',confidence:ap.risk_score||0.5},
+                executed_actions:[],blocked_actions:[],errors:[],
+                _approval_id: ap.correlation_id,
+                _requested_by: ap.requested_by,
+                _approval_approved: ap.status==='approved',
+                _approved_by: ap.approved_by,
+              };
+              this._incModalData={id:incidentId,desc:synth.description,d:synth};
+              document.getElementById('inc-modal-rerun').style.display='';
+              document.getElementById('inc-modal-warroom').style.display='';
+              document.getElementById('inc-modal-postmortem').style.display='';
+              document.getElementById('inc-modal-delete').style.display='';
+              const ab=document.getElementById('inc-modal-warroom');
+              if(ab){
+                if(ap.status==='approved'){
+                  ab.textContent='▶ Resume Pipeline';
+                  ab.style.background='var(--green)';ab.style.color='#000';ab.style.borderColor='var(--green)';
+                  ab.onclick=()=>{App.closeModal('incident-detail-modal');App.resumePipelineById(ap.correlation_id);};
+                } else {
+                  ab.textContent='⏳ Go to Approvals';
+                  ab.onclick=()=>{App.closeModal('incident-detail-modal');App.navigate('approvals');};
+                }
+              }
+              this.renderIncidentResult(body,synth,incidentId,false);
+              return;
+            }
+          }
+        }catch(e){}
         body.innerHTML='<div style="padding:32px;text-align:center;color:var(--muted);font-size:.84em">No stored data for this incident.<br><br><button id="inc-modal-fillbtn" class="btn btn-primary btn-sm">Fill &amp; Re-run Pipeline</button></div>';
         const fb=body.querySelector('#inc-modal-fillbtn');
         if(fb)fb.onclick=()=>{App.closeModal('incident-detail-modal');const el=document.getElementById('inc-id');if(el)el.value=incidentId;const rb=document.getElementById('run-inc-btn');if(rb)rb.scrollIntoView({behavior:'smooth'});};
@@ -3901,26 +4108,42 @@ const App = {
       }
       const d=await r.json();
 
-      // Enrich with pending approval data if plan.actions is empty
+      // Enrich with approval data (pending or rejected)
       try{
-        const ar=await this.api('GET','/approvals/pending');
-        if(ar&&ar.ok){
-          const ad=await ar.json();
-          const ap=(ad.approvals||[]).find(a=>a.incident_id===incidentId);
-          if(ap){
-            // Merge approval actions into plan
-            if(!d.plan)d.plan={};
-            if(!d.plan.actions||!d.plan.actions.length)d.plan.actions=ap.actions||[];
-            if(!d.plan.root_cause&&ap.plan_summary)d.plan.root_cause=ap.plan_summary;
-            if(!d.plan.summary&&ap.plan_summary)d.plan.summary=ap.plan_summary;
-            if(!d.plan.risk&&ap.risk_score)d.plan.risk=ap.risk_score>=0.8?'high':ap.risk_score>=0.5?'medium':'low';
-            if(!d.plan.confidence&&ap.risk_score)d.plan.confidence=ap.risk_score;
-            // Mark as awaiting approval
+        const [ar, hr] = await Promise.all([
+          this.api('GET','/approvals/pending'),
+          this.api('GET','/approvals/history'),
+        ]);
+        const allApprovals = [];
+        if(ar&&ar.ok){const ad=await ar.json();allApprovals.push(...(ad.approvals||[]));}
+        if(hr&&hr.ok){const hd=await hr.json();allApprovals.push(...(hd.approvals||[]));}
+        // deduplicate by correlation_id
+        const seen=new Set();
+        const approvals=allApprovals.filter(a=>{if(seen.has(a.correlation_id))return false;seen.add(a.correlation_id);return true;});
+        const ap=approvals.find(a=>a.incident_id===incidentId);
+        if(ap){
+          if(!d.plan)d.plan={};
+          if(!d.plan.actions||!d.plan.actions.length)d.plan.actions=ap.actions||[];
+          if(!d.plan.root_cause&&ap.plan_summary)d.plan.root_cause=ap.plan_summary;
+          if(!d.plan.summary&&ap.plan_summary)d.plan.summary=ap.plan_summary;
+          if(!d.plan.risk&&ap.risk_score)d.plan.risk=ap.risk_score>=0.8?'high':ap.risk_score>=0.5?'medium':'low';
+          if(!d.plan.confidence&&ap.risk_score)d.plan.confidence=ap.risk_score;
+          d._approval_id=ap.correlation_id;
+          d._requested_by=ap.requested_by;
+          d._requested_at=ap.requested_at;
+          if(ap.status==='rejected'){
+            d.status='rejected';
+            d._rejected_by=ap.approved_by;
+            d._rejection_reason=ap.rejection_reason;
+            d._rejected_at=ap.approved_at;
+          } else if(ap.status==='pending'){
             d.status='awaiting_approval';
             d.requires_human_approval=true;
-            d._approval_id=ap.correlation_id;
-            d._requested_by=ap.requested_by;
-            d._requested_at=ap.requested_at;
+          } else if(ap.status==='approved'){
+            d.status='awaiting_approval';  // still needs resume
+            d.requires_human_approval=true;
+            d._approval_approved=true;
+            d._approved_by=ap.approved_by;
           }
         }
       }catch(e){}
@@ -3929,10 +4152,20 @@ const App = {
       document.getElementById('inc-modal-rerun').style.display='';
       document.getElementById('inc-modal-warroom').style.display='';
       document.getElementById('inc-modal-postmortem').style.display='';
-      // Show Go to Approvals button if pending
+      document.getElementById('inc-modal-delete').style.display='';
+      // Show Resume/Approvals button based on approval state
       if(d._approval_id){
         const ab=document.getElementById('inc-modal-warroom');
-        if(ab){ab.textContent='⏳ Go to Approvals';ab.onclick=()=>{App.closeModal('incident-detail-modal');App.navigate('approvals');};}
+        if(ab){
+          if(d._approval_approved){
+            ab.textContent='▶ Resume Pipeline';
+            ab.style.background='var(--green)';ab.style.color='#000';ab.style.borderColor='var(--green)';
+            ab.onclick=()=>{App.closeModal('incident-detail-modal');App.resumePipelineById(d._approval_id);};
+          } else {
+            ab.textContent='⏳ Go to Approvals';
+            ab.onclick=()=>{App.closeModal('incident-detail-modal');App.navigate('approvals');};
+          }
+        }
       }
       this.renderIncidentResult(body,d,incidentId,false);
     }catch(e){body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--red);font-size:.84em">Error: ${e.message}</div>`;}
@@ -4028,18 +4261,13 @@ const App = {
   _incModalRerun(){
     if(!this._incModalData)return;
     const id=this._incModalData.id;
-    const desc=this._incModalData.desc;
+    const desc=this._incModalData.desc||id;
     this.closeModal('incident-detail-modal');
-    // Navigate to incidents section first, then pre-fill and scroll
     this.navigate('incidents');
     setTimeout(()=>{
-      const idEl=document.getElementById('inc-id');
-      const descEl=document.getElementById('inc-desc');
-      if(idEl)idEl.value=id;
-      if(descEl&&desc)descEl.value=desc;
-      const btn=document.getElementById('run-inc-btn');
-      if(btn){btn.scrollIntoView({behavior:'smooth',block:'center'});btn.classList.add('btn-pulse');setTimeout(()=>btn.classList.remove('btn-pulse'),2000);}
-      this.toast('Pre-filled — click Run Pipeline to re-analyse','info');
+      const el=document.getElementById('inc-result');
+      if(el){el.scrollIntoView({behavior:'smooth',block:'nearest'});}
+      this._runPipelineInto(el||document.createElement('div'),id,desc);
     },350);
   },
   _incModalWarRoom(){
@@ -4075,6 +4303,10 @@ const App = {
     }catch(e){
       if(body)body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--red);font-size:.84em">Error: ${e.message}</div>`;
     }
+  },
+  _incModalDelete(){
+    if(!this._incModalData)return;
+    this.deleteIncident(this._incModalData.id);
   },
   // ─────────────────────────────────────────────────────────────
 
@@ -4215,13 +4447,98 @@ const App = {
   },
 
   rerunIncident(incidentId, description){
-    const idEl=document.getElementById('inc-id');
-    const descEl=document.getElementById('inc-desc');
-    if(idEl)idEl.value=incidentId;
-    if(descEl&&description)descEl.value=description;
-    const btn=document.getElementById('run-inc-btn');
-    if(btn)btn.scrollIntoView({behavior:'smooth',block:'center'});
-    this.toast('Pre-filled incident — click Run Pipeline to re-analyze','info');
+    // Run inline inside the result card panel (no navigation)
+    const el=document.getElementById('inc-result');
+    if(el)el.scrollIntoView({behavior:'smooth',block:'nearest'});
+    this._runPipelineInto(el||document.createElement('div'), incidentId, description||incidentId);
+  },
+
+  async _runPipelineInto(el, id, desc, isDry=false){
+    const STAGES=[
+      {id:'ctx',  icon:'🔍', title:'Collecting Context',   detail:'Fetching AWS metrics, K8s state, GitHub activity, CloudWatch alarms...'},
+      {id:'ai',   icon:'🤖', title:'AI Analysis',          detail:'LLM analysing incident patterns, root cause, and risk level...'},
+      {id:'plan', icon:'📋', title:'Building Action Plan', detail:'Planning remediation steps, checking thresholds and policies...'},
+      {id:'exec', icon:'⚡', title:'Executing Actions',    detail:'Running approved actions, notifying stakeholders...'},
+      {id:'done', icon:'✅', title:'Pipeline Complete',    detail:''},
+    ];
+    const renderStages=(activeIdx,results={})=>{
+      const stagesHtml=STAGES.map((s,i)=>{
+        let cls='stage-pending',content=s.icon;
+        if(i<activeIdx){cls='stage-done';content='✓';}
+        else if(i===activeIdx){cls='stage-running';content='<div class="spinner" style="width:14px;height:14px;border-width:2px;border-color:#a78bfa;border-top-color:transparent"></div>';}
+        const detail=results[s.id]||s.detail;
+        return`<div class="pipeline-stage">
+          <div class="pipeline-stage-icon ${cls}">${content}</div>
+          <div class="pipeline-stage-body">
+            <div class="pipeline-stage-title" style="color:${i<=activeIdx?'var(--text)':'var(--muted)'}">${s.title}${i===activeIdx?'<span style="color:var(--muted);font-weight:400;margin-left:6px;font-size:.85em"> in progress...</span>':''}</div>
+            ${i<=activeIdx?`<div class="pipeline-stage-detail">${detail}</div>`:''}
+          </div>
+        </div>`;
+      }).join('');
+      el.innerHTML=`<div class="pipeline-stream">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
+          <div style="font-size:.88em;font-weight:700;color:var(--text)">🚀 Pipeline: <span style="color:#a78bfa">${id}</span></div>
+          <span class="badge badge-amber" style="font-size:.72em">${isDry?'DRY RUN':'LIVE'}</span>
+        </div>
+        <div>${stagesHtml}</div>
+      </div>`;
+    };
+    renderStages(0);
+    let stageTimer=null,currentStage=0;
+    const stageTimes=[2200,3500,2000,1500];
+    const advanceStage=()=>{
+      if(currentStage<STAGES.length-2){currentStage++;renderStages(currentStage);stageTimer=setTimeout(advanceStage,stageTimes[currentStage]||2000);}
+    };
+    stageTimer=setTimeout(advanceStage,stageTimes[0]);
+    try{
+      const sev=document.getElementById('inc-sev')?.value||'medium';
+      const hours=parseInt(document.getElementById('inc-hours')?.value)||2;
+      const r=await this.api('POST','/incidents/run',{incident_id:id,description:desc,severity:sev,auto_remediate:this.autoRemediate,dry_run:isDry,hours,llm_provider:this.globalLLM,create_slack_channel:!!this.createSlackChannel,metadata:{user:this.username,role:this.role}});
+      clearTimeout(stageTimer);
+      if(!r){renderStages(STAGES.length-1,{done:'❌ Request failed'});return;}
+      const d=await r.json();
+      if(!r.ok){renderStages(STAGES.length-1,{done:'❌ '+(d.detail||'Pipeline error')});return;}
+      const execCount=(d.executed_actions||[]).length;
+      const blockedCount=(d.blocked_actions||[]).length;
+      renderStages(STAGES.length,{
+        ctx:`Collected data from ${[d.aws_context?'AWS':null,d.k8s_context?'K8s':null,d.github_context?'GitHub':null].filter(Boolean).join(', ')||'available sources'}`,
+        ai:`Root cause: ${(d.plan?.root_cause||d.summary||'analysed').substring(0,80)}`,
+        plan:`${(d.plan?.actions||[]).length} actions planned · Risk: ${(d.plan?.risk||'?').toUpperCase()}`,
+        exec:execCount?`${execCount} executed, ${blockedCount} pending approval`:(isDry?'Dry-run — no actions executed':'Awaiting approval'),
+        done:`Status: ${(d.status||'completed').toUpperCase()}`,
+      });
+      setTimeout(()=>this.renderIncidentResult(el,d,id,isDry),400);
+      this.toast('Pipeline done — '+id,'success');
+      this.loadIncidents();
+    }catch(e){
+      clearTimeout(stageTimer);
+      renderStages(STAGES.length-1,{done:'❌ '+e.message});
+    }
+  },
+
+  closeIncidentResult(){
+    const el=document.getElementById('inc-result');
+    if(el)el.innerHTML='';
+  },
+
+  async deleteIncident(incidentId){
+    if(!confirm(`Delete incident "${incidentId}"?\n\nThis will remove it from history and cannot be undone.`))return;
+    const r=await this.api('DELETE',`/incidents/${encodeURIComponent(incidentId)}`);
+    if(r&&r.ok){
+      this.toast(`Incident "${incidentId}" deleted`,'success');
+      // Remove from in-memory item list
+      this._incidentItems=this._incidentItems.filter(i=>i._id!==incidentId);
+      // Re-render the list from updated items
+      this.filterIncidents();
+      // Clear result panel if it's showing this incident
+      const resultEl=document.getElementById('inc-result');
+      if(resultEl&&resultEl.textContent.includes(incidentId))resultEl.innerHTML='';
+      // Close modal if open for this incident
+      const modalTitle=document.getElementById('inc-modal-title');
+      if(modalTitle&&modalTitle.textContent.includes(incidentId))this.closeModal('incident-detail-modal');
+    }else{
+      this.toast('Failed to delete incident','error');
+    }
   },
 
   async sendActionForApproval(btn){
@@ -4701,16 +5018,18 @@ const App = {
       const rs=document.getElementById('astat-rejected');if(rs)rs.textContent=rejected;
       const rk=document.getElementById('astat-risk');if(rk)rk.textContent=pending?avgRisk:'—';
       // Badge
+      const actionableCount=pending+approved;
       const badge=document.getElementById('approvals-count-badge');
-      if(badge){if(pending>0){badge.textContent=pending;badge.style.display='';}else badge.style.display='none';}
+      if(badge){if(actionableCount>0){badge.textContent=actionableCount;badge.style.display='';}else badge.style.display='none';}
       // Nav badge
       const nb=document.getElementById('badge-approvals');
-      if(nb){if(pending>0){nb.textContent=pending;nb.style.display='';}else nb.style.display='none';}
+      if(nb){if(actionableCount>0){nb.textContent=actionableCount;nb.style.display='';}else nb.style.display='none';}
 
-      const pendingList=approvals.filter(a=>a.status==='pending');
-      if(!pendingList.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No pending approvals</p><p style="color:var(--muted);font-size:.8em">The AI pipeline will create requests here when high-risk actions need review</p></div>';return;}
+      // /approvals/pending now returns both pending (needs decision) and approved (needs resume)
+      const allActionable=approvals.filter(a=>a.status==='pending'||a.status==='approved');
+      if(!allActionable.length){el.innerHTML='<div class="empty-state"><div class="empty-icon">&#9989;</div><p>No pending approvals</p><p style="color:var(--muted);font-size:.8em">The AI pipeline will create requests here when high-risk actions need review</p></div>';return;}
 
-      el.innerHTML=pendingList.map(a=>{
+      el.innerHTML=allActionable.map(a=>{
         const risk=a.risk_score||0;
         const riskCls=risk>=0.8?'badge-red':risk>=0.5?'badge-amber':'badge-green';
         const riskLabel=risk>=0.8?'&#128308; Critical':risk>=0.5?'&#128992; High':'&#128994; Low';
@@ -4719,10 +5038,15 @@ const App = {
         const nActs=(a.actions||[]).length;
         const expMs=a.expires_at?new Date(a.expires_at)-Date.now():-1;
         const expiring=expMs>0&&expMs<5*60*1000;
-        return`<div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:14px">
+        const isApproved=a.status==='approved';
+        const actionBtn=isApproved
+          ?`<button class="btn btn-success btn-sm btn-resume-inline" onclick="App.resumePipelineById('${a.correlation_id}')" style="flex-shrink:0;white-space:nowrap;background:var(--green);color:#000">&#9654; Resume Pipeline</button>`
+          :`<button class="btn btn-primary btn-sm" onclick="App.openApproval('${a.correlation_id}')" style="flex-shrink:0;white-space:nowrap">${this._isAdmin()?'Review &amp; Decide':'🔒 View Only'}</button>`;
+        return`<div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:14px${isApproved?';background:rgba(34,197,94,.04)':''}">
           <div style="flex:1;min-width:0">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
               <span style="font-weight:700;font-size:.92em">${a.incident_id||a.correlation_id}</span>
+              ${isApproved?'<span class="badge badge-green" style="font-size:.72em">&#10003; Approved — ready to run</span>':''}
               <span class="badge ${riskCls}" style="font-size:.72em">${riskLabel}</span>
               <span class="badge badge-purple" style="font-size:.72em">${nActs} action${nActs!==1?'s':''}</span>
               ${expiring?'<span class="badge badge-red" style="font-size:.72em">&#9203; Expiring soon</span>':''}
@@ -4731,15 +5055,31 @@ const App = {
             <div style="display:flex;gap:12px;font-size:.76em;color:var(--muted);flex-wrap:wrap">
               <span>Requested by: <b>${a.requested_by||'pipeline'}</b></span>
               <span>Cost impact: <b>${cost}</b></span>
-              <span>Expires: <b style="${expiring?'color:var(--red)':''}">${exp}</b></span>
+              ${isApproved?`<span>Approved by: <b>${a.approved_by||'admin'}</b></span>`:`<span>Expires: <b style="${expiring?'color:var(--red)':''}">${exp}</b></span>`}
             </div>
           </div>
-          <button class="btn btn-primary btn-sm" onclick="App.openApproval('${a.correlation_id}')" style="flex-shrink:0;white-space:nowrap">
-            ${this._isAdmin()?'Review &amp; Decide':'🔒 View Only'}
-          </button>
+          <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+            ${actionBtn}
+            <button class="btn btn-ghost btn-sm" onclick="App.deleteApproval('${a.correlation_id}')" style="color:#f87171;border-color:rgba(248,113,113,.3);font-size:.74em;padding:3px 10px">&#128465; Delete</button>
+          </div>
         </div>`;
       }).join('');
     }catch(e){el.innerHTML='<div class="empty-state"><p>Error: '+e.message+'</p></div>';}
+  },
+
+  async deleteApproval(correlationId){
+    if(!confirm('Delete this approval request? This cannot be undone.')) return;
+    try{
+      const r=await this.api('DELETE','/approvals/'+correlationId);
+      if(r&&r.ok){
+        this.toast('Approval deleted','info');
+        this.loadApprovals();
+        this.loadApprovalHistory();
+      } else {
+        const e=await r.json().catch(()=>({}));
+        this.toast('Delete failed: '+(e.detail||'unknown'),'error');
+      }
+    }catch(e){this.toast('Error: '+e.message,'error');}
   },
 
   async loadApprovalHistory(){
@@ -4757,20 +5097,34 @@ const App = {
           <th style="padding:6px 10px;text-align:left">Status</th>
           <th style="padding:6px 10px;text-align:left">Risk</th>
           <th style="padding:6px 10px;text-align:left">Actions</th>
+          <th style="padding:6px 10px;text-align:left">Requested By</th>
           <th style="padding:6px 10px;text-align:left">Decided By</th>
           <th style="padding:6px 10px;text-align:left">Decided At</th>
+          <th style="padding:6px 10px;text-align:left">Rejection Reason</th>
+          <th style="padding:6px 10px;text-align:left"></th>
         </tr></thead><tbody>`+
         items.map(a=>{
           const stCls=a.status==='approved'?'badge-green':a.status==='rejected'?'badge-red':'badge-amber';
+          const reqBy=a.requested_by||'pipeline (auto)';
           const dec=a.approved_by||'—';
           const decAt=a.approved_at?new Date(a.approved_at).toLocaleString():'—';
-          return`<tr style="border-bottom:1px solid var(--border)">
+          const rejReason=a.status==='rejected'&&a.rejection_reason
+            ?`<span style="color:#f87171;font-size:.82em">${a.rejection_reason}</span>`
+            :'<span style="color:var(--muted)">—</span>';
+          const resumeBtn=a.status==='approved'
+            ?`<button class="btn btn-success btn-sm btn-resume-inline" onclick="App.resumePipelineById('${a.correlation_id}')" style="font-size:.75em;padding:4px 10px;background:var(--green);color:#000;white-space:nowrap">&#9654; Resume</button>`
+            :'';
+          return`<tr style="border-bottom:1px solid var(--border)${a.status==='approved'?';background:rgba(34,197,94,.04)':''}">
             <td style="padding:8px 10px;font-weight:600">${a.incident_id||'—'}</td>
             <td style="padding:8px 10px"><span class="badge ${stCls}">${a.status}</span></td>
             <td style="padding:8px 10px">${(a.risk_score||0).toFixed(2)}</td>
             <td style="padding:8px 10px">${(a.actions||[]).length}</td>
+            <td style="padding:8px 10px;color:var(--cyan)">${reqBy}</td>
             <td style="padding:8px 10px">${dec}</td>
             <td style="padding:8px 10px;color:var(--muted)">${decAt}</td>
+            <td style="padding:8px 10px">${rejReason}</td>
+            <td style="padding:8px 10px">${resumeBtn}</td>
+            <td style="padding:8px 10px"><button onclick="App.deleteApproval('${a.correlation_id}')" style="background:none;border:none;color:#f87171;cursor:pointer;font-size:1em;padding:2px 6px" title="Delete">&#128465;</button></td>
           </tr>`;
         }).join('')+'</tbody></table></div>';
     }catch(e){el.innerHTML='<div class="empty-state"><p>History not available</p></div>';}
@@ -4810,6 +5164,12 @@ const App = {
             <div style="font-size:.72em;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Actions</div>
             <div style="font-size:1.4em;font-weight:800;color:var(--cyan)">${actions.length}</div>
           </div>
+        </div>
+        <!-- Requested by banner -->
+        <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin-bottom:14px;font-size:.83em;display:flex;align-items:center;gap:8px">
+          <span style="color:var(--muted)">&#128100; Raised by:</span>
+          <span style="font-weight:700;color:var(--purple)">${ap.requested_by||'pipeline (automatic)'}</span>
+          ${ap.created_at?`<span style="margin-left:auto;color:var(--muted);font-size:.9em">${new Date(ap.created_at).toLocaleString()}</span>`:''}
         </div>
         <!-- Plan summary -->
         <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);margin-bottom:14px;font-size:.84em">
@@ -4892,8 +5252,32 @@ const App = {
     if(!reason){this.toast('Please enter a rejection reason','error');return;}
     try{
       const r=await this.api('POST','/approvals/'+this.currentApprovalId+'/reject',{reason});
-      if(r&&r.ok){this.toast('Request rejected','info');this.closeModal('approve-modal');this.loadApprovals();}
-      else{
+      if(r&&r.ok){
+        this.toast('Approval rejected','info');
+        // Show rejection banner inside modal
+        const titleEl=document.getElementById('approve-modal-title');
+        if(titleEl&&!titleEl.querySelector('.rejected-badge')){
+          const badge=document.createElement('span');
+          badge.className='rejected-badge';
+          badge.style.cssText='margin-left:10px;padding:2px 10px;border-radius:20px;background:rgba(248,113,113,.15);color:#f87171;border:1px solid rgba(248,113,113,.3);font-size:.7em;font-weight:700;letter-spacing:.05em;vertical-align:middle';
+          badge.textContent='✗ REJECTED';
+          titleEl.appendChild(badge);
+        }
+        // Insert rejection summary at top of modal body
+        const body=document.getElementById('approve-modal-body');
+        if(body){
+          const banner=document.createElement('div');
+          banner.style.cssText='margin-bottom:14px;padding:10px 14px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);border-radius:8px;font-size:.83em';
+          banner.innerHTML=`<span style="color:#f87171;font-weight:700">✗ Rejected by ${this.username}</span><span style="color:var(--muted);margin-left:8px">— ${reason}</span>`;
+          body.prepend(banner);
+        }
+        document.getElementById('btn-approve').style.display='none';
+        document.getElementById('btn-reject').style.display='none';
+        document.getElementById('btn-resume').style.display='none';
+        document.querySelectorAll('#approve-modal-body input[type=checkbox]').forEach(c=>{c.disabled=true;});
+        this._approvalStatus='rejected';
+        this.loadApprovals();
+      }else{
         const d=r?await r.json():{};
         if(r&&r.status===403)this.toast('Permission denied — developer or above required to reject actions','error');
         else this.toast('Rejection failed: '+(d.detail||'unknown error'),'error');
@@ -4901,10 +5285,17 @@ const App = {
     }catch(e){this.toast('Error: '+e.message,'error');}
   },
 
+  async resumePipelineById(correlationId){
+    this.currentApprovalId=correlationId;
+    await this.resumePipeline();
+  },
+
   async resumePipeline(){
     if(!this.currentApprovalId) return;
     const btn=document.getElementById('btn-resume');
-    btn.disabled=true;btn.innerHTML='<div class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></div> Executing...';
+    if(btn){btn.disabled=true;btn.innerHTML='<div class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></div> Executing...';}
+    // Also disable any inline resume buttons
+    document.querySelectorAll('.btn-resume-inline').forEach(b=>{b.disabled=true;b.textContent='Executing…';});
     try{
       const r=await this.api('POST','/approvals/'+this.currentApprovalId+'/resume');
       if(r&&r.ok){
@@ -4963,7 +5354,10 @@ const App = {
         },2500);
       }else{const e=await r.json().catch(()=>({}));this.toast('Resume failed: '+(e.detail||'Unknown'),'error');}
     }catch(e){this.toast('Error: '+e.message,'error');}
-    finally{btn.disabled=false;btn.innerHTML='&#9654; Resume Pipeline';}
+    finally{
+      if(btn){btn.disabled=false;btn.innerHTML='&#9654; Resume Pipeline';}
+      document.querySelectorAll('.btn-resume-inline').forEach(b=>{b.disabled=false;b.textContent='▶ Resume Pipeline';});
+    }
   },
 
   closeModal(id){document.getElementById(id).classList.remove('open');},
@@ -5588,26 +5982,117 @@ const App = {
     msgs.appendChild(row);msgs.scrollTop=msgs.scrollHeight;
   },
 
+  // Image upload helpers
+  _chatImageData: null,
+  _chatImageType: null,
+  onChatImageSelected(input){
+    const file=input.files&&input.files[0];
+    if(!file)return;
+    const reader=new FileReader();
+    reader.onload=e=>{
+      const dataUrl=e.target.result;
+      // dataUrl = "data:image/png;base64,XXXX"
+      const [header,b64]=dataUrl.split(',');
+      this._chatImageType=header.match(/:(.*?);/)[1];
+      this._chatImageData=b64;
+      document.getElementById('chat-img-thumb').src=dataUrl;
+      document.getElementById('chat-img-preview').style.display='flex';
+    };
+    reader.readAsDataURL(file);
+    input.value='';
+  },
+  clearChatImage(){
+    this._chatImageData=null;this._chatImageType=null;
+    const prev=document.getElementById('chat-img-preview');
+    prev.style.display='none';
+    document.getElementById('chat-img-thumb').src='';
+  },
+
+  _renderSuggestions(suggestions){
+    const msgs=document.getElementById('chat-messages');
+    // Remove previous suggestion row if any
+    const old=document.getElementById('chat-suggestion-row');if(old)old.remove();
+    if(!suggestions||!suggestions.length)return;
+    const row=document.createElement('div');
+    row.id='chat-suggestion-row';
+    row.style.cssText='display:flex;flex-wrap:wrap;gap:8px;padding:6px 0 4px;';
+    suggestions.forEach(s=>{
+      const btn=document.createElement('button');
+      btn.className='chat-suggestion';
+      btn.textContent=s;
+      btn.onclick=()=>{
+        document.getElementById('chat-input').value=s;
+        row.remove();
+        this.sendChat();
+      };
+      row.appendChild(btn);
+    });
+    msgs.appendChild(row);msgs.scrollTop=msgs.scrollHeight;
+  },
+
   async sendChatMsg(msg){
     if(!this.chatSessionId){this.chatSessionId='sess-'+Date.now();localStorage.setItem('nexusops_chat_session',this.chatSessionId);}
     this.appendChatMsg('user',msg);
+    // Remove stale suggestions
+    const oldSug=document.getElementById('chat-suggestion-row');if(oldSug)oldSug.remove();
     const ti=document.getElementById('typing-indicator');ti.style.display='flex';
     document.getElementById('chat-session-label').textContent='Session '+this.chatSessionId.slice(-8);
     const body={message:msg,session_id:this.chatSessionId,provider:this.globalLLM};
     if(this.pendingAction){body.pending_action=this.pendingAction;body.pending_params=this.pendingParams;}
     if(['yes','yeah','yep','sure','ok','proceed','go ahead','confirm','do it'].includes(msg.toLowerCase().trim())&&this.pendingAction) body.confirmed=true;
+    if(this._chatImageData){body.image_data=this._chatImageData;body.image_type=this._chatImageType;this.clearChatImage();}
+    // ── SSE streaming ────────────────────────────────────────────────
     try{
-      const r=await this.api('POST','/chat',body);
+      const token=localStorage.getItem('nexusops_token')||'';
+      const resp=await fetch('/chat/stream',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
+        body:JSON.stringify(body),
+      });
       ti.style.display='none';
-      if(!r){this.appendChatMsg('assistant','Connection failed');return;}
-      const d=await r.json();
-      if(!r.ok){this.appendChatMsg('assistant','Error: '+(d.detail||'Unknown error'));return;}
-      const reply=d.reply||d.answer||d.response||'No response.';
-      const providerUsed=d.llm_provider||'';
-      this.appendChatMsg('assistant',reply,providerUsed);
-      this.chatSessionId=d.session_id||this.chatSessionId;
-      this.pendingAction=d.needs_confirm?d.pending_action:null;
-      this.pendingParams=d.needs_confirm?d.pending_params:null;
+      if(!resp.ok){
+        const errText=await resp.text();let errMsg='Error';
+        try{errMsg=(JSON.parse(errText).detail||errMsg);}catch(e){}
+        this.appendChatMsg('assistant',errMsg);return;
+      }
+      // Create a placeholder bubble and stream chunks into it
+      const msgId='msg-'+Date.now();
+      const msgs=document.getElementById('chat-messages');
+      const row=document.createElement('div');
+      row.className='chat-row assistant';
+      row.innerHTML='<div class="chat-avatar assistant-avatar">AI</div><div class="chat-body"><div class="chat-bubble assistant" id="'+msgId+'"></div><div class="chat-meta">NexusOps &bull; '+new Date().toLocaleTimeString()+'</div></div>';
+      msgs.appendChild(row);msgs.scrollTop=msgs.scrollHeight;
+      const bubble=document.getElementById(msgId);
+      let fullText='';let thinkingEl=null;
+      const reader=resp.body.getReader();const decoder=new TextDecoder();let buf='';
+      while(true){
+        const {done,value}=await reader.read();
+        if(done)break;
+        buf+=decoder.decode(value,{stream:true});
+        const lines=buf.split('\\n');buf=lines.pop();
+        for(const line of lines){
+          if(!line.startsWith('data: '))continue;
+          try{
+            const ev=JSON.parse(line.slice(6));
+            if(ev.type==='thinking'){
+              // Show inline "fetching…" status before first token
+              if(!thinkingEl){thinkingEl=document.createElement('div');thinkingEl.style.cssText='color:var(--text2);font-size:.78em;margin-bottom:4px;display:flex;align-items:center;gap:6px';bubble.appendChild(thinkingEl);}
+              thinkingEl.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>'+ev.text;
+            } else if(ev.type==='chunk'){
+              if(thinkingEl){thinkingEl.remove();thinkingEl=null;}
+              fullText+=ev.text;
+              bubble.innerHTML=this._md(fullText);
+              msgs.scrollTop=msgs.scrollHeight;
+            } else if(ev.type==='done'){
+              this.chatSessionId=ev.session_id||this.chatSessionId;
+              this._renderSuggestions(ev.suggestions||[]);
+            } else if(ev.type==='error'){
+              if(thinkingEl){thinkingEl.remove();thinkingEl=null;}
+              bubble.innerHTML='<span style="color:var(--red)">'+ev.message+'</span>';
+            }
+          }catch(e){}
+        }
+      }
     }catch(e){ti.style.display='none';this.appendChatMsg('assistant','Error: '+e.message);}
   },
 
@@ -7616,7 +8101,13 @@ def health():
         incident_count = len(results) if isinstance(results, list) else 0
     except Exception:
         pass
-    return {"status": "ok", "incident_count": incident_count, "version": "2.0.0"}
+    return {
+        "status": "ok",
+        "incident_count": incident_count,
+        "version": "2.0.0",
+        "monitor_loop": _settings.ENABLE_MONITOR_LOOP,
+        "auto_remediate": _settings.AUTO_REMEDIATE_ON_MONITOR,
+    }
 
 
 @app.get("/health/live", tags=["health"])
@@ -8281,6 +8772,36 @@ def incident_run(req: IncidentRunRequest, x_user: Optional[str] = Header(default
                 _PENDING_PIPELINE_STATES[approval.correlation_id] = result
                 _PENDING_PIPELINE_STATES.pop(cid, None)
                 result["correlation_id"] = approval.correlation_id
+
+                # Store incident in ChromaDB now (awaiting_approval incidents
+                # never reach store_memory in the graph, so store here)
+                try:
+                    import datetime as _dt2
+                    _plan2 = result.get("plan") or {}
+                    store_incident({
+                        "id":          result.get("incident_id", "unknown"),
+                        "type":        "pipeline_v2",
+                        "source":      "langgraph_orchestrator",
+                        "created_at":  _dt2.datetime.now(_dt2.timezone.utc).isoformat(),
+                        "description": result.get("description", ""),
+                        "risk":        _plan2.get("risk", ""),
+                        "status":      "awaiting_approval",
+                        "confidence":  float(_plan2.get("confidence", 0.5)),
+                        "payload": {
+                            "description":       result.get("description", ""),
+                            "root_cause":        _plan2.get("root_cause", ""),
+                            "summary":           _plan2.get("summary", ""),
+                            "risk":              _plan2.get("risk", ""),
+                            "confidence":        float(_plan2.get("confidence", 0.5)),
+                            "actions_executed":  0,
+                            "validation_passed": False,
+                            "status":            "awaiting_approval",
+                            "created_at":        _dt2.datetime.now(_dt2.timezone.utc).isoformat(),
+                            "correlation_id":    approval.correlation_id,
+                        },
+                    })
+                except Exception:
+                    pass
                 # Notify approvers on Slack if a channel is configured
                 slack_ch = (result.get("metadata") or {}).get("slack_channel", "")
                 if slack_ch:
@@ -8324,6 +8845,16 @@ def incident_run(req: IncidentRunRequest, x_user: Optional[str] = Header(default
             pass
     # Cache result for later viewing
     _cache_result(result)
+
+    # Slack channel: always for auto-triggered, optional for manual
+    if getattr(req, 'create_slack_channel', False):
+        try:
+            from app.orchestrator.runner import _slack_notify_pipeline
+            _slack_notify_pipeline(req.incident_id, req.description, result,
+                                   triggered_by=resolved_user)
+        except Exception:
+            pass
+
     return result
 
 
@@ -8402,6 +8933,23 @@ def get_incident_result(incident_id: str, auth: AuthContext = Depends(require_vi
         pass
 
     raise HTTPException(status_code=404, detail="Incident not found")
+
+
+@app.delete("/incidents/{incident_id}", tags=["incidents"])
+def delete_incident(incident_id: str, auth: AuthContext = Depends(require_developer)):
+    """Delete an incident from the in-memory cache and ChromaDB."""
+    removed_cache = incident_id in _RECENT_RESULTS
+    _RECENT_RESULTS.pop(incident_id, None)
+
+    from app.memory.vector_db import delete_incident as _db_delete
+    db_result = _db_delete(incident_id)
+
+    return {
+        "deleted": True,
+        "incident_id": incident_id,
+        "removed_from_cache": removed_cache,
+        "removed_from_db": db_result.get("deleted", False),
+    }
 
 
 @app.post("/v2/incident/run")
@@ -8696,6 +9244,8 @@ class ChatPayload(BaseModel):
     dry_run: bool = False                  # if True: describe what would happen, don't execute
     session_id: Optional[str] = None      # conversation memory session ID
     incident_context: Optional[Dict] = None  # optional war-room context
+    image_data: Optional[str] = None      # base64-encoded image for vision queries
+    image_type: Optional[str] = None      # MIME type: image/png, image/jpeg, image/webp
 
 class WarRoomRequest(BaseModel):
     incident_id:  str
@@ -9450,12 +10000,19 @@ def _chat_inner(payload: ChatPayload, x_user: str):
         sid = payload.session_id or f"chat-{x_user}-default"
         try:
             from app.chat.intelligence import chat_with_intelligence
-            reply = chat_with_intelligence(
+            _result = chat_with_intelligence(
                 message=payload.message,
                 session_id=sid,
                 incident_context=payload.incident_context,
                 preferred_provider=force_prov or None,
+                image_data=payload.image_data or None,
+                image_type=payload.image_type or None,
             )
+            # chat_with_intelligence returns (answer, suggestions)
+            if isinstance(_result, tuple):
+                reply, _suggestions = _result
+            else:
+                reply, _suggestions = _result, []
         except Exception as exc:
             _log_m.getLogger("chat").error("chat_with_intelligence failed: %s", exc, exc_info=True)
             # Fallback: build history from memory if available, then use basic LLM
@@ -9482,7 +10039,7 @@ def _chat_inner(payload: ChatPayload, x_user: str):
     sid_out = payload.session_id or f"chat-{x_user}-{_uuid2.uuid4().hex[:8]}"
     return {
         "reply":          reply,
-        "answer":         reply,   # alias so UI can use either field
+        "answer":         reply,
         "session_id":     sid_out,
         "sources":        [],
         "llm_provider":   used_provider,
@@ -9492,7 +10049,140 @@ def _chat_inner(payload: ChatPayload, x_user: str):
         "pending_action": None,
         "pending_params": None,
         "needs_confirm":  False,
+        "suggestions":    _suggestions if '_suggestions' in dir() else [],
     }
+
+@app.post("/chat/stream")
+async def chat_stream(payload: ChatPayload, auth: AuthContext = Depends(require_viewer)):
+    """SSE streaming chat endpoint — real token-by-token streaming via Anthropic stream API.
+
+    Event format:
+      data: {"type":"thinking","text":"Fetching ec2 instances..."}  (during tool calls)
+      data: {"type":"chunk","text":"..."}                           (LLM text tokens)
+      data: {"type":"done","suggestions":[...],"session_id":"..."}  (end of response)
+      data: {"type":"error","message":"..."}
+    """
+    import json as _json
+    import threading as _threading
+    from app.chat.intelligence import (
+        chat_with_intelligence as _cwi,
+        _chat_anthropic_stream,
+        _build_system_prompt,
+        _extract_suggestions,
+    )
+
+    async def _event_generator():
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _run_stream():
+            try:
+                from app.llm.claude import _anthropic_client, ANTHROPIC_API_KEY
+                from app.chat.memory import get_history as _gh, add_message as _am
+
+                # Resolve session + history
+                sid = payload.session_id or f"chat-{auth.username}-default"
+                mem = _gh(sid, max_messages=20)
+                history_messages = [
+                    {"role": getattr(m, "role", "user"), "content": getattr(m, "content", "")}
+                    for m in mem
+                ]
+
+                # Persist user message
+                _am(sid, "user", payload.message)
+
+                # Determine if Anthropic is available and preferred
+                use_anthropic = bool(
+                    ANTHROPIC_API_KEY and _anthropic_client and
+                    (payload.provider or "").lower() not in ("openai", "groq", "ollama")
+                )
+
+                if not use_anthropic:
+                    # Fall back to regular non-streaming path
+                    result = _chat_inner(payload, auth.username)
+                    reply = result.get("reply", "")
+                    suggestions = result.get("suggestions", [])
+                    loop.call_soon_threadsafe(queue.put_nowait,
+                        _json.dumps({"type": "chunk", "text": reply}))
+                    loop.call_soon_threadsafe(queue.put_nowait,
+                        _json.dumps({"type": "done", "suggestions": suggestions,
+                                     "session_id": sid, "llm_provider": result.get("llm_provider", "")}))
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                    return
+
+                # Build vision content if image attached
+                vision = None
+                if payload.image_data and payload.image_type:
+                    media = payload.image_type if payload.image_type.startswith("image/") else f"image/{payload.image_type}"
+                    vision = [
+                        {"type": "image", "source": {"type": "base64", "media_type": media, "data": payload.image_data}},
+                        {"type": "text", "text": payload.message},
+                    ]
+
+                from app.integrations.universal_collector import collect_all_context
+                try:
+                    _ctx = collect_all_context(hours=1)
+                except Exception:
+                    _ctx = {}
+
+                system_prompt = _build_system_prompt(_ctx, native_tools=True)
+
+                def _on_tool_event(ev):
+                    loop.call_soon_threadsafe(queue.put_nowait, _json.dumps(ev))
+
+                full_text = ""
+                for token in _chat_anthropic_stream(
+                    system_prompt, history_messages, payload.message, sid,
+                    vision_content=vision, on_tool_event=_on_tool_event,
+                ):
+                    full_text += token
+                    loop.call_soon_threadsafe(queue.put_nowait,
+                        _json.dumps({"type": "chunk", "text": token}))
+
+                # Extract suggestions from full response
+                clean_text, suggestions = _extract_suggestions(full_text)
+                if clean_text != full_text:
+                    # If suggestions were embedded, re-send a correction chunk is complex;
+                    # instead just send done with clean flag for frontend to trim
+                    pass
+
+                # Persist assistant response
+                _am(sid, "assistant", clean_text or full_text)
+
+                loop.call_soon_threadsafe(queue.put_nowait,
+                    _json.dumps({"type": "done", "suggestions": suggestions,
+                                 "session_id": sid, "llm_provider": "anthropic"}))
+
+            except Exception as exc:
+                import logging as _lg
+                _lg.getLogger("chat.stream").error("stream_failed: %s", exc, exc_info=True)
+                err_str = str(exc)
+                if "credit balance" in err_str.lower() or "too low" in err_str.lower() or "billing" in err_str.lower():
+                    friendly = "Your Anthropic account has insufficient credits. Go to console.anthropic.com → Plans & Billing to add credits, or switch to OpenAI using the model selector."
+                elif "api_key" in err_str.lower() or "401" in err_str or "authentication" in err_str.lower():
+                    friendly = "Anthropic API key is invalid or missing. Check ANTHROPIC_API_KEY in your .env file."
+                elif "529" in err_str or "overloaded" in err_str.lower():
+                    friendly = "Anthropic is temporarily overloaded. Please wait a moment and try again."
+                elif "rate_limit" in err_str.lower() or "429" in err_str:
+                    friendly = "Rate limit reached. Please wait a moment and try again."
+                else:
+                    friendly = "AI response failed. Please try again or switch models."
+                loop.call_soon_threadsafe(queue.put_nowait,
+                    _json.dumps({"type": "error", "message": friendly}))
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+        _threading.Thread(target=_run_stream, daemon=True).start()
+
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {item}\n\n"
+
+    return StreamingResponse(_event_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 
 @app.get("/audit/log")
 def get_audit_log_endpoint(limit: int = 50, user: str = "", action: str = ""):
@@ -9506,6 +10196,27 @@ def rate_limit_status(x_user: str = Header(default="anonymous")):
     """Return current rate-limit usage for the calling user."""
     from app.core.ratelimit import get_usage
     return get_usage(x_user)
+
+
+class LLMSettingPayload(BaseModel):
+    provider: str  # "anthropic" | "openai" | "groq" | "ollama" | ""
+
+@app.post("/settings/llm", tags=["settings"])
+def set_llm_provider(payload: LLMSettingPayload, auth: AuthContext = Depends(require_viewer)):
+    """Set the global LLM provider used by chat, pipeline, and all agents."""
+    from app.llm.factory import set_global_provider, get_global_provider
+    provider = payload.provider.lower().strip()
+    valid = {"anthropic", "claude", "openai", "groq", "ollama", ""}
+    if provider not in valid:
+        raise HTTPException(status_code=400, detail=f"Invalid provider. Choose from: {valid}")
+    set_global_provider(provider)
+    return {"ok": True, "provider": get_global_provider()}
+
+@app.get("/settings/llm", tags=["settings"])
+def get_llm_provider(auth: AuthContext = Depends(require_viewer)):
+    """Get the current global LLM provider."""
+    from app.llm.factory import get_global_provider
+    return {"provider": get_global_provider()}
 
 
 @app.get("/chat/action_count")
@@ -9558,7 +10269,6 @@ def warroom_create(req: WarRoomRequest, auth: AuthContext = Depends(require_deve
             slack_info = {"error": channel_result.get("error")}
 
     # 4. Create war room AI session (persisted, linked to this incident)
-    from app.incident.war_room_intelligence import create_war_room_session
     pipeline_state = {
         "root_cause":      synthesis.get("root_cause", "Under investigation"),
         "severity":        req.severity,
@@ -9568,7 +10278,7 @@ def warroom_create(req: WarRoomRequest, auth: AuthContext = Depends(require_deve
         "k8s_context":     context.get("k8s", {}),
         "github_context":  context.get("github", {}),
     }
-    war_room = create_war_room_session(
+    war_room = _create_war_room(
         incident_id   = req.incident_id,
         description   = req.description,
         pipeline_state= pipeline_state,
@@ -9968,6 +10678,11 @@ def create_quick_action_approval(req: QuickActionRequest, auth: AuthContext = De
             "retry_count":    0,
             "status":         "awaiting_approval",
         }
+        from app.core.audit import audit_log as _al
+        _al(user=auth.username, action="approval_requested",
+            params={"incident_id": req.incident_id, "action_type": action_type,
+                    "risk_score": req.risk_score, "correlation_id": approval.correlation_id},
+            result={"success": True}, source="approvals")
         return {"success": True, "correlation_id": approval.correlation_id}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -9975,8 +10690,10 @@ def create_quick_action_approval(req: QuickActionRequest, auth: AuthContext = De
 @app.get("/approvals/pending", tags=["approvals"])
 def list_pending_approvals_endpoint(auth: AuthContext = Depends(require_viewer)):
     try:
-        from app.incident.approval import list_pending_approvals
-        approvals = list_pending_approvals()
+        from app.incident.approval import _pending_approvals, STATUS_PENDING, STATUS_APPROVED, cleanup_expired
+        cleanup_expired()
+        # Return both pending (needs decision) and approved (needs resume)
+        approvals = [a for a in _pending_approvals.values() if a.status in (STATUS_PENDING, STATUS_APPROVED)]
         return {"approvals": [vars(a) for a in approvals]}
     except Exception as e:
         return {"approvals": [], "error": str(e)}
@@ -9994,11 +10711,28 @@ class ApprovalDecision(BaseModel):
     approved_action_indices: List[int] = []
     reason: Optional[str] = None
 
+@app.delete("/approvals/{correlation_id}", tags=["approvals"])
+def delete_approval_endpoint(correlation_id: str, auth: AuthContext = Depends(require_developer)):
+    """Delete an approval request (any status)."""
+    from app.incident.approval import _pending_approvals, _save_approvals
+    if correlation_id not in _pending_approvals:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    del _pending_approvals[correlation_id]
+    _PENDING_PIPELINE_STATES.pop(correlation_id, None)
+    _save_approvals()
+    return {"ok": True, "deleted": correlation_id}
+
 @app.post("/approvals/{correlation_id}/approve", tags=["approvals"])
 def approve_actions_endpoint(correlation_id: str, req: ApprovalDecision, auth: AuthContext = Depends(require_developer)):
     try:
         from app.incident.approval import approve_actions
         result = approve_actions(correlation_id, req.approved_action_indices, auth.username)
+        from app.core.audit import audit_log as _al
+        _al(user=auth.username, action="approval_approved",
+            params={"correlation_id": correlation_id,
+                    "approved_indices": req.approved_action_indices,
+                    "requested_by": getattr(result, "requested_by", "pipeline")},
+            result={"success": True}, source="approvals")
         return {"success": True, "approval": vars(result)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -10008,8 +10742,12 @@ def reject_approval_endpoint(correlation_id: str, req: ApprovalDecision, auth: A
     try:
         from app.incident.approval import reject_approval
         result = reject_approval(correlation_id, req.reason or "Rejected by user", auth.username)
-        # Remove from pending states
         _PENDING_PIPELINE_STATES.pop(correlation_id, None)
+        from app.core.audit import audit_log as _al
+        _al(user=auth.username, action="approval_rejected",
+            params={"correlation_id": correlation_id, "reason": req.reason or "Rejected by user",
+                    "requested_by": getattr(result, "requested_by", "pipeline")},
+            result={"success": True}, source="approvals")
         return {"success": True, "approval": vars(result)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -10112,50 +10850,37 @@ class WarRoomQuestion(BaseModel):
 @app.post("/warroom/{war_room_id}/ask", tags=["warroom"])
 async def ask_war_room_ai(war_room_id: str, req: WarRoomQuestion, auth: AuthContext = Depends(require_viewer)):
     try:
-        from app.incident.war_room_intelligence import answer_war_room_question
-        answer = answer_war_room_question(war_room_id, req.question, req.asked_by or auth.username)
+        answer = _answer_war_room_question(war_room_id, req.question, req.asked_by or auth.username)
         return {"answer": answer, "war_room_id": war_room_id}
     except Exception as e:
-        return {"answer": f"War room intelligence unavailable: {e}", "war_room_id": war_room_id}
+        return {"answer": f"War room AI unavailable: {e}", "war_room_id": war_room_id}
 
 @app.get("/warroom/active", tags=["warroom"])
 def list_active_war_rooms(auth: AuthContext = Depends(require_viewer)):
-    try:
-        from app.incident.war_room_intelligence import list_active_war_rooms as _list
-        return {"war_rooms": _list()}
-    except Exception as e:
-        return {"war_rooms": [], "error": str(e)}
+    return {"war_rooms": [
+        {"war_room_id": wr.war_room_id, "incident_id": wr.incident_id,
+         "description": wr.incident_description, "slack_channel": wr.slack_channel,
+         "created_at": wr.created_at, "participants": len(wr.participants),
+         "severity": wr.pipeline_state.get("severity", "SEV2")}
+        for wr in _WAR_ROOMS.values()
+        if wr.pipeline_state.get("status") != "resolved"
+    ]}
 
 @app.get("/warroom/resolved", tags=["warroom"])
 def list_resolved_war_rooms(auth: AuthContext = Depends(require_viewer)):
-    try:
-        from app.incident.war_room_intelligence import _war_rooms
-        rooms = [
-            {
-                "war_room_id":   wr.war_room_id,
-                "incident_id":   wr.incident_id,
-                "description":   wr.incident_description,
-                "slack_channel": wr.slack_channel,
-                "created_at":    wr.created_at,
-                "participants":  len(wr.participants),
-                "severity":      wr.pipeline_state.get("severity", "low"),
-            }
-            for wr in _war_rooms.values()
-            if wr.pipeline_state.get("status") == "resolved"
-        ]
-        return {"war_rooms": rooms}
-    except Exception as e:
-        return {"war_rooms": [], "error": str(e)}
+    return {"war_rooms": [
+        {"war_room_id": wr.war_room_id, "incident_id": wr.incident_id,
+         "description": wr.incident_description, "slack_channel": wr.slack_channel,
+         "created_at": wr.created_at, "participants": len(wr.participants),
+         "severity": wr.pipeline_state.get("severity", "low")}
+        for wr in _WAR_ROOMS.values()
+        if wr.pipeline_state.get("status") == "resolved"
+    ]}
 
 @app.get("/warroom/{war_room_id}/timeline", tags=["warroom"])
 def get_war_room_timeline(war_room_id: str, auth: AuthContext = Depends(require_viewer)):
-    """Return the chronological event timeline for a war room."""
-    try:
-        from app.incident.war_room_intelligence import generate_incident_timeline
-        events = generate_incident_timeline(war_room_id)
-        return {"timeline": events, "count": len(events)}
-    except Exception as e:
-        return {"timeline": [], "count": 0, "error": str(e)}
+    events = _wr_timeline(war_room_id)
+    return {"timeline": events, "count": len(events)}
 
 
 class SlackSendRequest(BaseModel):
@@ -10167,17 +10892,14 @@ class SlackSendRequest(BaseModel):
 def get_war_room_slack_history(war_room_id: str, limit: int = 30, auth: AuthContext = Depends(require_viewer)):
     """Fetch recent messages from the Slack channel linked to this war room."""
     try:
-        from app.incident.war_room_intelligence import _war_rooms
-        import datetime as _dt
-        wr = _war_rooms.get(war_room_id)
+        wr = _WAR_ROOMS.get(war_room_id)
         channel = wr.slack_channel if wr else ""
         if not channel:
             return {"messages": [], "channel": "", "note": "No Slack channel linked to this war room"}
         from app.integrations.slack import _client as _slack_client
         sc = _slack_client()
-        # resolve channel name to ID
         ch_id = channel
-        if not channel.startswith("C"):  # not already an ID
+        if not channel.startswith("C"):
             name = channel.lstrip("#")
             result = sc.conversations_list(types="public_channel,private_channel", limit=500)
             for ch in result.get("channels", []):
@@ -10188,12 +10910,11 @@ def get_war_room_slack_history(war_room_id: str, limit: int = 30, auth: AuthCont
         messages = []
         for m in reversed(resp.get("messages", [])):
             if m.get("subtype"):
-                continue  # skip join/leave system messages
+                continue
             ts = float(m.get("ts", 0))
-            time_str = _dt.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else ""
-            # try to resolve user display name
+            time_str = _datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else ""
             username = m.get("username") or m.get("user", "unknown")
-            messages.append({"username": username, "text": m.get("text", ""), "time": time_str, "ts": m.get("ts","")})
+            messages.append({"username": username, "text": m.get("text", ""), "time": time_str, "ts": m.get("ts", "")})
         return {"messages": messages, "channel": channel, "count": len(messages)}
     except Exception as e:
         return {"messages": [], "channel": "", "error": str(e)}
@@ -10203,12 +10924,10 @@ def get_war_room_slack_history(war_room_id: str, limit: int = 30, auth: AuthCont
 def send_war_room_slack_message(war_room_id: str, req: SlackSendRequest, auth: AuthContext = Depends(require_viewer)):
     """Send a message to the Slack channel linked to this war room."""
     try:
-        from app.incident.war_room_intelligence import _war_rooms
-        wr = _war_rooms.get(war_room_id)
+        wr = _WAR_ROOMS.get(war_room_id)
         channel = wr.slack_channel if wr else ""
         if not channel:
             raise HTTPException(status_code=400, detail="No Slack channel linked to this war room")
-        from app.integrations.slack import post_message
         text = f"*{req.sent_by}* (via NsOps): {req.message}"
         result = post_message(channel=channel, text=text)
         return {"success": result.get("ok", False), "channel": channel}
@@ -10219,26 +10938,136 @@ def send_war_room_slack_message(war_room_id: str, req: SlackSendRequest, auth: A
 
 @app.post("/warroom/{war_room_id}/resolve", tags=["warroom"])
 def resolve_war_room(war_room_id: str, auth: AuthContext = Depends(require_developer)):
-    """Mark a war room as resolved and remove it from the active list."""
+    """Mark a war room as resolved."""
+    wr = _WAR_ROOMS.get(war_room_id)
+    if not wr:
+        raise HTTPException(status_code=404, detail=f"War room {war_room_id} not found")
+    wr.pipeline_state["status"] = "resolved"
+    _wr_save()
     try:
-        from app.incident.war_room_intelligence import _war_rooms, _wr_save
-        wr = _war_rooms.get(war_room_id)
-        if not wr:
-            raise HTTPException(status_code=404, detail=f"War room {war_room_id} not found")
-        wr.pipeline_state["status"] = "resolved"
-        _wr_save()
-        # Optionally notify Slack
+        if wr.slack_channel:
+            post_message(channel=wr.slack_channel, text=f":white_check_mark: War room for *{wr.incident_id}* marked as resolved by {auth.username}.")
+    except Exception:
+        pass
+    return {"success": True, "war_room_id": war_room_id, "resolved_by": auth.username}
+
+
+# ── Slack Events Webhook (bidirectional war room chat) ────────────────────────
+# Configure Slack App > Event Subscriptions > Request URL: https://<your-domain>/slack/events
+# Subscribe to bot events: message.channels, message.groups
+# The bot must be invited to each war room channel.
+
+_SLACK_BOT_USER_ID: str = os.getenv("SLACK_BOT_USER_ID", "")  # set to avoid echo loops
+
+@app.post("/slack/events", tags=["warroom"], include_in_schema=False)
+async def slack_events_webhook(request: Request):
+    """Receive Slack Events API payloads and route channel messages to war room AI."""
+    body = await request.json()
+
+    # Slack URL verification challenge (one-time handshake)
+    if body.get("type") == "url_verification":
+        return {"challenge": body.get("challenge")}
+
+    event = body.get("event", {})
+    etype = event.get("type")
+
+    # Only handle regular channel messages (ignore bot messages to avoid loops)
+    if etype not in ("message", "message.channels", "message.groups"):
+        return {"ok": True}
+    if event.get("subtype"):  # bot_message, message_changed, etc.
+        return {"ok": True}
+    bot_id = event.get("bot_id") or ""
+    user_id = event.get("user") or ""
+    if bot_id or user_id == _SLACK_BOT_USER_ID:
+        return {"ok": True}
+
+    channel_id = event.get("channel", "")
+    text = (event.get("text") or "").strip()
+    username = user_id or "slack_user"
+
+    if not text or not channel_id:
+        return {"ok": True}
+
+    # Resolve channel name from ID (needed for matching)
+    ch_name_resolved = ""
+    try:
+        from app.integrations.slack import _client as _sc, SLACK_BOT_TOKEN
+        if SLACK_BOT_TOKEN:
+            sc = _sc()
+            info = sc.conversations_info(channel=channel_id)
+            ch_name_resolved = info.get("channel", {}).get("name", "")
+            # Also resolve username while we have the client
+            if user_id:
+                try:
+                    uinfo = sc.users_info(user=user_id)
+                    username = uinfo.get("user", {}).get("real_name") or uinfo.get("user", {}).get("name") or user_id
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # ── 1. Check if this is a war room channel ────────────────────────────────
+    matched_wr = None
+    for wr in _WAR_ROOMS.values():
+        if wr.pipeline_state.get("status") == "resolved":
+            continue
+        ch = wr.slack_channel.lstrip("#")
+        if ch in (channel_id, ch_name_resolved):
+            matched_wr = wr
+            break
+
+    if matched_wr:
+        asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: _answer_war_room_question(matched_wr.war_room_id, text, username)
+        )
+        return {"ok": True}
+
+    # ── 2. Check if this is an incident channel (#inc-*) ─────────────────────
+    # Match channel name like "inc-INC-001" or "inc-monitor-1234567890"
+    import re as _re
+    inc_match = _re.match(r'^inc[-_](.+)$', ch_name_resolved or "")
+    if not inc_match:
+        return {"ok": True}  # not an incident channel — ignore
+
+    incident_id = inc_match.group(1)
+
+    # Build context from cached pipeline result if available
+    cached = _RECENT_RESULTS.get(incident_id, {})
+    plan = cached.get("plan") or {}
+    incident_context = {
+        "incident_id":   incident_id,
+        "incident_description": cached.get("description") or incident_id,
+        "root_cause":    plan.get("root_cause") or "Under investigation",
+        "actions_taken": cached.get("executed_actions") or [],
+        "blocked_actions": cached.get("blocked_actions") or [],
+        "current_status": cached.get("status") or "unknown",
+        "risk":          plan.get("risk") or "unknown",
+        "confidence":    plan.get("confidence") or 0,
+        "plan_actions":  plan.get("actions") or [],
+        "aws_available": bool((cached.get("aws_context") or {}).get("_data_available")),
+        "k8s_available": bool((cached.get("k8s_context") or {}).get("_data_available")),
+    }
+
+    def _answer_incident_channel(q: str, u: str, ch: str, ctx: dict) -> None:
         try:
-            from app.integrations.slack import post_message
-            if wr.slack_channel:
-                post_message(channel=wr.slack_channel, text=f":white_check_mark: War room for *{wr.incident_id}* marked as resolved by {auth.username}.")
-        except Exception:
-            pass
-        return {"success": True, "war_room_id": war_room_id, "resolved_by": auth.username}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            from app.chat.intelligence import chat_with_intelligence
+            from app.integrations.slack import post_message as _pm
+            answer = chat_with_intelligence(
+                message=q,
+                session_id=f"slack_incident::{ch}",
+                incident_context=ctx,
+            )
+            _pm(channel=ch, text=f":robot_face: *NsOps AI* | _{ctx['incident_id']}_\n*{u} asked:* {q}\n\n{answer}")
+        except Exception as exc:
+            logger.warning("slack_incident_answer_failed", extra={"error": str(exc)})
+
+    asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: _answer_incident_channel(text, username, channel_id, incident_context)
+    )
+
+    return {"ok": True}
 
 
 # ── Post-Mortem ────────────────────────────────────────────────────────────────

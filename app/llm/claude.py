@@ -35,13 +35,13 @@ _groq_client      = None
 
 if ANTHROPIC_API_KEY and _ANTHROPIC_KEY_VALID:
     from anthropic import Anthropic
-    _anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
+    _anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0)
     client    = _anthropic_client
     _provider = "anthropic"
 
 if GROQ_API_KEY:
     from groq import Groq
-    _groq_client = Groq(api_key=GROQ_API_KEY, timeout=60.0)
+    _groq_client = Groq(api_key=GROQ_API_KEY, timeout=120.0)
     if not _provider:
         client    = _groq_client
         _provider = "groq"
@@ -59,7 +59,7 @@ except Exception:
 
 
 def _llm(system: str, messages: list, max_tokens: int = 1024,
-         force_provider: str = "") -> str:
+         force_provider: str = "", temperature: float = 0.7) -> str:
     """Unified LLM call — Anthropic / Groq / Ollama (local, no key).
 
     force_provider: override the auto-detected provider ("anthropic", "groq", "ollama").
@@ -90,17 +90,30 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
             max_tokens=max_tokens,
             system=system,
             messages=messages,
+            temperature=temperature,
         )
         return resp.content[0].text
 
     elif provider == "groq":
         all_msgs = [{"role": "system", "content": system}] + messages
-        resp = _groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=all_msgs,
-            max_tokens=max_tokens,
-        )
-        return resp.choices[0].message.content
+        # Use a fast model; cap tokens to stay under free-tier limits (6000 tok/min)
+        groq_max = min(max_tokens, 1024)
+        try:
+            resp = _groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",   # fastest Groq model, lowest token cost
+                messages=all_msgs,
+                max_tokens=groq_max,
+                temperature=temperature,
+            )
+            return resp.choices[0].message.content
+        except Exception as groq_exc:
+            err = str(groq_exc)
+            if "rate_limit" in err.lower() or "429" in err:
+                raise RuntimeError(
+                    "Groq free tier rate limit hit. Wait 60 seconds and try again, "
+                    "or upgrade at console.groq.com."
+                )
+            raise
 
     elif provider == "ollama":
         # Build prompt from system + messages
@@ -706,10 +719,16 @@ class ClaudeProvider(BaseLLM):
         *,
         system: str = "You are an expert DevOps AI assistant.",
         max_tokens: int = 2048,
+        messages: list | None = None,
+        temperature: float = 0.7,
     ) -> LLMResponse:
         try:
-            content = _llm(system, [{"role": "user", "content": prompt}], max_tokens,
-                           force_provider=self._force_provider)
+            # Build structured message list — prior turns + final user turn
+            msg_list = list(messages) if messages else []
+            msg_list.append({"role": "user", "content": prompt})
+            content = _llm(system, msg_list, max_tokens,
+                           force_provider=self._force_provider,
+                           temperature=temperature)
         except Exception as exc:
             err = str(exc)
             # Credit exhausted or billing error — mark provider permanently unavailable

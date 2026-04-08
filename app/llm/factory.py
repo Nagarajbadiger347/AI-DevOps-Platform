@@ -21,8 +21,22 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Preferred provider name — can be overridden per-call
+# Preferred provider name — can be overridden per-call or via set_global_provider()
 _DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "claude").lower()
+
+# Runtime override — set by /settings/llm endpoint, persists until server restart
+_GLOBAL_PROVIDER_OVERRIDE: str = ""
+
+
+def set_global_provider(provider: str) -> None:
+    """Set the global LLM provider used by all agents and pipeline."""
+    global _GLOBAL_PROVIDER_OVERRIDE
+    _GLOBAL_PROVIDER_OVERRIDE = provider.lower().strip()
+    logger.info("global_llm_provider_set", extra={"provider": _GLOBAL_PROVIDER_OVERRIDE})
+
+
+def get_global_provider() -> str:
+    return _GLOBAL_PROVIDER_OVERRIDE or _DEFAULT_PROVIDER
 
 # Rate-limit cooldown: provider_key -> epoch time when usable again
 _rate_limited_until: dict[str, float] = {}
@@ -85,7 +99,7 @@ class LLMFactory:
         Raises:
             RuntimeError: if no provider is configured or all are rate-limited.
         """
-        target = (preferred or os.getenv("LLM_PROVIDER", _DEFAULT_PROVIDER)).lower()
+        target = (preferred or _GLOBAL_PROVIDER_OVERRIDE or os.getenv("LLM_PROVIDER", _DEFAULT_PROVIDER)).lower()
         chain  = _build_chain(target)
 
         for key, provider in chain:

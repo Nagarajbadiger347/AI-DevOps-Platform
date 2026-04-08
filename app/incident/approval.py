@@ -131,16 +131,22 @@ def _load_approvals() -> None:
             return
         raw = json.loads(path.read_text())
         for cid, d in raw.items():
-            # Reconstruct — skip if expired
-            if d.get("status") in (STATUS_PENDING,):
+            status = d.get("status", STATUS_PENDING)
+            # Skip expired/rejected — no need to restore
+            if status in (STATUS_EXPIRED, STATUS_REJECTED):
+                continue
+            # Check pending items for expiry
+            if status == STATUS_PENDING:
                 expires_at = d.get("expires_at", "")
                 if expires_at:
                     try:
                         exp_dt = datetime.datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
                         if exp_dt < datetime.datetime.now(datetime.timezone.utc):
                             d["status"] = STATUS_EXPIRED
+                            continue  # skip expired
                     except Exception:
                         pass
+            # Restore pending AND approved (approved = approved but not yet resumed)
             _pending_approvals[cid] = ApprovalRequest(**{
                 k: d[k] for k in ApprovalRequest.__dataclass_fields__ if k in d
             })

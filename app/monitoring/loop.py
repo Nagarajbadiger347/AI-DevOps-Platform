@@ -123,7 +123,7 @@ def _enqueue_alert(alert_type: str, resource_id: str, description: str,
     """Deduplicate and enqueue an alert. Returns True if enqueued."""
     fp = _make_fingerprint(alert_type, resource_id)
     if _is_duplicate(fp):
-        logger.debug("alert_deduplicated", fingerprint=fp, alert_type=alert_type)
+        logger.debug("alert_deduplicated", extra={"fingerprint": fp, "alert_type": alert_type})
         return False
     # Hard cap: suppress indefinitely if already triggered too many times
     entry = _active_alerts.get(fp, {})
@@ -188,7 +188,7 @@ def _detect_k8s_anomalies() -> list[dict]:
                     "description": f"Pod {name} is in {status} state",
                 })
     except Exception as exc:
-        logger.warning("monitor_k8s_scan_failed", error=str(exc))
+        logger.warning("monitor_k8s_scan_failed", extra={"error": str(exc)})
 
     # K8s node health
     try:
@@ -522,7 +522,7 @@ async def _detect_and_enqueue() -> None:
         logger.info("monitor_scan_clean")
         return
 
-    logger.warning("monitor_anomalies_detected", count=len(all_alerts))
+    logger.warning("monitor_anomalies_detected", extra={"count": len(all_alerts)})
     enqueued = 0
     for alert in all_alerts:
         queued = _enqueue_alert(
@@ -535,7 +535,7 @@ async def _detect_and_enqueue() -> None:
             enqueued += 1
 
     if enqueued:
-        logger.info("alerts_enqueued", count=enqueued)
+        logger.info("alerts_enqueued", extra={"count": enqueued})
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +579,7 @@ async def _process_alert_queue() -> None:
         except asyncio.CancelledError:
             break
         except Exception as exc:
-            logger.error("alert_queue_processor_error", error=str(exc))
+            logger.error("alert_queue_processor_error", extra={"error": str(exc)})
             await asyncio.sleep(5)
 
 
@@ -604,9 +604,9 @@ def receive_external_alert(source: str, payload: dict) -> None:
         extra=payload,
     )
     if enqueued:
-        logger.info("external_alert_enqueued", source=source, resource_id=resource_id)
+        logger.info("external_alert_enqueued", extra={"source": source, "resource_id": resource_id})
     else:
-        logger.debug("external_alert_deduplicated", source=source, resource_id=resource_id)
+        logger.debug("external_alert_deduplicated", extra={"source": source, "resource_id": resource_id})
 
 
 # ---------------------------------------------------------------------------
@@ -617,8 +617,8 @@ async def monitoring_loop() -> None:
     """Async background task — runs forever, detecting anomalies and triggering pipelines."""
     logger.info(
         "monitoring_loop_started",
-        interval_seconds=settings.MONITOR_INTERVAL_SECONDS,
-        auto_remediate=settings.AUTO_REMEDIATE_ON_MONITOR,
+        extra={"interval_seconds": settings.MONITOR_INTERVAL_SECONDS,
+               "auto_remediate": settings.AUTO_REMEDIATE_ON_MONITOR},
     )
 
     # Start the queue processor as a concurrent task
@@ -631,7 +631,7 @@ async def monitoring_loop() -> None:
             try:
                 await _detect_and_enqueue()
             except Exception as exc:
-                logger.warning("monitor_scan_error", error=str(exc))
+                logger.warning("monitor_scan_error", extra={"error": str(exc)})
 
             # Warn if any detector hasn't succeeded in 30 minutes
             now = time.time()

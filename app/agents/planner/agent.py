@@ -280,22 +280,28 @@ class PlannerAgent(BaseAgent):
             aws_available     = _data_summary(aws_ctx),
             k8s_available     = _data_summary(k8s_ctx),
             github_available  = _data_summary(github_ctx),
-            aws_context       = json.dumps(aws_ctx, default=str)[:3000],
-            k8s_context       = json.dumps(k8s_ctx, default=str)[:3000],
-            github_context    = json.dumps(github_ctx, default=str)[:2000],
-            similar_incidents = json.dumps(state.get("similar_incidents", []), default=str)[:1500],
+            aws_context       = json.dumps(aws_ctx, default=str)[:2000],
+            k8s_context       = json.dumps(k8s_ctx, default=str)[:1500],
+            github_context    = json.dumps(github_ctx, default=str)[:1000],
+            similar_incidents = json.dumps(state.get("similar_incidents", []), default=str)[:800],
             focus_hint        = _focus_hint(classification),
         )
 
+        from app.llm.factory import get_global_provider
+        _global = get_global_provider()
+        _provider_order = [_global, "groq", "claude", "openai"] if _global else ["groq", "claude", "openai"]
+        # deduplicate while preserving order
+        seen = set(); _provider_order = [p for p in _provider_order if not (p in seen or seen.add(p))]
         last_exc = None
         for attempt in range(4):
             try:
-                llm = LLMFactory.get()
+                preferred = _provider_order[min(attempt, len(_provider_order) - 1)]
+                llm = LLMFactory.get(preferred=preferred)
             except RuntimeError as exc:
                 last_exc = exc
                 break
             try:
-                response = llm.complete(prompt, system=_SYSTEM, max_tokens=2500)
+                response = llm.complete(prompt, system=_SYSTEM, max_tokens=1500)
                 plan = self._parse_json(response.content)
                 if not plan:
                     raise ValueError("Empty plan returned by LLM")
@@ -340,10 +346,20 @@ class PlannerAgent(BaseAgent):
                     or "credit balance" in err_str.lower()
                     or "billing" in err_str.lower()
                     or "falling back to next available provider" in err_str.lower()
+                    or "timeout" in err_str.lower()
+                    or "timed out" in err_str.lower()
+                    or "read timeout" in err_str.lower()
+                    or "connect timeout" in err_str.lower()
                 )
                 if _is_transient:
-                    provider_key = getattr(llm, "_force_provider", None) or "groq"
-                    mark_rate_limited(str(provider_key) if provider_key else "groq", err_str)
+                    provider_key = getattr(llm, "_force_provider", None) or preferred
+                    # insufficient_quota = long-term issue, cool down for 24h
+                    if "insufficient_quota" in err_str or "exceeded your current quota" in err_str:
+                        from app.llm.factory import _rate_limited_until
+                        import time as _t
+                        _rate_limited_until[str(provider_key)] = _t.monotonic() + 86400
+                    else:
+                        mark_rate_limited(str(provider_key) if provider_key else preferred, err_str)
                     self._warn("planner_rate_limited_retrying", provider=str(provider_key), attempt=attempt + 1)
                     continue
                 break

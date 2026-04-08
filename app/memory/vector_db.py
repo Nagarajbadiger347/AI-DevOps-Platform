@@ -41,6 +41,15 @@ def store_incident(incident: dict) -> dict:
         return {"stored": False, "error": str(e)}
 
 
+def delete_incident(incident_id: str) -> dict:
+    """Delete an incident from the vector database by ID."""
+    try:
+        collection.delete(ids=[str(incident_id)])
+        return {"deleted": True, "id": incident_id}
+    except Exception as e:
+        return {"deleted": False, "error": str(e)}
+
+
 def backup_chromadb() -> dict:
     """Copy the ChromaDB directory to a timestamped backup folder.
 
