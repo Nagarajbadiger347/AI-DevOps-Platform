@@ -32,3 +32,9 @@
 {"ts": "2026-04-08T08:57:56Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
 {"ts": "2026-04-08T09:11:37Z", "user": "admin", "action": "list_ec2", "params": {}, "success": true, "error": null, "source": "chat", "dry_run": false}
 {"ts": "2026-04-08T09:17:56Z", "user": "admin", "action": "list_ec2", "params": {"region": "ap-southeast-1"}, "success": true, "error": null, "source": "chat", "dry_run": false}
+{"ts": "2026-04-13T06:43:56Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-13T06:52:49Z", "user": "anonymous", "action": "list_ec2", "params": {}, "success": true, "error": null, "source": "chat", "dry_run": false}
+{"ts": "2026-04-13T07:04:10Z", "user": "admin", "action": "approval_approved", "params": {"correlation_id": "e318c3e8-373a-41b8-b8d4-ce2f4214b7e2", "approved_indices": [0, 1], "requested_by": "system"}, "success": true, "error": null, "source": "approvals", "dry_run": false}
+{"ts": "2026-04-13T07:42:10Z", "user": "admin", "action": "list_pods", "params": {}, "success": false, "error": "K8s config not found", "source": "chat", "dry_run": false}
+{"ts": "2026-04-13T07:44:07Z", "user": "anonymous", "action": "list_namespaces", "params": {}, "success": false, "error": "K8s config not found", "source": "chat", "dry_run": false}
+{"ts": "2026-04-13T07:50:53Z", "user": "anonymous", "action": "list_repos", "params": {}, "success": true, "error": null, "source": "chat", "dry_run": false}

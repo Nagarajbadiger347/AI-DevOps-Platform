@@ -25,7 +25,7 @@ def _get(path: str) -> dict:
         "Content-Type": "application/json",
     })
     try:
-        r = _urllib.urlopen(req, timeout=10)
+        r = _urllib.urlopen(req, timeout=3)
         return {"success": True, "data": json.loads(r.read())}
     except Exception as e:
         return {"success": False, "error": str(e)}

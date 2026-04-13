@@ -35,16 +35,27 @@ _groq_client      = None
 
 if ANTHROPIC_API_KEY and _ANTHROPIC_KEY_VALID:
     from anthropic import Anthropic
-    _anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0)
+    _anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=30.0)
     client    = _anthropic_client
     _provider = "anthropic"
 
 if GROQ_API_KEY:
     from groq import Groq
-    _groq_client = Groq(api_key=GROQ_API_KEY, timeout=120.0)
+    _groq_client = Groq(api_key=GROQ_API_KEY, timeout=30.0)
     if not _provider:
         client    = _groq_client
         _provider = "groq"
+
+# Track billing/auth failures to skip dead providers in same session
+_PROVIDER_DEAD: dict[str, bool] = {}
+
+
+def _mark_dead(provider: str) -> None:
+    _PROVIDER_DEAD[provider] = True
+
+
+def _is_dead(provider: str) -> bool:
+    return _PROVIDER_DEAD.get(provider, False)
 
 # Always probe Ollama regardless of other providers — needed for explicit selection
 try:
@@ -85,14 +96,37 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
             )
 
     if provider == "anthropic":
-        resp = _anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=max_tokens,
-            system=system,
-            messages=messages,
-            temperature=temperature,
-        )
-        return resp.content[0].text
+        if _is_dead("anthropic"):
+            # Previously failed with billing/auth — skip directly to next provider
+            if _groq_client:
+                return _llm(system, messages, max_tokens, force_provider="groq", temperature=temperature)
+            raise RuntimeError("Anthropic billing/auth error — add credits at console.anthropic.com or configure GROQ_API_KEY.")
+        try:
+            resp = _anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=max_tokens,
+                system=system,
+                messages=messages,
+                temperature=temperature,
+            )
+            return resp.content[0].text
+        except Exception as _ant_exc:
+            _err = str(_ant_exc)
+            _billing = (
+                "credit balance" in _err.lower() or "too low" in _err.lower() or
+                "no credits" in _err.lower() or "401" in _err or
+                "invalid_api_key" in _err.lower() or "authentication" in _err.lower()
+            )
+            if _billing:
+                _mark_dead("anthropic")
+                # Auto-fallback to Groq if available
+                if _groq_client:
+                    return _llm(system, messages, max_tokens, force_provider="groq", temperature=temperature)
+                raise RuntimeError(
+                    "Anthropic API error: " + _err[:200] +
+                    "\nFix: Add credits at console.anthropic.com or set GROQ_API_KEY in .env"
+                )
+            raise
 
     elif provider == "groq":
         all_msgs = [{"role": "system", "content": system}] + messages
