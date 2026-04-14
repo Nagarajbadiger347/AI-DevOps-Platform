@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.routes.deps import require_viewer, AuthContext
+from app.api.deps import require_viewer, AuthContext
 
 router = APIRouter(tags=["cost"])
 

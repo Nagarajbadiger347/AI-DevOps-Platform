@@ -3,7 +3,7 @@ VS Code integration routes.
 Paths: /vscode/*
 """
 from fastapi import APIRouter, Depends, Request
-from app.routes.deps import require_viewer, require_developer, AuthContext
+from app.api.deps import require_viewer, require_developer, AuthContext
 
 router = APIRouter(prefix="/vscode", tags=["vscode"])
 

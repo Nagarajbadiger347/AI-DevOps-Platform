@@ -8,9 +8,9 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from app.routes.deps import require_developer, AuthContext, _rbac_guard
+from app.api.deps import require_developer, AuthContext, _rbac_guard
 from app.llm.claude import assess_deployment, interpret_jira_for_pr
-from app.plugins.k8s_checker import check_k8s_cluster, check_k8s_pods, check_k8s_deployments
+from app.agents.infra.k8s_checker import check_k8s_cluster, check_k8s_pods, check_k8s_deployments
 from app.integrations.aws_ops import list_cloudwatch_alarms
 from app.memory.vector_db import search_similar_incidents
 from app.integrations.jira import add_comment as jira_add_comment

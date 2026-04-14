@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.integrations import aws_ops, github, k8s_ops, jira, opsgenie, slack
 from app.llm.claude import synthesize_incident
 from app.memory.vector_db import store_incident
-from app.plugins import k8s_checker
+from app.agents.infra import k8s_checker
 
 
 # ── Data collection ────────────────────────────────────────────

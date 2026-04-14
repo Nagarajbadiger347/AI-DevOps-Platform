@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from app.routes.deps import require_viewer, require_developer, AuthContext
+from app.api.deps import require_viewer, require_developer, AuthContext
 
 router = APIRouter(tags=["misc"])
 
@@ -73,7 +73,7 @@ def correlate_events_endpoint(events: list, auth: AuthContext = Depends(require_
 @router.get("/metrics")
 def prometheus_metrics():
     """Expose Prometheus-format metrics."""
-    from app.routes.deps import _METRICS, _METRICS_HIST
+    from app.api.deps import _METRICS, _METRICS_HIST
     lines = []
     for k, v in _METRICS.items():
         lines.append(f"nsops_{k} {v}")

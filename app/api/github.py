@@ -3,7 +3,7 @@ GitHub integration routes.
 Paths: /github/*
 """
 from fastapi import APIRouter, Depends, HTTPException
-from app.routes.deps import require_viewer, AuthContext
+from app.api.deps import require_viewer, AuthContext
 
 router = APIRouter(tags=["github"])
 

@@ -49,9 +49,9 @@ def test_check_aws():
     healthy_s3 = {"success": True, "count": 0, "buckets": []}
     healthy_alarms = {"success": True, "count": 0, "alarms": []}
 
-    with patch("app.plugins.aws_checker.list_ec2_instances", return_value=healthy_ec2), \
-         patch("app.plugins.aws_checker.list_s3_buckets", return_value=healthy_s3), \
-         patch("app.plugins.aws_checker.list_cloudwatch_alarms", return_value=healthy_alarms):
+    with patch("app.agents.infra.aws_checker.list_ec2_instances", return_value=healthy_ec2), \
+         patch("app.agents.infra.aws_checker.list_s3_buckets", return_value=healthy_s3), \
+         patch("app.agents.infra.aws_checker.list_cloudwatch_alarms", return_value=healthy_alarms):
         r1 = client.get("/check/aws")
 
     assert r1.status_code == 200
@@ -134,9 +134,9 @@ def test_k8s_cluster_check():
     mock_pod  = _mock_k8s_pod()
     mock_dep  = _mock_k8s_deployment()
 
-    with patch("app.plugins.k8s_checker._load_config", return_value=True), \
-         patch("app.plugins.k8s_checker.client.CoreV1Api") as mock_core, \
-         patch("app.plugins.k8s_checker.client.AppsV1Api") as mock_apps:
+    with patch("app.agents.infra.k8s_checker._load_config", return_value=True), \
+         patch("app.agents.infra.k8s_checker.client.CoreV1Api") as mock_core, \
+         patch("app.agents.infra.k8s_checker.client.AppsV1Api") as mock_apps:
         mock_core.return_value.list_node.return_value.items = [mock_node]
         mock_core.return_value.list_pod_for_all_namespaces.return_value.items = [mock_pod]
         mock_apps.return_value.list_deployment_for_all_namespaces.return_value.items = [mock_dep]
@@ -151,8 +151,8 @@ def test_k8s_cluster_check():
 
 def test_k8s_nodes():
     mock_node = _mock_k8s_node("worker-1", ready=True)
-    with patch("app.plugins.k8s_checker._load_config", return_value=True), \
-         patch("app.plugins.k8s_checker.client.CoreV1Api") as mock_core:
+    with patch("app.agents.infra.k8s_checker._load_config", return_value=True), \
+         patch("app.agents.infra.k8s_checker.client.CoreV1Api") as mock_core:
         mock_core.return_value.list_node.return_value.items = [mock_node]
         response = client.get("/check/k8s/nodes")
 
@@ -164,8 +164,8 @@ def test_k8s_nodes():
 
 def test_k8s_pods():
     mock_pod = _mock_k8s_pod("api-pod", "Running")
-    with patch("app.plugins.k8s_checker._load_config", return_value=True), \
-         patch("app.plugins.k8s_checker.client.CoreV1Api") as mock_core:
+    with patch("app.agents.infra.k8s_checker._load_config", return_value=True), \
+         patch("app.agents.infra.k8s_checker.client.CoreV1Api") as mock_core:
         mock_core.return_value.list_namespaced_pod.return_value.items = [mock_pod]
         response = client.get("/check/k8s/pods?namespace=default")
 
@@ -176,8 +176,8 @@ def test_k8s_pods():
 
 def test_k8s_deployments():
     mock_dep = _mock_k8s_deployment("my-app", desired=3, ready=3)
-    with patch("app.plugins.k8s_checker._load_config", return_value=True), \
-         patch("app.plugins.k8s_checker.client.AppsV1Api") as mock_apps:
+    with patch("app.agents.infra.k8s_checker._load_config", return_value=True), \
+         patch("app.agents.infra.k8s_checker.client.AppsV1Api") as mock_apps:
         mock_apps.return_value.list_namespaced_deployment.return_value.items = [mock_dep]
         response = client.get("/check/k8s/deployments?namespace=default")
 

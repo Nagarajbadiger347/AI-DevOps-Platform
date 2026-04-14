@@ -1643,12 +1643,12 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
             </div>
           </div>
           <div class="chat-chips" id="chat-chips" style="flex-shrink:0">
-            <div class="chip" onclick="App.chipChat('What is the current K8s cluster health?')">K8s health?</div>
-            <div class="chip" onclick="App.chipChat('Are there any AWS CloudWatch alarms firing?')">AWS alarms?</div>
-            <div class="chip" onclick="App.chipChat('Show me the last 5 GitHub commits')">Last commits?</div>
-            <div class="chip" onclick="App.chipChat('What is the current AWS monthly cost?')">Current costs?</div>
-            <div class="chip" onclick="App.chipChat('List all EC2 instances and their state')">EC2 instances?</div>
-            <div class="chip" onclick="App.chipChat('Are there any active incidents right now?')">Active incidents?</div>
+            <div class="chip" onclick="App.chipChat('Give me a full infrastructure health report — EC2, K8s, CloudWatch alarms, ECS, RDS')">&#127973; Full health report</div>
+            <div class="chip" onclick="App.chipChat('Are there any AWS CloudWatch alarms firing right now?')">&#128276; CloudWatch alarms</div>
+            <div class="chip" onclick="App.chipChat('Show unhealthy or crashing Kubernetes pods across all namespaces')">&#9096; Unhealthy pods</div>
+            <div class="chip" onclick="App.chipChat('What is my AWS spend this month, broken down by service?')">&#128184; AWS costs</div>
+            <div class="chip" onclick="App.chipChat('Show me recent GitHub commits and open pull requests')">&#128257; Recent commits</div>
+            <div class="chip" onclick="App.chipChat('Are there any active incidents or pending approvals?')">&#128680; Active incidents</div>
           </div>
           <div class="chat-messages" id="chat-messages" style="flex:1;height:0;overflow-y:auto">
             <div class="chat-welcome" id="chat-welcome">
@@ -1656,7 +1656,13 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
                 <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg>
               </div>
               <h2>NsOps AI</h2>
-              <p>Ask me anything about your infrastructure — I can check alerts,<br>EC2 instances, K8s pods, GitHub activity, costs, and more.</p>
+              <p>Your senior SRE on-demand. Ask about live infra, run incident workflows,<br>restart pods, check costs, or page on-call — in plain English.</p>
+              <div style="display:flex;gap:16px;margin-top:10px;justify-content:center;flex-wrap:wrap;font-size:.76em;color:var(--muted)">
+                <span>&#9729; AWS &amp; Kubernetes</span>
+                <span>&#128680; Incident Response</span>
+                <span>&#128184; Cost Analysis</span>
+                <span>&#128257; GitHub</span>
+              </div>
             </div>
           </div>
           <div id="typing-indicator" style="display:none;flex-shrink:0;padding:4px 24px 0">
@@ -3352,7 +3358,7 @@ const App = {
     executedActions.forEach(a=>{executedMap[a.type]=(executedMap[a.type]||[]).concat(a);});
     const executedTypes=new Set(executedActions.map(a=>a.type));
     const blockedMap={};
-    blockedActions.forEach(a=>{blockedMap[a.type]=(a.reason||'requires approval');});
+    blockedActions.forEach(a=>{blockedMap[a.type]={reason:a.reason||'requires approval',blockedBy:a.blocked_by||'policy'};});
 
     // Data source availability
     const awsCtx=d.aws_context||{};const k8sCtx=d.k8s_context||{};const ghCtx=d.github_context||{};
@@ -3390,7 +3396,9 @@ const App = {
       const meta=actionMeta[a.type]||{icon:'&#9654;',label:a.type,color:'var(--text2)'};
       const execList=executedMap[a.type]||[];
       const isExec=execList.length>0;
-      const blockReason=blockedMap[a.type];
+      const blockInfo=blockedMap[a.type];
+      const blockReason=blockInfo?blockInfo.reason:null;
+      const blockedBy=blockInfo?blockInfo.blockedBy:'policy';
       const numCls=isExec?'executed':blockReason?'blocked':'';
       const numContent=isExec?'&#10003;':blockReason?'!':''+(i+1);
       const desc=a.description||a.message||a.body||'';
@@ -3405,14 +3413,18 @@ const App = {
         execList.forEach(ex=>{
           const r=ex.result||{};
           const ok=ex.status==='ok'&&r.success!==false;
-          if(!ok&&ex.error){
-            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:6px;font-size:.78em;color:#f87171">&#10005; Failed: ${ex.error}</div>`;
+          const durationBadge=ex.duration_ms!=null?`<span style="margin-left:8px;font-size:.72em;color:var(--muted);font-family:monospace">${ex.duration_ms}ms</span>`:'';
+          const idBadge=ex.action_id?`<span title="Action ID: ${ex.action_id}" style="margin-left:6px;font-size:.68em;color:var(--muted);font-family:monospace;opacity:.6">#${ex.action_id}</span>`:'';
+          if(ex.status==='dry_run_skipped'){
+            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(96,165,250,.06);border:1px solid rgba(96,165,250,.2);border-radius:6px;font-size:.78em;color:#60a5fa;display:flex;align-items:center">&#128065; Dry run — not executed${durationBadge}${idBadge}</div>`;
+          } else if(!ok&&ex.error){
+            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:6px;font-size:.78em;color:#f87171;display:flex;align-items:center">&#10005; Failed: ${ex.error}${durationBadge}${idBadge}</div>`;
           } else if(r.previous_state&&r.current_state){
-            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;font-size:.78em;color:#4ade80">&#10003; Executed — ${r.previous_state} → ${r.current_state}</div>`;
+            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;font-size:.78em;color:#4ade80;display:flex;align-items:center">&#10003; ${r.previous_state} → ${r.current_state}${durationBadge}${idBadge}</div>`;
           } else if(r.action){
-            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;font-size:.78em;color:#4ade80">&#10003; ${r.action}</div>`;
+            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;font-size:.78em;color:#4ade80;display:flex;align-items:center">&#10003; ${r.action}${durationBadge}${idBadge}</div>`;
           } else if(ok){
-            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;font-size:.78em;color:#4ade80">&#10003; Executed successfully</div>`;
+            execResultHtml+=`<div style="margin-top:6px;padding:6px 10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;font-size:.78em;color:#4ade80;display:flex;align-items:center">&#10003; Executed successfully${durationBadge}${idBadge}</div>`;
           }
         });
       }
@@ -3435,7 +3447,10 @@ const App = {
           <div class="step-desc">${desc||'No description provided.'}</div>
           ${target?`<div class="step-target">Target: <code style="font-size:.88em;color:var(--cyan)">${target}</code></div>`:''}
           ${costDelta?`<div class="step-cost">Estimated cost delta: $${costDelta}/mo</div>`:''}
-          ${blockReason?`<div class="step-reason">&#9888; Blocked: ${blockReason}</div>`:''}
+          ${blockReason?(blockedBy==='rbac'
+            ?`<div class="step-reason" style="color:#f87171;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.18);border-radius:6px;padding:4px 8px;font-size:.78em">&#128274; RBAC: ${blockReason}</div>`
+            :`<div class="step-reason" style="color:#fbbf24;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.18);border-radius:6px;padding:4px 8px;font-size:.78em">&#9888; Policy: ${blockReason}</div>`
+          ):''}
           ${execResultHtml}
           ${approvalBtn}
         </div>
@@ -3445,6 +3460,8 @@ const App = {
     const dataGapsHtml=dataGaps.length?`<div class="result-data-gap"><strong>&#9888; Missing data for higher confidence:</strong><ul style="margin:4px 0 0 16px;padding:0">${dataGaps.map(g=>`<li>${g}</li>`).join('')}</ul></div>`:'';
 
     const rid='reasoning-'+Date.now();
+    const traceId=d.correlation_id||d.trace_id||'';
+    const elapsedLabel=d.elapsed_s?`<span style="margin-left:auto;font-size:.72em;color:var(--muted);font-family:monospace">${d.elapsed_s}s</span>`:'';
     el.innerHTML=`<div class="result-card">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
         <span style="font-weight:700;font-size:.92em">${id}</span>
@@ -3452,6 +3469,8 @@ const App = {
         <span class="badge ${riskCls}">${risk} risk</span>
         ${isDry?'<span class="badge badge-cyan">&#128065; DRY RUN</span>':''}
         ${d.requires_human_approval?'<span class="badge badge-amber">&#9888; Awaiting Approval</span>':''}
+        ${traceId?`<span title="Trace ID: ${traceId}" style="font-size:.68em;color:var(--muted);font-family:monospace;margin-left:4px;cursor:default" onclick="navigator.clipboard&&navigator.clipboard.writeText('${traceId}')">#${traceId.slice(0,8)}</span>`:''}
+        ${elapsedLabel}
       </div>
 
       <!-- Data sources -->
@@ -5946,11 +5965,21 @@ what failed pipelines do I have in GitLab?
       const msgId='msg-'+Date.now();
       const msgs=document.getElementById('chat-messages');
       const row=document.createElement('div');
-      row.className='chat-row assistant';
-      row.innerHTML='<div class="chat-avatar assistant-avatar">AI</div><div class="chat-body"><div class="chat-bubble assistant" id="'+msgId+'"></div><div class="chat-meta">NexusOps &bull; '+new Date().toLocaleTimeString()+'</div></div>';
+      row.className='chat-row';
+      const providerColors={'anthropic':'#d97706','openai':'#10a37f','groq':'#7c3aed','ollama':'#64748b'};
+      const providerNames={'anthropic':'Claude','openai':'GPT-4','groq':'Groq','ollama':'Ollama'};
+      const metaId='meta-'+msgId;
+      row.innerHTML=
+        '<div class="chat-avatar ai"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z"/></svg></div>'
+        +'<div class="chat-body">'
+          +'<div class="chat-bubble assistant" id="'+msgId+'"></div>'
+          +'<div class="chat-meta" id="'+metaId+'">NsOps AI &bull; '+new Date().toLocaleTimeString()
+            +'<button class="chat-copy-btn" data-t="'+msgId+'" onclick="navigator.clipboard.writeText(document.getElementById(this.dataset.t).innerText)" title="Copy">&#128203;</button>'
+          +'</div>'
+        +'</div>';
       msgs.appendChild(row);msgs.scrollTop=msgs.scrollHeight;
       const bubble=document.getElementById(msgId);
-      let fullText='';let thinkingEl=null;
+      let fullText='';let thinkingEl=null;let resolvedProvider='';
       const reader=resp.body.getReader();const decoder=new TextDecoder();let buf='';
       while(true){
         const {done,value}=await reader.read();
@@ -5962,7 +5991,6 @@ what failed pipelines do I have in GitLab?
           try{
             const ev=JSON.parse(line.slice(6));
             if(ev.type==='thinking'){
-              // Show inline "fetching…" status before first token
               if(!thinkingEl){thinkingEl=document.createElement('div');thinkingEl.style.cssText='color:var(--text2);font-size:.78em;margin-bottom:4px;display:flex;align-items:center;gap:6px';bubble.appendChild(thinkingEl);}
               thinkingEl.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>'+ev.text;
             } else if(ev.type==='chunk'){
@@ -5972,10 +6000,19 @@ what failed pipelines do I have in GitLab?
               msgs.scrollTop=msgs.scrollHeight;
             } else if(ev.type==='done'){
               this.chatSessionId=ev.session_id||this.chatSessionId;
+              // Update meta with resolved provider badge
+              resolvedProvider=ev.llm_provider||ev.provider||'';
+              if(resolvedProvider){
+                const pName=providerNames[resolvedProvider]||resolvedProvider;
+                const pColor=providerColors[resolvedProvider]||'var(--muted)';
+                const metaEl=document.getElementById(metaId);
+                if(metaEl)metaEl.innerHTML='NsOps AI &bull; <span style="color:'+pColor+';font-weight:600">'+pName+'</span> &bull; '+new Date().toLocaleTimeString()
+                  +'<button class="chat-copy-btn" data-t="'+msgId+'" onclick="navigator.clipboard.writeText(document.getElementById(this.dataset.t).innerText)" title="Copy">&#128203;</button>';
+              }
               this._renderSuggestions(ev.suggestions||[]);
             } else if(ev.type==='error'){
               if(thinkingEl){thinkingEl.remove();thinkingEl=null;}
-              bubble.innerHTML='<span style="color:var(--red)">'+ev.message+'</span>';
+              bubble.innerHTML='<span style="color:var(--red)">&#10005; '+ev.message+'</span>';
             }
           }catch(e){console.error('SSE parse error:',e,'line:',line);}
         }

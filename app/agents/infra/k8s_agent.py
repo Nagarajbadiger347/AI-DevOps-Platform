@@ -11,7 +11,7 @@ logger = get_logger(__name__)
 
 
 class K8sAgent(BaseAgent):
-    """Wraps app.plugins.k8s_checker for the multi-agent pipeline."""
+    """Wraps app.agents.infra.k8s_checker for the multi-agent pipeline."""
 
     def run(self, state: dict) -> dict:
         """Return a dict of K8s context (merged into state by the graph node)."""
@@ -19,7 +19,7 @@ class K8sAgent(BaseAgent):
         namespace = k8s_cfg.get("namespace", "default")
 
         try:
-            from app.plugins.k8s_checker import (
+            from app.agents.infra.k8s_checker import (
                 check_k8s_cluster,
                 check_k8s_pods,
                 check_k8s_deployments,

@@ -7,8 +7,8 @@ from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from app.routes.deps import require_developer, require_viewer, AuthContext, _rbac_guard
-from app.plugins.k8s_checker import check_k8s_cluster, check_k8s_nodes, check_k8s_pods, check_k8s_deployments
+from app.api.deps import require_developer, require_viewer, AuthContext, _rbac_guard
+from app.agents.infra.k8s_checker import check_k8s_cluster, check_k8s_nodes, check_k8s_pods, check_k8s_deployments
 from app.integrations.k8s_ops import (
     restart_deployment, scale_deployment, get_pod_logs,
     list_pods, list_deployments, list_namespaces, get_cluster_events,

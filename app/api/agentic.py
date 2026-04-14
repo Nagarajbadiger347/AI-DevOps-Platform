@@ -17,7 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 
-from app.routes.deps import require_viewer, require_operator, AuthContext
+from app.api.deps import require_viewer, require_operator, AuthContext
 
 router = APIRouter(tags=["agentic"])
 logger = logging.getLogger("nsops.routes.agentic")

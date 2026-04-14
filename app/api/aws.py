@@ -8,8 +8,8 @@ from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.routes.deps import require_developer, require_viewer, AuthContext, _rbac_guard
-from app.plugins.aws_checker import check_aws_infrastructure
+from app.api.deps import require_developer, require_viewer, AuthContext, _rbac_guard
+from app.agents.infra.aws_checker import check_aws_infrastructure
 from app.integrations.aws_ops import (
     list_ec2_instances, get_ec2_status_checks, get_ec2_console_output,
     start_ec2_instance, stop_ec2_instance, reboot_ec2_instance,

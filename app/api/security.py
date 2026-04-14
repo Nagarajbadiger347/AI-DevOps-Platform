@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from app.routes.deps import (
+from app.api.deps import (
     require_viewer, require_super_admin, _rbac_guard,
     AuthContext, AccessRequest, RoleAssignment,
 )

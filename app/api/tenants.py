@@ -3,7 +3,7 @@ Tenant management routes (super_admin only).
 Paths: /admin/tenants/*
 """
 from fastapi import APIRouter, Depends, HTTPException
-from app.routes.deps import require_super_admin, AuthContext
+from app.api.deps import require_super_admin, AuthContext
 from app.tenants.models import Tenant
 
 router = APIRouter(prefix="/admin/tenants", tags=["tenants"])

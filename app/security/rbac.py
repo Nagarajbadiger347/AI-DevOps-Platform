@@ -107,6 +107,19 @@ def get_user_role(user: str) -> str:
     return _user_roles.get(user, "viewer")
 
 
+def has_permission(role: str, permission: str) -> bool:
+    """
+    Check whether a role holds a specific permission.
+    Used by the Executor for per-action RBAC enforcement at the execution layer
+    (separate from route-level auth which guards the HTTP endpoint).
+
+    Example:
+        has_permission("developer", "write")  → True
+        has_permission("viewer", "deploy")    → False
+    """
+    return permission in ROLE_PERMISSIONS.get(role, set())
+
+
 def check_access(user: str, action: str) -> dict:
     user = user.strip().lower()
     role = _user_roles.get(user)

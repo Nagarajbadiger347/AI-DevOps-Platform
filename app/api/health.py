@@ -3,7 +3,7 @@ Health check and integration status routes.
 Paths: /health/*, /health/integrations
 """
 from fastapi import APIRouter, Depends
-from app.routes.deps import require_viewer, AuthContext, _METRICS, _METRICS_HIST, _WAR_ROOMS
+from app.api.deps import require_viewer, AuthContext, _METRICS, _METRICS_HIST, _WAR_ROOMS
 from app.core.config import settings as _settings
 from app.integrations.universal_collector import collect_all_context, summarize_health
 
@@ -72,8 +72,8 @@ def health_ready():
 def health_full():
     """Full health check — AWS, K8s, Grafana, Linux node, and all integrations."""
     import concurrent.futures as _cf
-    from app.plugins.linux_checker import check_linux_node
-    from app.plugins.grafana_checker import check_grafana
+    from app.integrations.linux_checker import check_linux_node
+    from app.integrations.grafana_checker import check_grafana
 
     # Run all slow checks in parallel with tight timeouts
     context: dict = {}

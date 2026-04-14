@@ -10,7 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from app.routes.deps import (
+from app.api.deps import (
     require_developer, require_viewer, AuthContext,
     _WAR_ROOMS, _wr_save, _create_war_room, _answer_war_room_question, _wr_timeline,
     _RECENT_RESULTS,

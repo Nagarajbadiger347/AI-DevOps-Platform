@@ -91,12 +91,69 @@ def get_backup_list() -> list[dict]:
 
 
 def search_similar_incidents(query: str, n_results: int = 5) -> list:
-    """Search for similar past incidents."""
+    """Search for similar past incidents, returning metadata with distance scores."""
     try:
         results = collection.query(
             query_texts=[query],
-            n_results=n_results
+            n_results=n_results,
+            include=["metadatas", "documents", "distances"],
         )
-        return results.get("metadatas", [])
+        metadatas = results.get("metadatas", [[]])[0]
+        distances = results.get("distances", [[]])[0]
+        documents = results.get("documents", [[]])[0]
+        enriched = []
+        for i, meta in enumerate(metadatas):
+            entry = dict(meta)
+            if i < len(distances):
+                # Convert cosine distance to 0-1 similarity score
+                entry["_similarity"] = round(max(0.0, 1.0 - distances[i]), 3)
+            if i < len(documents):
+                entry["_document"] = documents[i]
+            enriched.append(entry)
+        # Sort by similarity descending
+        enriched.sort(key=lambda x: x.get("_similarity", 0.0), reverse=True)
+        return enriched
     except Exception as e:
         return [{"error": str(e)}]
+
+
+def search_incidents_by_type(incident_type: str, n_results: int = 20) -> list:
+    """Fetch incidents filtered by type using metadata where clause."""
+    try:
+        results = collection.query(
+            query_texts=[incident_type],
+            n_results=n_results,
+            where={"type": {"$eq": incident_type}},
+            include=["metadatas", "distances"],
+        )
+        metadatas = results.get("metadatas", [[]])[0]
+        distances = results.get("distances", [[]])[0]
+        enriched = []
+        for i, meta in enumerate(metadatas):
+            entry = dict(meta)
+            entry["_similarity"] = round(max(0.0, 1.0 - distances[i]), 3) if i < len(distances) else 0.0
+            enriched.append(entry)
+        return enriched
+    except Exception:
+        # Fallback without where clause (older ChromaDB versions)
+        return search_similar_incidents(incident_type, n_results=n_results)
+
+
+def get_all_incidents(limit: int = 200) -> list:
+    """Fetch all stored incidents for trend analysis (up to limit)."""
+    try:
+        results = collection.get(
+            limit=limit,
+            include=["metadatas", "documents"],
+        )
+        metadatas = results.get("metadatas", [])
+        documents = results.get("documents", [])
+        enriched = []
+        for i, meta in enumerate(metadatas):
+            entry = dict(meta)
+            if i < len(documents):
+                entry["_document"] = documents[i]
+            enriched.append(entry)
+        return enriched
+    except Exception as e:
+        return []

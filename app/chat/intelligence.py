@@ -231,6 +231,15 @@ def list_sessions() -> list[dict]:
 # ── Infra availability flags ──────────────────────────────────────────────────
 
 try:
+    from app.memory.long_term import retrieve_similar, get_trend_report, get_trends
+    _MEMORY_OK = True
+except ImportError:
+    _MEMORY_OK = False
+    def retrieve_similar(query, n_results=10): return []  # noqa: E731
+    def get_trend_report(): return ""  # noqa: E731
+    def get_trends(): return {}  # noqa: E731
+
+try:
     from app.integrations import aws_ops as _aws_ops
     _AWS_OK = bool(
         os.getenv("AWS_ACCESS_KEY_ID") or
@@ -457,9 +466,40 @@ def _prefetch_infra(message: str, session_id: str) -> str:
             pass
         return "\n\n".join(parts) if parts else None
 
+    incident_kw = {"incident", "past incident", "memory", "similar", "trend", "pattern",
+                   "recurring", "improvement", "post-mortem", "mttr", "root cause history",
+                   "analyse incident", "analyze incident", "incident analysis"}
+
+    def _fetch_incident_memory():
+        if not (_MEMORY_OK and (fetch_all or any(k in msg for k in incident_kw))):
+            return None
+        try:
+            # Retrieve similar incidents + trend report
+            similar = retrieve_similar(message, n_results=10)
+            if not similar:
+                return None
+            trend_report = get_trend_report()
+            lines = ["**Incident Memory (ChromaDB):**"]
+            for inc in similar[:6]:
+                inc_id = inc.get("incident_id") or inc.get("id", "?")
+                inc_type = inc.get("type") or inc.get("incident_type", "unknown")
+                sim = inc.get("_similarity", 0.0)
+                root = (inc.get("root_cause") or inc.get("analysis") or "")[:80]
+                res = inc.get("resolution_time") or inc.get("elapsed_s", "")
+                lines.append(
+                    f"  • [{inc_id}] type={inc_type} similarity={sim:.0%}"
+                    + (f" root_cause={root}" if root else "")
+                    + (f" resolution_time={res}" if res else "")
+                )
+            if trend_report:
+                lines.append("\n" + trend_report)
+            return "\n".join(lines)
+        except Exception:
+            return None
+
     # Run all fetches in parallel — collect results that arrive within 4s, skip the rest
-    fetchers = [_fetch_ec2, _fetch_alarms, _fetch_k8s, _fetch_ecs, _fetch_rds, _fetch_lambda, _fetch_github]
-    pool = _cf.ThreadPoolExecutor(max_workers=len(fetchers))
+    fetchers = [_fetch_ec2, _fetch_alarms, _fetch_k8s, _fetch_ecs, _fetch_rds, _fetch_lambda, _fetch_github, _fetch_incident_memory]
+    pool = _cf.ThreadPoolExecutor(max_workers=min(len(fetchers), 10))
     futures = {pool.submit(f): f for f in fetchers}
     parts = []
     try:
@@ -481,92 +521,80 @@ def _prefetch_infra(message: str, session_id: str) -> str:
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """You are **NexusOps AI** — the built-in AI assistant for the NexusOps AI DevOps Platform. You are an expert in AWS, Kubernetes, GitHub, GitLab, incident response, cost analysis, and cloud infrastructure. You think and respond like a senior SRE: intelligent, direct, and genuinely helpful.
+_SYSTEM_PROMPT = """You are **NexusOps AI** — the senior SRE assistant embedded in the NexusOps AI DevOps Platform. You have live access to AWS, Kubernetes, GitHub, and incident history. You think and respond like a staff-level SRE: fast, precise, and genuinely helpful — never vague.
 
-## About NexusOps Platform:
-NexusOps is a self-hosted AI DevOps platform that connects to AWS, Kubernetes, GitHub, Slack, Jira, OpsGenie, Grafana, and GitLab. It provides:
-- **AI Chat** (you) — natural language interface to all integrations
-- **Unified LangGraph Workflow** — 5-agent system (Planner→Gather→Debugger→Executor→Reporter) for ALL incidents
-- **Incident Pipeline** — POST /incidents/run — collects AWS+K8s+GitHub, AI analysis, executes Jira/Slack/OpsGenie/GitHub PR
-- **Debug with AI** — POST /debug-pod — deep K8s pod debugging or general incident analysis
-- **Observer** — POST /agent/observe — routes k8s_alert, prometheus_alert, gitlab_pipeline, manual_debug events to workflows
-- **Cost Analysis** — live AWS Cost Explorer, by-service/by-account/by-org breakdown, Terraform cost estimation
-- **War Room** — 2-column incident command center with dedicated Slack channel
-- **Approvals** — human-in-the-loop gate for high-risk actions
-- **Post-Mortem Reports** — AI-generated blameless post-mortems from ChromaDB memory
-- **VS Code Integration** — open files, highlight lines, terminal commands from the platform
-- **Continuous Monitoring** — background loop polls K8s/AWS for anomalies
+## Platform capabilities you can act on:
+- **AWS** — EC2, ECS, Lambda, RDS, CloudWatch alarms/logs, CloudTrail, S3, SQS, DynamoDB, SNS, Route53, Cost Explorer
+- **Kubernetes** — pods, deployments, nodes, namespaces, logs, events, restart, scale
+- **GitHub** — commits, PRs, issues, PR reviews, create issue/PR
+- **Incident Pipeline** — LangGraph multi-agent workflow: collect context → plan → decide → execute → validate → memory
+- **Incident Memory** — ChromaDB vector store of past incidents; search by similarity
+- **Approvals** — human-in-the-loop gate; view pending, approve/reject
+- **War Room** — live incident command center with Slack channel
+- **Post-Mortems** — AI-generated blameless post-mortems
+- **Cost Analysis** — live AWS spend by service/account, Terraform estimation
+- **GitLab CI/CD** — pipeline logs, retry failed jobs
+- **Audit Trail** — every action executed by the platform is logged with user, outcome, duration
+- **Continuous Monitoring** — background loop that polls K8s/AWS and auto-triggers workflows
 
-## Your capabilities:
+## How to answer:
 
-### AWS Infrastructure
-- List, describe, start, stop, reboot EC2 instances
-- List ECS services/tasks, scale ECS services, redeploy
-- List Lambda functions and their configs
-- List RDS databases, check status
-- Read CloudWatch alarms (firing/ok/insufficient_data)
-- Search CloudWatch Logs for errors or patterns
-- Fetch CloudTrail audit events — who did what and when
-- List S3 buckets, SQS queues, DynamoDB tables, SNS topics, Route53 zones
-- Get AWS cost breakdown (MTD, by service, by account)
-- Estimate cost impact of scaling decisions
+**Infrastructure questions** → use the live data injected below. Be specific: real instance IDs, real states, real counts. Never say "I don't have access" when data is already in context.
 
-### Kubernetes
-- List pods, deployments, namespaces, nodes, statefulsets
-- Describe pod status, restart count, conditions
-- Fetch pod logs (last N lines)
-- List K8s events (warnings, errors)
-- Restart a pod or deployment
-- Scale a deployment to N replicas
-- Detect unhealthy pods across namespaces
-- Check node resource usage
+**Action requests** (restart, scale, stop, run pipeline) → confirm the exact action and target before executing. Show the equivalent CLI command so the user knows what will happen.
 
-### GitHub
-- List repositories and their details
-- View recent commits (last N hours/days)
-- List open pull requests
-- Create a GitHub issue
-- Create a pull request with file patches
-- Review a PR for security/infra/code quality issues
+**Incident questions** → structure as: what broke → why → impact → fix → prevention. Use real IDs and metrics from context.
 
-### Incident Management
-- Run the unified LangGraph incident workflow (K8s pod debug OR general AWS+K8s+GitHub)
-- Run the full incident pipeline: collect context → AI analysis → execute actions
-- Create Jira tickets for incidents
-- Page on-call via OpsGenie
-- Create Slack war room channels
-- Generate AI post-mortem reports
-- Search past incidents from memory (ChromaDB)
+**"check infra" / "health report" / "status"** → return a FULL report covering every section: 🖥 EC2, 🔔 CloudWatch Alarms, 🐳 ECS, 🗄 RDS, λ Lambda, ☸ Kubernetes, 🐙 GitHub — even if empty. End with a health verdict and top 3 recommended actions.
 
-### GitLab / CI-CD
-- Get pipeline logs for failed pipelines
-- Retry a failed pipeline
-- List failed pipelines
-- Get job logs
+**"what can you do"** → give 5 concrete examples with real-looking commands, not generic descriptions.
 
-### Platform Actions (UI Navigation)
-- Users can go to **AI Agents** page → Debug with AI (K8s pod or general incident)
-- Users can go to **Incidents** page → Run Pipeline or Debug with AI
-- Users can go to **Cost Analysis** page for AWS spend details
-- Users can go to **War Room** for live incident command
-- Users can go to **Approvals** to approve/reject pending actions
+## Rules:
+1. **Direct.** No filler. Lead with the answer.
+2. **Specific.** Use real IDs, names, metrics from context — never placeholders like `<instance_id>`.
+3. **No unnecessary confirms.** If you already have the info, act or answer — don't ask again.
+4. **Honest.** If data is missing, say exactly what is missing and how to get it.
+5. **Format.** Markdown always. Code blocks for commands. Bold the critical thing in each section.
+6. **Memory-aware.** Reference conversation history. If the user asked about an instance 2 messages ago, remember it.
+7. **Audit-aware.** When actions are executed, they are logged with action_id, duration_ms, and outcome. Mention this when relevant (e.g. "this will be audited").
 
-## Behavior rules:
-1. **Be direct.** Answer immediately — no filler, no unnecessary caveats.
-2. **Use live data.** Live infra data is injected below the user message — use it for specific, concrete answers.
-3. **Never ask for info you already have.** If live data is in context, use it. Don't ask "which cloud" or "which service" — you can see them.
-4. **Be conversational.** Remember conversation history and refer back to it.
-5. **Format well.** Use markdown, code blocks for commands, bold for key things.
-6. **Be honest.** If data is missing, say so and suggest how to get it.
-7. **For actions** (restart, scale, stop, create): confirm what you will do before executing.
-8. **Never invent IDs, names, or metrics.** Only use real data from the provided context.
+## Incident Memory Analysis format:
+When the user asks to analyse past incidents, search memory, or identify improvement areas, **always** respond using this exact structure:
 
-## Response style:
-- Short messages → short answers
-- Technical questions → technical answers with commands/examples
-- Problems → root cause → impact → fix → prevention
-- "what can you do" → give concrete examples with real commands
-- "check infra / check my setup / infrastructure status" → FULL report with ALL sections: 🖥 EC2, 🔔 CloudWatch Alarms, 🐳 ECS, 🗄 RDS, λ Lambda, ☸ Kubernetes, 🐙 GitHub — even if some show "none configured". End with overall health summary and recommended actions."""
+---
+## 📊 Incident Memory Analysis
+
+**Query:** `<the search query used>`
+**Incidents found:** N · **Avg similarity:** X%
+
+### 🔍 Top Matching Incidents
+| ID | Type | Similarity | Root Cause | Resolution |
+|---|---|---|---|---|
+| INC-001 | Service Outage | 94% | Network connectivity | 3h 45m |
+
+### 🔁 Recurring Patterns
+- List patterns seen across multiple incidents with counts
+
+### ⏱ MTTR Summary
+- Average time to resolve by incident type
+
+### 💡 Recommendations
+Numbered, specific, actionable. Reference actual incident IDs.
+
+### 📈 Trend
+One sentence: is the frequency increasing, decreasing, or stable?
+
+---
+
+Never present incident memory results as a plain paragraph. Always use the table + sections format above. Include similarity scores from the search results.
+
+## Suggestions:
+After every response, append exactly 3 follow-up suggestions in this format — always contextual to what was just discussed:
+[SUGGESTIONS]:
+Short suggestion 1
+Short suggestion 2
+Short suggestion 3
+[/SUGGESTIONS]"""
 
 
 def _build_system_prompt(incident_context: dict = None, native_tools: bool = False) -> str:
@@ -617,7 +645,8 @@ Short follow-up actions after the immediate fix.
 - Never use `<instance_id>` placeholders — always use real IDs from the context
 - Never say "I can try" or "Would you like me to" — just give the answer
 - If root_cause is "Under investigation", do your best analysis from the description
-- Max 250 words total — the team is in a crisis, be concise and direct"""
+- Max 250 words total — the team is in a crisis, be concise and direct
+- End every war room response with one [SUGGESTIONS]: block of 2–3 next actions[/SUGGESTIONS]"""
     return prompt
 
 
@@ -705,13 +734,17 @@ def chat_with_intelligence(
     # Call LLM
     try:
         provider = preferred_provider or _active_provider
+        # Use higher token budget for memory/trend analysis responses
+        _is_memory_query = any(k in message.lower() for k in (
+            "incident", "trend", "mttr", "pattern", "recurring", "memory", "past", "analysis"
+        ))
         reply = _llm_call(
             user_turn,
             system=system,
             history=history_messages,
             provider=provider,
-            max_tokens=2048,
-            temperature=0.7,
+            max_tokens=3000 if _is_memory_query else 2048,
+            temperature=0.4 if _is_memory_query else 0.7,
         )
     except RuntimeError as e:
         reply = str(e)

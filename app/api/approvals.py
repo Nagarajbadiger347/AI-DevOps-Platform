@@ -7,7 +7,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.routes.deps import (
+from app.api.deps import (
     require_developer, require_viewer, AuthContext,
     _PENDING_PIPELINE_STATES, _cache_result,
 )

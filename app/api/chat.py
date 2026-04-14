@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.routes.deps import (
+from app.api.deps import (
     require_viewer, AuthContext,
 )
 

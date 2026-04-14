@@ -156,7 +156,7 @@ def _detect_k8s_anomalies() -> list[dict]:
     """Synchronous K8s health scan — returns list of alert dicts."""
     alerts: list[dict] = []
     try:
-        from app.plugins.k8s_checker import check_k8s_cluster, check_k8s_pods
+        from app.agents.infra.k8s_checker import check_k8s_cluster, check_k8s_pods
         cluster = check_k8s_cluster()
         if isinstance(cluster, dict) and cluster.get("status") == "error":
             return []
@@ -193,7 +193,7 @@ def _detect_k8s_anomalies() -> list[dict]:
     # K8s node health
     try:
         from app.integrations.k8s_ops import list_deployments
-        from app.plugins.k8s_checker import check_k8s_nodes
+        from app.agents.infra.k8s_checker import check_k8s_nodes
         nodes_result = check_k8s_nodes()
         node_list: list = []
         if isinstance(nodes_result, list):
@@ -451,7 +451,7 @@ def _detect_aws_anomalies() -> list[dict]:
 def _detect_grafana_anomalies() -> list[dict]:
     alerts: list[dict] = []
     try:
-        from app.plugins.grafana_checker import check_grafana
+        from app.integrations.grafana_checker import check_grafana
         result = check_grafana()
         if result.get("status") == "unavailable":
             return alerts

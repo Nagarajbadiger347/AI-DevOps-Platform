@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
-from app.routes.deps import (
+from app.api.deps import (
     require_admin, require_viewer, require_super_admin,
     AuthContext, _bearer_scheme, RoleAssignment,
 )

@@ -18,9 +18,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
 from app.tenants.middleware import TenantMiddleware
+from app.core.logging import TraceMiddleware
 
 # ── Import all routers ────────────────────────────────────────────────────────
-from app.routes import (
+from app.api import (
     auth, aws, k8s, security, webhooks, deploy,
     incidents, approvals, warroom, chat, github,
     cost, health, vscode, misc, websocket_routes, tenants, agentic,
@@ -72,6 +73,7 @@ app = FastAPI(
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(TraceMiddleware)
 app.add_middleware(TenantMiddleware)
 app.add_middleware(
     CORSMiddleware,
