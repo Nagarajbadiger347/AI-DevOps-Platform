@@ -38,3 +38,9 @@
 {"ts": "2026-04-13T07:42:10Z", "user": "admin", "action": "list_pods", "params": {}, "success": false, "error": "K8s config not found", "source": "chat", "dry_run": false}
 {"ts": "2026-04-13T07:44:07Z", "user": "anonymous", "action": "list_namespaces", "params": {}, "success": false, "error": "K8s config not found", "source": "chat", "dry_run": false}
 {"ts": "2026-04-13T07:50:53Z", "user": "anonymous", "action": "list_repos", "params": {}, "success": true, "error": null, "source": "chat", "dry_run": false}
+{"ts": "2026-04-13T09:57:01Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-13T09:57:11Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-13T10:15:25Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-13T10:16:15Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-14T05:25:37Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}
+{"ts": "2026-04-14T05:28:06Z", "user": "admin", "action": "login", "params": {"method": "password", "role": "super_admin"}, "success": true, "error": null, "source": "auth", "dry_run": false}

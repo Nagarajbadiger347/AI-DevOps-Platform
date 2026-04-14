@@ -316,8 +316,95 @@ def delete_incident(incident_id: str, auth: AuthContext = Depends(require_develo
 @router.post("/incidents/run")
 def incidents_run_alias(req: IncidentRunRequest, x_user: Optional[str] = Header(default=None),
                         auth: Optional[AuthContext] = Depends(optional_auth)):
-    """Primary incident pipeline endpoint (same as /incident/run)."""
-    return incident_run(req, x_user, auth)
+    """Unified LangGraph incident pipeline — handles K8s, AWS, GitHub, and all notification actions."""
+    import time as _time
+    t0 = _time.time()
+
+    aws_cfg = req.aws_cfg or (req.aws.model_dump() if req.aws else {})
+    k8s_cfg = req.k8s_cfg or (req.k8s.model_dump() if req.k8s else {})
+
+    try:
+        from app.workflows.unified_workflow import run_unified
+        result = run_unified(
+            incident_id    = req.incident_id,
+            description    = req.description,
+            severity       = req.severity or "high",
+            namespace      = k8s_cfg.get("namespace", "default"),
+            pod_name       = k8s_cfg.get("pod_name", ""),
+            aws_cfg        = aws_cfg,
+            hours          = req.hours or 2,
+            dry_run        = req.dry_run or False,
+            auto_fix       = False,
+            auto_remediate = req.auto_remediate or False,
+        )
+    except Exception as e:
+        return {"status": "failed", "error": str(e), "incident_id": req.incident_id}
+
+    elapsed = round(_time.time() - t0, 2)
+
+    # Store in cache and vector DB so it appears in incident history
+    inc_id = result.get("incident_id") or req.incident_id or ""
+    _cache_result(inc_id, result)
+    try:
+        store_incident({
+            "incident_id":  inc_id,
+            "description":  req.description,
+            "severity":     result.get("severity_ai") or req.severity or "medium",
+            "root_cause":   result.get("root_cause", ""),
+            "status":       "completed" if result.get("success") else "failed",
+            "confidence":   result.get("confidence", 0.0),
+        })
+    except Exception:
+        pass
+
+    root_cause     = result.get("root_cause", "")
+    fix_suggestion = result.get("fix_suggestion", "")
+    confidence     = result.get("confidence", 0.0)
+    findings       = result.get("findings", [])
+    actions_taken  = result.get("actions_taken", [])
+    failure_type   = result.get("failure_type", "")
+    severity_ai    = result.get("severity_ai", req.severity)
+
+    # Build plan actions list from fix_suggestion + findings for UI compatibility
+    plan_actions = []
+    if fix_suggestion:
+        plan_actions.append({"description": fix_suggestion, "type": "fix", "risk": "low"})
+    for f in findings:
+        plan_actions.append({"description": f, "type": "finding", "risk": "low"})
+
+    return {
+        "status":       "completed" if result.get("success") else "failed",
+        "incident_id":  result.get("incident_id"),
+        "summary":      result.get("summary", root_cause[:100] if root_cause else ""),
+        "root_cause":   root_cause,
+        "failure_type": failure_type,
+        "ai_severity":  severity_ai,
+        "confidence":   confidence,
+        "findings":     findings,
+        "fix_suggestion": fix_suggestion,
+        "actions_taken":  actions_taken,
+        "report":         result.get("report", ""),
+        "steps_taken":    result.get("steps_taken", []),
+        "errors":         result.get("errors", []),
+        "elapsed_s":      elapsed,
+        # plan structure expected by renderIncidentResult in the UI
+        "plan": {
+            "root_cause":  root_cause,
+            "summary":     result.get("summary", ""),
+            "risk":        severity_ai or "medium",
+            "confidence":  confidence,
+            "actions":     plan_actions,
+            "reasoning":   result.get("report", ""),
+            "findings":    findings,
+            "fix_suggestion": fix_suggestion,
+        },
+        "risk_level": severity_ai or "medium",
+        "observability": {
+            "k8s_collected":    result.get("k8s_data", {}).get("_data_available", False),
+            "aws_collected":    result.get("aws_data", {}).get("_data_available", False),
+            "github_collected": result.get("github_data", {}).get("_data_available", False),
+        },
+    }
 
 
 @router.post("/incidents/run/async")

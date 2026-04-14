@@ -82,12 +82,26 @@ def warroom_create(req: WarRoomRequest, auth: AuthContext = Depends(require_deve
         else:
             slack_info = {"error": channel_result.get("error")}
 
+    # Extract key resource identifiers from AWS context for AI reference
+    aws_ctx = context.get("aws", {})
+    ec2_data = aws_ctx.get("ec2", {})  # context["aws"]["ec2"] from universal_collector
+    instances = ec2_data.get("instances", []) if isinstance(ec2_data, dict) else []
+    instance_ids = [
+        {"id": i.get("id",""), "name": i.get("name",""), "state": i.get("state",""), "type": i.get("type","")}
+        for i in instances if isinstance(i, dict) and i.get("id")
+    ]
+
     pipeline_state = {
         "root_cause":     synthesis.get("root_cause", "Under investigation"),
-        "severity":       req.severity,
+        "summary":        synthesis.get("summary", req.description),
+        "findings":       synthesis.get("findings", []),
+        "fix_suggestion": synthesis.get("fix_suggestion", synthesis.get("recommended_actions", "")),
+        "severity":       synthesis.get("severity", req.severity),
         "status":         "active",
         "actions_taken":  synthesis.get("actions_to_take", []),
-        "aws_context":    context.get("aws", {}),
+        "ec2_instances":  instance_ids,
+        "aws_region":     ec2_data.get("region", "") if isinstance(ec2_data, dict) else "",
+        "aws_context":    aws_ctx,
         "k8s_context":    context.get("k8s", {}),
         "github_context": context.get("github", {}),
     }
@@ -111,6 +125,8 @@ def warroom_create(req: WarRoomRequest, auth: AuthContext = Depends(require_deve
 
 @router.post("/warroom/{war_room_id}/ask")
 async def ask_war_room_ai(war_room_id: str, req: WarRoomQuestion, auth: AuthContext = Depends(require_viewer)):
+    if war_room_id not in _WAR_ROOMS:
+        raise HTTPException(status_code=404, detail=f"War room {war_room_id} not found")
     try:
         answer = _answer_war_room_question(war_room_id, req.question, req.asked_by or auth.username)
         return {"answer": answer, "war_room_id": war_room_id}
@@ -209,6 +225,16 @@ def resolve_war_room(war_room_id: str, auth: AuthContext = Depends(require_devel
     except Exception:
         pass
     return {"success": True, "war_room_id": war_room_id, "resolved_by": auth.username}
+
+
+@router.delete("/warroom/{war_room_id}")
+def delete_war_room(war_room_id: str, auth: AuthContext = Depends(require_developer)):
+    """Permanently delete a war room."""
+    if war_room_id not in _WAR_ROOMS:
+        raise HTTPException(status_code=404, detail=f"War room {war_room_id} not found")
+    del _WAR_ROOMS[war_room_id]
+    _wr_save()
+    return {"success": True, "war_room_id": war_room_id, "deleted_by": auth.username}
 
 
 @router.post("/slack/events", include_in_schema=False)

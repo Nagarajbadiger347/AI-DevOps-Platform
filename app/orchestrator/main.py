@@ -23,7 +23,7 @@ from app.tenants.middleware import TenantMiddleware
 from app.routes import (
     auth, aws, k8s, security, webhooks, deploy,
     incidents, approvals, warroom, chat, github,
-    cost, health, vscode, misc, websocket_routes, tenants,
+    cost, health, vscode, misc, websocket_routes, tenants, agentic,
 )
 
 logger = logging.getLogger("nsops")
@@ -135,3 +135,4 @@ app.include_router(vscode.router)
 app.include_router(misc.router)
 app.include_router(websocket_routes.router)
 app.include_router(tenants.router)
+app.include_router(agentic.router)

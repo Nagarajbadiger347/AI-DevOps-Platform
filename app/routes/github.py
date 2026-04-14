@@ -18,8 +18,8 @@ def github_repos(auth: AuthContext = Depends(require_viewer)):
 @router.get("/github/profile")
 def github_profile(auth: AuthContext = Depends(require_viewer)):
     """GitHub account summary — repos, stars, top languages."""
-    from app.integrations.github import get_github_profile
-    return get_github_profile()
+    from app.integrations.github import get_profile_summary
+    return get_profile_summary()
 
 
 @router.get("/github/commits")

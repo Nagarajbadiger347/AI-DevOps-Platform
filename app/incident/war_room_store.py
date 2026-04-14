@@ -31,6 +31,26 @@ class WarRoomSession:
 # Single in-process store — shared across all importers in the same process
 WAR_ROOMS: dict[str, WarRoomSession] = {}
 
+# Auto-load persisted war rooms on import
+def _auto_load() -> None:
+    try:
+        with open(_WR_STORE) as f:
+            data = json.load(f)
+        for wid, d in data.items():
+            WAR_ROOMS[wid] = WarRoomSession(
+                war_room_id=d["war_room_id"],
+                incident_id=d["incident_id"],
+                incident_description=d["incident_description"],
+                pipeline_state=d.get("pipeline_state", {}),
+                slack_channel=d.get("slack_channel", ""),
+                created_at=d.get("created_at", ""),
+                participants=d.get("participants", []),
+            )
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+_auto_load()
+
 
 def save() -> None:
     try:
@@ -115,23 +135,35 @@ def answer(war_room_id: str, question: str, asked_by: str) -> str:
         wr.participants.append(asked_by)
     try:
         from app.chat.intelligence import chat_with_intelligence
+        _ERROR_STRINGS = {"synthesis failed", "insufficient data", "unknown", "n/a", ""}
+        _raw_rc = wr.pipeline_state.get("root_cause", "")
+        root_cause_ctx = "Under investigation" if (
+            not _raw_rc or _raw_rc.lower().strip() in _ERROR_STRINGS
+            or "failed" in _raw_rc.lower()
+        ) else _raw_rc
+
         incident_context = {
             "war_room_id":          wr.war_room_id,
             "incident_id":          wr.incident_id,
             "incident_description": wr.incident_description,
-            "root_cause":           wr.pipeline_state.get("root_cause", "Under investigation"),
+            "root_cause":           root_cause_ctx,
+            "summary":              wr.pipeline_state.get("summary", ""),
+            "findings":             wr.pipeline_state.get("findings", []),
+            "fix_suggestion":       wr.pipeline_state.get("fix_suggestion", ""),
             "actions_taken":        wr.pipeline_state.get("actions_taken",
                                     wr.pipeline_state.get("executed_actions", [])),
             "current_status":       wr.pipeline_state.get("status", "active"),
             "severity":             wr.pipeline_state.get("severity", "SEV2"),
             "slack_channel":        wr.slack_channel,
-            "pipeline_state":       wr.pipeline_state,
+            "ec2_instances":        wr.pipeline_state.get("ec2_instances", []),
+            "aws_region":           wr.pipeline_state.get("aws_region", ""),
         }
-        result = chat_with_intelligence(
+        raw = chat_with_intelligence(
             message=question,
             session_id=f"war_room::{war_room_id}",
             incident_context=incident_context,
         )
+        result = raw[0] if isinstance(raw, tuple) else str(raw)
     except Exception as exc:
         result = f"Could not process question: {exc}"
 

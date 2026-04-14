@@ -431,29 +431,48 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
         <div class="login-product-icon">&#9889;</div>
         <div class="login-product-name">NsOps</div>
       </div>
-      <h1 class="login-hero-heading">AI-powered ops for<br><span>modern infrastructure</span></h1>
-      <p class="login-hero-sub">Automated incident response, intelligent cost analysis, and real-time infrastructure monitoring — all in one platform.</p>
+      <h1 class="login-hero-heading">Your AI DevOps<br><span>Command Center</span></h1>
+      <p class="login-hero-sub">One platform to monitor infrastructure, debug incidents, analyse costs, and take action — powered by AI.</p>
+
       <div class="login-features">
         <div class="login-feature">
-          <div class="login-feature-icon" style="background:rgba(124,58,237,0.15);color:#a78bfa">&#128680;</div>
+          <div class="login-feature-icon" style="background:rgba(124,58,237,0.15);color:#a78bfa">&#129302;</div>
           <div class="login-feature-text">
-            <strong>Automated Incident Response</strong>
-            <span>AI triages alerts, identifies root causes, and executes remediation actions autonomously.</span>
+            <strong>AI Chat Assistant</strong>
+            <span>Ask anything in plain English — <em>"check my infra"</em>, <em>"why is my pod crashing?"</em>, <em>"how much am I spending on AWS?"</em></span>
           </div>
         </div>
         <div class="login-feature">
-          <div class="login-feature-icon" style="background:rgba(6,182,212,0.12);color:#06b6d4">&#9729;</div>
+          <div class="login-feature-icon" style="background:rgba(6,182,212,0.12);color:#06b6d4">&#128027;</div>
           <div class="login-feature-text">
-            <strong>Multi-cloud Infrastructure</strong>
-            <span>Unified visibility across AWS EC2, CloudWatch, Kubernetes, and third-party integrations.</span>
+            <strong>Debug with AI</strong>
+            <span>5-agent LangGraph workflow automatically collects K8s logs, AWS data and GitHub commits — then tells you the root cause and fix.</span>
           </div>
         </div>
         <div class="login-feature">
-          <div class="login-feature-icon" style="background:rgba(34,197,94,0.12);color:#22c55e">&#129302;</div>
+          <div class="login-feature-icon" style="background:rgba(251,191,36,0.12);color:#fbbf24">&#9889;</div>
           <div class="login-feature-text">
-            <strong>Conversational AI Assistant</strong>
-            <span>Ask questions about your infrastructure in plain English and get actionable insights.</span>
+            <strong>Incident Pipeline</strong>
+            <span>Run the AI pipeline on any incident — it collects context, analyses root cause, creates Jira tickets, opens Slack war rooms, and pages on-call.</span>
           </div>
+        </div>
+        <div class="login-feature">
+          <div class="login-feature-icon" style="background:rgba(34,197,94,0.12);color:#22c55e">&#128200;</div>
+          <div class="login-feature-text">
+            <strong>Cost Analysis</strong>
+            <span>Live AWS spend by service and account, trend charts, and plain-English cost estimates — <em>"how much does my RDS cost?"</em></span>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:24px;padding:14px 16px;background:rgba(124,58,237,0.08);border:1px solid rgba(124,58,237,0.2);border-radius:10px">
+        <div style="font-size:.75em;font-weight:700;color:#a78bfa;letter-spacing:.06em;margin-bottom:8px">QUICK START — AFTER LOGIN</div>
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:.78em;color:var(--text2,#94a3b8)">
+          <div><span style="color:#a78bfa;font-weight:600">1.</span> Go to <strong>Integrations</strong> → connect AWS, GitHub, K8s, Slack</div>
+          <div><span style="color:#a78bfa;font-weight:600">2.</span> Open <strong>AI Assistant</strong> → type <em>"check my infra"</em></div>
+          <div><span style="color:#a78bfa;font-weight:600">3.</span> Go to <strong>AI Agents</strong> → run <em>Debug with AI</em> on any incident</div>
+          <div><span style="color:#a78bfa;font-weight:600">4.</span> Go to <strong>Incidents</strong> → click <em>Run Pipeline</em> to trigger full AI analysis</div>
+          <div><span style="color:#a78bfa;font-weight:600">5.</span> Go to <strong>Cost Analysis</strong> → see live AWS spend breakdown</div>
         </div>
       </div>
     </div>
@@ -952,7 +971,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <!-- INCIDENTS -->
       <div id="s-incidents" class="section-page">
         <div class="section-header">
-          <div><div class="section-title">Incidents</div><div class="section-sub">Run the AI pipeline to analyze and remediate incidents</div></div>
+          <div><div class="section-title">Incidents</div><div class="section-sub">AI-powered incident analysis — general pipeline or deep K8s pod debug, both using the same LangGraph workflow</div></div>
           <div style="display:flex;gap:8px">
             <button class="btn btn-ghost btn-sm" onclick="App._setIncidentFilter('active')" id="btn-active-filter" style="color:#f87171;border-color:rgba(239,68,68,.3)">
               <svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="#f87171"/></svg>
@@ -969,63 +988,99 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
         </div>
         <!-- Top row: form + history side by side -->
         <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:16px;align-items:start">
-          <!-- Left: Pipeline form -->
+          <!-- Left: Unified form with tabs -->
           <div class="card">
-            <div class="card-header">
-              <div class="card-title">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                Run Incident Pipeline
-              </div>
-            </div>
-            <div class="form-group mb-12">
-              <label class="form-label">Incident ID</label>
-              <input type="text" id="inc-id" class="form-input" placeholder="INC-2024-001 (auto-generated if empty)"/>
-            </div>
-            <div class="form-group mb-12">
-              <label class="form-label">Description <span style="color:var(--red)">*</span></label>
-              <textarea id="inc-desc" class="form-input" placeholder="Describe the incident — be specific: which service, what error, what symptoms..." rows="4"></textarea>
-            </div>
-            <div class="form-row mb-12">
-              <div class="form-group">
-                <label class="form-label">Severity</label>
-                <select id="inc-sev" class="form-input">
-                  <option value="critical">Critical</option>
-                  <option value="high" selected>High</option>
-                  <option value="medium">Medium</option>
-                  <option value="low">Low</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label class="form-label">Lookback (hours)</label>
-                <input type="number" id="inc-hours" class="form-input" value="2" min="1" max="24"/>
-              </div>
-            </div>
-            <div class="form-group mb-12">
-              <div style="display:flex;gap:16px;flex-wrap:wrap">
-                <div class="form-toggle" onclick="App.toggleAutoRemediate()" id="auto-rem-wrap" title="Admin only — auto-executes actions without approval">
-                  <div class="toggle-track" id="auto-rem-toggle"><div class="toggle-thumb"></div></div>
-                  <span class="toggle-label">Auto-Remediate</span>
-                  <span id="auto-rem-lock" style="font-size:.7em;color:var(--muted);margin-left:2px">🔒</span>
-                </div>
-                <div class="form-toggle" onclick="App.toggleDryRun()">
-                  <div class="toggle-track" id="dry-run-toggle"><div class="toggle-thumb"></div></div>
-                  <span class="toggle-label">Dry Run <small style="color:var(--muted)">(preview only)</small></span>
-                </div>
-                <div class="form-toggle" onclick="App.toggleSlackChannel()">
-                  <div class="toggle-track" id="slack-ch-toggle"><div class="toggle-thumb"></div></div>
-                  <span class="toggle-label">Create Slack Channel</span>
-                </div>
-              </div>
-            </div>
-            <div style="display:flex;gap:8px">
-              <button class="btn btn-primary" onclick="App.runIncident(false)" id="run-inc-btn" style="flex:1;justify-content:center;padding:10px">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                Run Pipeline
+            <!-- Tab switcher -->
+            <div style="display:flex;gap:0;margin-bottom:16px;background:var(--surface2);border-radius:8px;padding:3px">
+              <button id="inc-tab-general" onclick="App.switchIncidentTab('general')" style="flex:1;padding:7px 10px;border:none;border-radius:6px;font-size:.8em;font-weight:600;cursor:pointer;transition:all .15s;background:var(--accent,#7c3aed);color:#fff">
+                ⚡ General Incident
               </button>
-              <button class="btn btn-ghost" onclick="App.runIncident(true)" id="dry-run-btn" style="padding:10px 14px" title="Preview what the pipeline would do without executing">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                Preview
+              <button id="inc-tab-k8s" onclick="App.switchIncidentTab('k8s')" style="flex:1;padding:7px 10px;border:none;border-radius:6px;font-size:.8em;font-weight:600;cursor:pointer;transition:all .15s;background:transparent;color:var(--text2)">
+                ☸ K8s Pod Debug
               </button>
+            </div>
+
+            <!-- GENERAL INCIDENT FORM -->
+            <div id="inc-form-general">
+              <div class="form-group mb-12">
+                <label class="form-label">Incident ID</label>
+                <input type="text" id="inc-id" class="form-input" placeholder="INC-2024-001 (auto-generated if empty)"/>
+              </div>
+              <div class="form-group mb-12">
+                <label class="form-label">Description <span style="color:var(--red)">*</span></label>
+                <textarea id="inc-desc" class="form-input" placeholder="Describe the incident — which service, what error, what symptoms..." rows="3"></textarea>
+              </div>
+              <div class="form-row mb-12">
+                <div class="form-group">
+                  <label class="form-label">Severity</label>
+                  <select id="inc-sev" class="form-input">
+                    <option value="critical">Critical</option>
+                    <option value="high" selected>High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Lookback (hrs)</label>
+                  <input type="number" id="inc-hours" class="form-input" value="2" min="1" max="24"/>
+                </div>
+              </div>
+              <div class="form-group mb-12">
+                <div style="display:flex;gap:16px;flex-wrap:wrap">
+                  <div class="form-toggle" onclick="App.toggleAutoRemediate()" id="auto-rem-wrap" title="Admin only — auto-executes actions without approval">
+                    <div class="toggle-track" id="auto-rem-toggle"><div class="toggle-thumb"></div></div>
+                    <span class="toggle-label">Auto-Remediate</span>
+                    <span id="auto-rem-lock" style="font-size:.7em;color:var(--muted);margin-left:2px">🔒</span>
+                  </div>
+                  <div class="form-toggle" onclick="App.toggleDryRun()">
+                    <div class="toggle-track" id="dry-run-toggle"><div class="toggle-thumb"></div></div>
+                    <span class="toggle-label">Dry Run</span>
+                  </div>
+                  <div class="form-toggle" onclick="App.toggleSlackChannel()">
+                    <div class="toggle-track" id="slack-ch-toggle"><div class="toggle-thumb"></div></div>
+                    <span class="toggle-label">Slack Channel</span>
+                  </div>
+                </div>
+              </div>
+              <div style="display:flex;gap:8px">
+                <button class="btn btn-primary" onclick="App.runIncident(false)" id="run-inc-btn" style="flex:1;justify-content:center;padding:10px">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                  Run Pipeline
+                </button>
+                <button class="btn btn-ghost" onclick="App.runIncident(true)" id="dry-run-btn" style="padding:10px 14px" title="Preview without executing">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  Preview
+                </button>
+              </div>
+            </div>
+
+            <!-- K8S POD DEBUG FORM -->
+            <div id="inc-form-k8s" style="display:none">
+              <div style="font-size:.78em;color:var(--muted);margin-bottom:12px;padding:8px 10px;background:var(--surface2);border-radius:6px">
+                5-agent LangGraph workflow: <span style="color:#a78bfa">Planner → Gather → Debugger → Executor → Reporter</span>
+              </div>
+              <div class="form-group mb-12">
+                <label class="form-label">Namespace</label>
+                <input type="text" id="k8s-namespace" class="form-input" placeholder="default" value="default"/>
+              </div>
+              <div class="form-group mb-12">
+                <label class="form-label">Pod Name <span style="color:var(--red)">*</span></label>
+                <input type="text" id="k8s-pod" class="form-input" placeholder="e.g. payment-api-abc123"/>
+              </div>
+              <div style="display:flex;gap:16px;margin-bottom:14px">
+                <label style="display:flex;align-items:center;gap:6px;font-size:.82em;color:var(--text2);cursor:pointer">
+                  <input type="checkbox" id="k8s-dry-run" checked style="accent-color:#7c3aed"/> Dry Run
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;font-size:.82em;color:var(--text2);cursor:pointer">
+                  <input type="checkbox" id="k8s-auto-fix" style="accent-color:#7c3aed"/> Auto Fix
+                </label>
+              </div>
+              <button class="btn btn-primary" onclick="App.runK8sDebug()" id="k8s-run-btn" style="width:100%;justify-content:center;padding:10px">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+                Run AI Debug
+              </button>
+              <!-- K8s debug progress -->
+              <div id="k8s-debug-progress" style="display:none;margin-top:12px;font-size:.78em;color:var(--muted);line-height:2"></div>
             </div>
           </div>
 
@@ -1808,6 +1863,139 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
         </div>
       </div>
 
+      <!-- AGENTS -->
+      <div id="s-agents" class="section-page">
+        <div class="section-header">
+          <div>
+            <div class="section-title">AI Agents</div>
+            <div class="section-sub">LangGraph multi-agent workflows — Debug pods, plan tasks, execute actions, observe events</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="App.loadAgentWorkflows()">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Refresh
+          </button>
+        </div>
+
+        <!-- Workflow badges -->
+        <div id="agent-workflows-bar" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px"></div>
+
+        <div style="display:grid;grid-template-columns:1fr 1.3fr;gap:16px">
+
+          <!-- LEFT: Debug Pod form -->
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+                Debug with AI
+              </div>
+              <span class="badge badge-purple" style="font-size:.7em">LangGraph · 5 Agents</span>
+            </div>
+            <div style="font-size:.8em;color:var(--muted);margin-bottom:12px">Planner → Gather Data → Debugger → Executor → Reporter</div>
+
+            <div class="form-group">
+              <label class="form-label">Target</label>
+              <select id="debug-target" class="form-input" style="padding:7px 10px;font-size:.85em" onchange="App.onDebugTargetChange()">
+                <option value="k8s">Kubernetes Pod</option>
+                <option value="general">General Incident (AWS + K8s + GitHub)</option>
+              </select>
+            </div>
+
+            <!-- K8s fields -->
+            <div id="debug-k8s-fields">
+              <div class="form-group">
+                <label class="form-label">Namespace</label>
+                <input id="debug-namespace" class="form-input" type="text" placeholder="default" value="default" style="padding:7px 10px;font-size:.85em"/>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Pod Name</label>
+                <input id="debug-pod" class="form-input" type="text" placeholder="my-app-abc123" style="padding:7px 10px;font-size:.85em"/>
+              </div>
+            </div>
+
+            <!-- General incident fields -->
+            <div id="debug-general-fields" style="display:none">
+              <div class="form-group">
+                <label class="form-label">Incident Description</label>
+                <textarea id="debug-description" class="form-input" rows="3" placeholder="e.g. High CPU on payment service, deployment failure, API errors..." style="padding:7px 10px;font-size:.85em;resize:vertical"></textarea>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Severity</label>
+                <select id="debug-severity" class="form-input" style="padding:7px 10px;font-size:.85em">
+                  <option value="high">High</option>
+                  <option value="critical">Critical</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:10px;align-items:center;margin:10px 0 14px">
+              <label style="display:flex;align-items:center;gap:6px;font-size:.82em;color:var(--text2);cursor:pointer">
+                <input type="checkbox" id="debug-dry-run" checked style="accent-color:#7c3aed"/> Dry Run
+              </label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:.82em;color:var(--text2);cursor:pointer">
+                <input type="checkbox" id="debug-auto-fix" style="accent-color:#7c3aed"/> Auto Fix
+              </label>
+            </div>
+
+            <button class="btn btn-primary" onclick="App.runDebugWorkflow()" id="debug-run-btn" style="width:100%;justify-content:center;padding:10px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+              Run AI Debug
+            </button>
+
+            <!-- Progress -->
+            <div id="debug-progress" style="display:none;margin-top:14px">
+              <div id="debug-steps" style="font-size:.78em;color:var(--muted);line-height:1.9"></div>
+            </div>
+          </div>
+
+          <!-- RIGHT: Result panel -->
+          <div class="card" style="min-height:300px">
+            <div class="card-header">
+              <div class="card-title">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                Debug Report
+              </div>
+              <div id="debug-severity-badge"></div>
+            </div>
+            <div id="debug-result" style="font-size:.83em;color:var(--text2)">
+              <div class="empty-state"><div class="empty-icon">🤖</div><p>Run a debug workflow to see the AI analysis report</p></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Agent Observe / Event Trigger -->
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <div class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              Observer — Trigger Events
+            </div>
+            <span style="font-size:.75em;color:var(--muted)">Routes events to workflows automatically</span>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+            <div class="form-group" style="flex:1;min-width:140px;margin:0">
+              <label class="form-label">Event Type</label>
+              <select id="observe-type" class="form-input" style="padding:7px 10px;font-size:.85em">
+                <option value="manual_debug">manual_debug</option>
+                <option value="k8s_alert">k8s_alert</option>
+                <option value="prometheus_alert">prometheus_alert</option>
+                <option value="gitlab_pipeline">gitlab_pipeline</option>
+              </select>
+            </div>
+            <div class="form-group" style="flex:2;min-width:200px;margin:0">
+              <label class="form-label">Payload (JSON)</label>
+              <input id="observe-payload" class="form-input" type="text" placeholder='{"namespace":"default","pod_name":"my-app"}' style="padding:7px 10px;font-size:.82em"/>
+            </div>
+            <button class="btn btn-secondary" onclick="App.triggerObserver()" style="padding:8px 16px;white-space:nowrap">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Send Event
+            </button>
+          </div>
+          <div id="observe-result" style="display:none;margin-top:10px;font-size:.82em;color:var(--text2);background:var(--surface2);border-radius:6px;padding:10px;max-height:140px;overflow-y:auto"></div>
+        </div>
+      </div>
+
       <!-- VSCODE -->
       <div id="s-vscode" class="section-page">
         <div class="section-header">
@@ -2337,6 +2525,7 @@ const App = {
 
   // ── ROUTING (hash-based for back/forward support) ─────────────────
   navigate(section, pushState=true, forceReload=false){
+    if(section==='agents')section='incidents'; // agents merged into incidents
     if(!['dashboard','monitoring','incidents','warroom','approvals','cost','chat','infra','integrations','github','vscode','users','security'].includes(section))section='dashboard';
     // If user explicitly clicks the same section they're on, bust cache so it reloads
     const sameSectionClick = pushState && section === this.currentSection;
@@ -4389,11 +4578,12 @@ const App = {
         const resolvedBadge=isResolved?`<span class="badge badge-green" style="font-size:.7em">&#10003; Resolved</span>`:'';
         const clickable=!isResolved?`cursor:pointer`:`cursor:default`;
         const onclick=!isResolved?`onclick="App.openWarRoom('${wr.war_room_id}','${wr.incident_id||''}','${(wr.description||'').replace(/'/g,'&apos;').replace(/"/g,'&quot;')}','${wr.slack_channel||''}')"`:'' ;
-        return`<div style="padding:12px 14px;border-bottom:1px solid var(--border);${clickable};transition:background .15s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" ${onclick}>
+        return`<div style="padding:12px 14px;border-bottom:1px solid var(--border);${clickable};transition:background .15s;position:relative" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" ${onclick}>
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
             <span style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0"></span>
             <span style="font-weight:600;font-size:.88em">${wr.incident_id||wr.war_room_id}</span>
             ${ch}${resolvedBadge}
+            <button onclick="event.stopPropagation();App.deleteWarRoom('${wr.war_room_id}')" title="Delete war room" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--muted);padding:2px 6px;border-radius:4px;font-size:.85em;line-height:1" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">🗑</button>
           </div>
           <div style="font-size:.8em;color:var(--muted);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${wr.description||''}</div>
           <div style="display:flex;gap:8px;align-items:center">${pts}${wr.created_at?`<span style="font-size:.72em;color:var(--muted)">${new Date(wr.created_at).toLocaleDateString()}</span>`:''}</div>
@@ -4437,6 +4627,16 @@ const App = {
   wrQuickPrompt(text){
     const inp=document.getElementById('warroom-input');
     if(inp){inp.value=text;this.wrTab('ai',document.getElementById('wrt-ai'));this.askWarRoom();}
+  },
+
+  async deleteWarRoom(warRoomId){
+    if(!confirm('Delete this war room? This cannot be undone.'))return;
+    const r=await this.api('DELETE',`/warroom/${warRoomId}`);
+    if(r&&r.ok){
+      this.toast('War room deleted','success');
+      if(this.currentWarRoomId===warRoomId){this.closeWarRoom();}
+      this.loadWarRooms();
+    }else{this.toast('Failed to delete war room','error');}
   },
 
   async resolveWarRoom(){
@@ -4604,18 +4804,27 @@ const App = {
       const msgs=document.getElementById('warroom-messages');
       msgs.querySelector('.typing-bubble')&&msgs.querySelector('.typing-bubble').remove();
       if(r&&r.ok){const d=await r.json();this.appendWarRoomMsg('assistant',d.answer||d.response||'No response');}
+      else if(r&&r.status===404){
+        this.currentWarRoomId=null;
+        this.appendWarRoomMsg('assistant','⚠️ This war room session expired (server was restarted). Please select a war room from the list above or create a new one.');
+        this.loadWarRooms();
+      }
       else this.appendWarRoomMsg('assistant','Could not get response from war room AI.');
     }catch(e){this.appendWarRoomMsg('assistant','Error: '+e.message);}
   },
 
   appendWarRoomMsg(role,text){
+    if(text==null||text==='')return;
+    text=String(text);
     const msgs=document.getElementById('warroom-messages');
     if(role==='typing'){const el=document.createElement('div');el.className='typing-bubble';el.style.cssText='font-size:.8em;color:var(--muted);padding:6px 0';el.textContent='AI is thinking...';msgs.appendChild(el);msgs.scrollTop=msgs.scrollHeight;return;}
     if(msgs.querySelector('.empty-state')) msgs.innerHTML='';
-    const el=document.createElement('div');el.className='chat-bubble '+role;
-    const safe=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const fmt=safe.replace(/\\n/g,'<br>').replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/`(.*?)`/g,'<code>$1</code>');
-    el.innerHTML='<div>'+fmt+'</div><div class="chat-meta">'+(role==='user'?this.username:'NsOps AI')+' &bull; '+new Date().toLocaleTimeString()+'</div>';
+    const el=document.createElement('div');
+    el.className='chat-row '+(role==='user'?'user':'');
+    const bubbleContent=role==='user'
+      ?'<div class="chat-bubble user"><div>'+text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div></div>'
+      :'<div class="chat-bubble assistant" style="max-width:100%">'+this._md(text)+'</div>';
+    el.innerHTML='<div class="chat-body">'+bubbleContent+'<div class="chat-meta">'+(role==='user'?this.username:'NsOps AI')+' &bull; '+new Date().toLocaleTimeString()+'</div></div>';
     msgs.appendChild(el);msgs.scrollTop=msgs.scrollHeight;
   },
 
@@ -5464,7 +5673,7 @@ const App = {
       msgsEl.innerHTML='';
       document.getElementById('chat-chips').style.display='none';
       for(const m of msgs){
-        this.appendChatMsg(m.role==='assistant'?'assistant':'user', m.content, '');
+        if(m.content)this.appendChatMsg(m.role==='assistant'?'assistant':'user', m.content, '');
       }
     }catch(e){}
   },
@@ -5477,39 +5686,67 @@ const App = {
     input.value='';input.style.height='';
     if(msg.toLowerCase()==='/help'){
       this.appendChatMsg('user','/help');
-      this.appendChatMsg('assistant',`**NsOps AI — What I can do**
+      this.appendChatMsg('assistant',`## NsOps AI — Full Capabilities
 
-**AWS Infrastructure**
-- List / check EC2 instances, ECS services, Lambda functions, RDS databases
+**☁️ AWS Infrastructure**
+- List / check EC2 instances, ECS services, Lambda, RDS, ALB
 - Start, stop, reboot EC2 instances
-- Scale ECS services, redeploy ECS services
-- Check CloudWatch alarms and metrics
-- Fetch CloudTrail audit events — *who* did *what* and *when*
-- View S3 buckets, SQS queues, DynamoDB tables, SNS topics
+- Scale or redeploy ECS services
+- Check CloudWatch alarms and search logs
+- Fetch CloudTrail audit events — *who did what and when*
+- View S3, SQS, DynamoDB, SNS, Route53
 
-**Kubernetes**
-- List pods, deployments, namespaces
+**☸️ Kubernetes**
+- List pods, deployments, namespaces, nodes
 - Restart or scale deployments
-- Stream pod logs
-- Check node health and cluster events
+- Fetch pod logs, describe pod state, check events
+- Detect unhealthy pods across all namespaces
 
-**GitHub**
+**🤖 AI Agents & Incident Workflows**
+- **Debug with AI** — runs the unified LangGraph 5-agent workflow (Planner → Gather → Debugger → Executor → Reporter)
+  - K8s pod debug: deep log + event analysis, root cause, auto-fix option
+  - General incident: AWS + K8s + GitHub parallel collection + AI synthesis
+- **Run Incident Pipeline** — collects all infra context, AI analyses root cause, executes: Jira ticket, Slack war room, OpsGenie alert, GitHub PR
+- **Observer** — trigger events: \`k8s_alert\`, \`prometheus_alert\`, \`gitlab_pipeline\`, \`manual_debug\`
+- All incidents stored in **ChromaDB memory** — similar past incidents recalled automatically
+
+**🐙 GitHub**
 - List repos, recent commits, open PRs
-- Create issues or pull requests
-- Review a PR for security/infra issues
+- Create issues or pull requests with AI-generated patches
+- Review a PR for security, infra, and code quality
 
-**Incidents & Alerts**
-- Run the full incident pipeline (analyze → plan → execute → validate)
-- Create Jira tickets or OpsGenie alerts
-- Send Slack notifications
-- Generate a post-mortem report
+**🦊 GitLab / CI-CD**
+- Get failed pipeline logs
+- Retry a failed pipeline or job
 
-**General**
-- Ask about any infrastructure state, cost, or audit history
+**💰 Cost Analysis**
+- AWS spend — MTD, by service, by account, trend charts
+- Resource cost estimates
+- Terraform plan cost analysis
+- Plain-English cost questions: *"how much does my RDS cost?"*
+
+**💬 Slack / Jira / OpsGenie**
+- Create Jira tickets for incidents
+- Page on-call via OpsGenie
+- Create dedicated Slack war room channels
+
+**📋 Try these prompts:**
+\`\`\`
+check my infra
+list my EC2 instances
+are there any firing CloudWatch alarms?
+restart the payment-service deployment in production
+check github repos
+how much am I spending on AWS this month?
+run a debug on pod api-server-abc in namespace prod
+what failed pipelines do I have in GitLab?
+\`\`\`
+
+**Commands:**
 - \`/help\` — show this message
 - \`/clear\` — clear chat history
 
-*Tip: mention a specific resource ID (e.g. \`i-0abc1234\`, \`payment-service\`) for precise answers.*`);
+*Tip: mention a specific resource ID (e.g. \`i-0abc1234\`, \`payment-api\`, \`prod namespace\`) for precise answers.*`);
       return;
     }
     if(msg.toLowerCase()==='/clear'){
@@ -5596,6 +5833,8 @@ const App = {
   },
 
   appendChatMsg(role,text,provider){
+    if(text==null||text==='')return;
+    text=String(text);
     document.getElementById('chat-chips').style.display='none';
     const wEl=document.getElementById('chat-welcome');if(wEl)wEl.remove();
     const msgs=document.getElementById('chat-messages');
@@ -5693,8 +5932,14 @@ const App = {
       });
       ti.style.display='none';
       if(!resp.ok){
-        const errText=await resp.text();let errMsg='Error';
-        try{errMsg=(JSON.parse(errText).detail||errMsg);}catch(e){}
+        const errText=await resp.text();let errMsg='Server error ('+resp.status+')';
+        try{
+          const parsed=JSON.parse(errText);
+          const d=parsed.detail;
+          if(typeof d==='string')errMsg=d;
+          else if(Array.isArray(d))errMsg=d.map(e=>e.msg||JSON.stringify(e)).join('; ');
+          else if(d)errMsg=JSON.stringify(d);
+        }catch(e){}
         this.appendChatMsg('assistant',errMsg);return;
       }
       // Create a placeholder bubble and stream chunks into it
@@ -5722,7 +5967,7 @@ const App = {
               thinkingEl.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>'+ev.text;
             } else if(ev.type==='chunk'){
               if(thinkingEl){thinkingEl.remove();thinkingEl=null;}
-              fullText+=ev.text;
+              fullText+=String(ev.text||'');
               bubble.innerHTML=this._md(fullText);
               msgs.scrollTop=msgs.scrollHeight;
             } else if(ev.type==='done'){
@@ -5735,7 +5980,15 @@ const App = {
           }catch(e){console.error('SSE parse error:',e,'line:',line);}
         }
       }
-    }catch(e){ti.style.display='none';console.error('Stream error:',e);this.appendChatMsg('assistant','Error: '+e.message);}
+    }catch(e){
+      ti.style.display='none';
+      console.error('Stream error:',e,e.stack);
+      const lines=(e.stack||e.message||'').split('\n').slice(0,6);
+      const msgs=document.getElementById('chat-messages');
+      const row=document.createElement('div');row.className='chat-row';
+      row.innerHTML='<div class="chat-body"><div class="chat-bubble assistant" style="color:var(--red)"><b>Error: '+e.message+'</b><pre style="font-size:.75em;margin-top:6px;white-space:pre-wrap">'+lines.join('\n')+'</pre></div></div>';
+      msgs.appendChild(row);msgs.scrollTop=msgs.scrollHeight;
+    }
   },
 
   // ── INFRASTRUCTURE ───────────────────────────────────────────────
@@ -6143,6 +6396,175 @@ const App = {
     this.loadGhRepos();
     this.loadGhCommits();
     this.loadGhPRs();
+  },
+
+  // ── AI AGENTS ──────────────────────────────────────────────────────────────
+  async loadAgentWorkflows(){
+    const bar=document.getElementById('agent-workflows-bar');
+    if(!bar) return;
+    bar.innerHTML='<span style="font-size:.78em;color:var(--muted)">Loading workflows…</span>';
+    try{
+      const r=await this.api('GET','/agent/workflows');
+      if(!r||!r.ok){bar.innerHTML='';return;}
+      const d=await r.json();
+      bar.innerHTML='';
+      (d.workflows||[]).forEach(w=>{
+        const el=document.createElement('div');
+        el.style.cssText='display:flex;align-items:center;gap:8px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 14px;font-size:.8em';
+        el.innerHTML=`<span style="color:#a78bfa;font-weight:600">⚡ ${w.name}</span><span style="color:var(--muted)">${w.description||''}</span><span style="font-size:.72em;background:rgba(6,182,212,.12);color:#06b6d4;padding:2px 7px;border-radius:4px">${(w.agents||[]).join(' → ')}</span>`;
+        bar.appendChild(el);
+      });
+    }catch(e){bar.innerHTML='';}
+  },
+
+  onDebugTargetChange(){
+    const v=document.getElementById('debug-target').value;
+    document.getElementById('debug-k8s-fields').style.display=v==='k8s'?'':'none';
+    document.getElementById('debug-general-fields').style.display=v==='general'?'':'none';
+  },
+
+  async runDebugWorkflow(){
+    const btn=document.getElementById('debug-run-btn');
+    const prog=document.getElementById('debug-progress');
+    const steps=document.getElementById('debug-steps');
+    const resultEl=document.getElementById('debug-result');
+    const badge=document.getElementById('debug-severity-badge');
+    const target=document.getElementById('debug-target').value;
+    const dryRun=document.getElementById('debug-dry-run').checked;
+    const autoFix=document.getElementById('debug-auto-fix').checked;
+
+    btn.disabled=true;btn.textContent='Running…';
+    prog.style.display='block';
+    steps.innerHTML='';
+    resultEl.innerHTML='<div style="color:var(--muted);font-size:.85em;padding:20px 0;text-align:center">⏳ AI agents working…</div>';
+    badge.innerHTML='';
+
+    const addStep=(s)=>{steps.innerHTML+=`<div>→ ${s}</div>`;};
+
+    try{
+      if(target==='k8s'){
+        const ns=document.getElementById('debug-namespace').value.trim()||'default';
+        const pod=document.getElementById('debug-pod').value.trim();
+        if(!pod){this.toast('Pod name is required','warn');btn.disabled=false;btn.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg> Run AI Debug';prog.style.display='none';return;}
+        addStep('Calling LangGraph: Planner → Gather Data → Debugger…');
+        const r=await this.api('POST','/debug-pod',{namespace:ns,pod_name:pod,dry_run:dryRun,auto_fix:autoFix});
+        if(!r||!r.ok){const e=await r.text();this.toast('Debug failed','error');resultEl.innerHTML=`<div style="color:#f87171">Error: ${e}</div>`;return;}
+        const d=await r.json();
+        addStep(`Planner validated input`);
+        addStep(`Gathered pod details, logs, events`);
+        addStep(`Debugger analyzed: ${d.failure_type||'Unknown'} (${d.severity||'?'})`);
+        if(d.auto_fix||!dryRun) addStep(`Executor: ${d.fix_executed?'fix applied':'dry-run logged'}`);
+        addStep(`Reporter generated structured report`);
+        const sevColor={critical:'#f87171',high:'#fb923c',medium:'#fbbf24',low:'#4ade80'}[d.severity]||'#94a3b8';
+        badge.innerHTML=`<span style="font-size:.75em;font-weight:700;padding:3px 10px;border-radius:5px;background:${sevColor}22;color:${sevColor};border:1px solid ${sevColor}55">${(d.severity||'?').toUpperCase()}</span>`;
+        resultEl.innerHTML=`
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+            <div style="background:var(--surface2);border-radius:6px;padding:8px 10px"><div style="font-size:.72em;color:var(--muted);margin-bottom:2px">FAILURE TYPE</div><div style="font-weight:600;color:#a78bfa">${d.failure_type||'Unknown'}</div></div>
+            <div style="background:var(--surface2);border-radius:6px;padding:8px 10px"><div style="font-size:.72em;color:var(--muted);margin-bottom:2px">ELAPSED</div><div style="font-weight:600">${d.elapsed_s||'?'}s</div></div>
+          </div>
+          <div style="margin-bottom:10px"><div style="font-size:.72em;color:var(--muted);margin-bottom:4px;font-weight:600">ROOT CAUSE</div><div style="line-height:1.6">${d.root_cause||'N/A'}</div></div>
+          <div style="margin-bottom:10px"><div style="font-size:.72em;color:var(--muted);margin-bottom:4px;font-weight:600">FIX SUGGESTION</div><div style="line-height:1.6">${d.fix_suggestion||'N/A'}</div></div>
+          ${d.report?`<details style="margin-top:8px"><summary style="cursor:pointer;font-size:.78em;color:var(--muted)">Full Report</summary><pre style="font-size:.75em;white-space:pre-wrap;margin-top:8px;background:var(--surface2);padding:10px;border-radius:6px;max-height:200px;overflow-y:auto">${d.report}</pre></details>`:''}
+          ${(d.steps_taken||[]).length?`<details style="margin-top:6px"><summary style="cursor:pointer;font-size:.78em;color:var(--muted)">Steps (${d.steps_taken.length})</summary><div style="font-size:.75em;margin-top:6px;line-height:1.8">${d.steps_taken.map(s=>`→ ${s}`).join('<br>')}</div></details>`:''}
+        `;
+      } else {
+        const desc=document.getElementById('debug-description').value.trim();
+        const sev=document.getElementById('debug-severity').value;
+        if(!desc){this.toast('Description is required','warn');btn.disabled=false;btn.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg> Run AI Debug';prog.style.display='none';return;}
+        addStep('Running general incident pipeline: AWS + K8s + GitHub…');
+        const incId='AI-DBG-'+Date.now();
+        const r=await this.api('POST','/incidents/run',{incident_id:incId,description:desc,severity:sev,auto_remediate:false,dry_run:dryRun});
+        if(!r||!r.ok){const e=await r.text();this.toast('Debug failed','error');resultEl.innerHTML=`<div style="color:#f87171">Error: ${e}</div>`;return;}
+        const d=await r.json();
+        addStep('Collected AWS context');addStep('Collected K8s context');addStep('Collected GitHub context');
+        addStep(`AI synthesized: ${d.summary||'analysis complete'}`);
+        const sevColor={critical:'#f87171',high:'#fb923c',medium:'#fbbf24',low:'#4ade80'}[d.ai_severity||sev]||'#94a3b8';
+        badge.innerHTML=`<span style="font-size:.75em;font-weight:700;padding:3px 10px;border-radius:5px;background:${sevColor}22;color:${sevColor};border:1px solid ${sevColor}55">${((d.ai_severity||sev)||'?').toUpperCase()}</span>`;
+        resultEl.innerHTML=`
+          <div style="margin-bottom:10px"><div style="font-size:.72em;color:var(--muted);margin-bottom:4px;font-weight:600">SUMMARY</div><div style="line-height:1.6">${d.summary||'N/A'}</div></div>
+          <div style="margin-bottom:10px"><div style="font-size:.72em;color:var(--muted);margin-bottom:4px;font-weight:600">ROOT CAUSE</div><div style="line-height:1.6">${d.root_cause||'N/A'}</div></div>
+          ${(d.findings||[]).length?`<div style="margin-bottom:10px"><div style="font-size:.72em;color:var(--muted);margin-bottom:4px;font-weight:600">FINDINGS</div><ul style="margin:0;padding-left:16px;line-height:1.8">${d.findings.map(f=>`<li>${f}</li>`).join('')}</ul></div>`:''}
+          ${(d.actions_taken||[]).length?`<div><div style="font-size:.72em;color:var(--muted);margin-bottom:4px;font-weight:600">ACTIONS</div>${d.actions_taken.map(a=>`<div style="font-size:.8em;padding:3px 0">${a.type}: ${a.skipped?'⏭ skipped':'✓ '+(a.result&&a.result.success?'ok':'failed')}</div>`).join('')}</div>`:''}
+        `;
+      }
+    }catch(e){
+      resultEl.innerHTML=`<div style="color:#f87171">Error: ${e}</div>`;
+    }finally{
+      btn.disabled=false;
+      btn.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg> Run AI Debug';
+    }
+  },
+
+  switchIncidentTab(tab){
+    const isK8s=tab==='k8s';
+    document.getElementById('inc-form-general').style.display=isK8s?'none':'block';
+    document.getElementById('inc-form-k8s').style.display=isK8s?'block':'none';
+    const gBtn=document.getElementById('inc-tab-general');
+    const kBtn=document.getElementById('inc-tab-k8s');
+    gBtn.style.background=isK8s?'transparent':'var(--accent,#7c3aed)';
+    gBtn.style.color=isK8s?'var(--text2)':'#fff';
+    kBtn.style.background=isK8s?'var(--accent,#7c3aed)':'transparent';
+    kBtn.style.color=isK8s?'#fff':'var(--text2)';
+  },
+
+  async runK8sDebug(){
+    const ns=(document.getElementById('k8s-namespace')?.value||'').trim()||'default';
+    const pod=(document.getElementById('k8s-pod')?.value||'').trim();
+    if(!pod){this.toast('Pod name is required','error');return;}
+    const dryRun=document.getElementById('k8s-dry-run')?.checked??true;
+    const autoFix=document.getElementById('k8s-auto-fix')?.checked??false;
+    const btn=document.getElementById('k8s-run-btn');
+    const resEl=document.getElementById('inc-result');
+    if(btn){btn.disabled=true;btn.textContent='Running…';}
+    resEl.style.display='none';
+    try{
+      const r=await this.api('POST','/debug-pod',{namespace:ns,pod_name:pod,dry_run:dryRun,auto_fix:autoFix});
+      if(!r){if(btn){btn.disabled=false;btn.textContent='🤖 Run AI Debug';}return;}
+      const d=await r.json();
+      resEl.style.display='block';
+      const sev=d.severity||'unknown';
+      const sevColor={'critical':'#ef4444','high':'#f97316','medium':'#eab308','low':'#22c55e'}[sev]||'#6b7280';
+      resEl.innerHTML=`
+        <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">
+          <div style="background:var(--surface2);padding:12px 16px;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-weight:600;font-size:.9em">☸ K8s Debug — ${ns}/${pod}</span>
+            <span style="padding:2px 10px;border-radius:20px;font-size:.75em;font-weight:700;background:${sevColor}22;color:${sevColor}">${sev.toUpperCase()}</span>
+          </div>
+          <div style="padding:14px 16px;display:grid;gap:10px">
+            ${d.failure_type?`<div><div style="font-size:.7em;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Failure Type</div><div style="font-weight:600">${d.failure_type}</div></div>`:''}
+            ${d.root_cause?`<div><div style="font-size:.7em;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Root Cause</div><div style="font-size:.85em;line-height:1.5">${d.root_cause}</div></div>`:''}
+            ${d.fix_suggestion?`<div><div style="font-size:.7em;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Fix Suggestion</div><div style="font-size:.85em;line-height:1.5">${d.fix_suggestion}</div></div>`:''}
+            ${d.report?`<div><div style="font-size:.7em;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Report</div><pre style="font-size:.78em;white-space:pre-wrap;background:var(--surface2);border-radius:6px;padding:10px;margin:0">${d.report}</pre></div>`:''}
+            ${d.actions_taken&&d.actions_taken.length?`<div><div style="font-size:.7em;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Actions Taken</div><div style="font-size:.82em">${d.actions_taken.map(a=>`<span style="display:inline-block;background:var(--surface2);border-radius:4px;padding:2px 8px;margin:2px">${a}</span>`).join('')}</div></div>`:''}
+            <div style="font-size:.75em;color:var(--text2)">Elapsed: ${d.elapsed_s}s · dry_run=${d.dry_run} · auto_fix=${d.auto_fix}</div>
+          </div>
+        </div>`;
+    }catch(e){resEl.style.display='block';resEl.textContent='Error: '+e;}
+    if(btn){btn.disabled=false;btn.textContent='🤖 Run AI Debug';}
+  },
+
+  async debugWithAI(){
+    // Pre-fill K8s tab from description and switch to it
+    const desc=document.getElementById('inc-description')?.value.trim()||'';
+    this.switchIncidentTab('k8s');
+    if(desc&&!document.getElementById('k8s-pod')?.value){
+      this.toast('Switch to K8s tab — enter namespace and pod name, then click Run AI Debug','info');
+    }
+  },
+
+  async triggerObserver(){
+    const type=document.getElementById('observe-type').value;
+    const payloadStr=document.getElementById('observe-payload').value.trim()||'{}';
+    const resEl=document.getElementById('observe-result');
+    let payload;
+    try{payload=JSON.parse(payloadStr);}catch(e){this.toast('Invalid JSON payload','error');return;}
+    resEl.style.display='block';resEl.textContent='Sending event…';
+    try{
+      const r=await this.api('POST','/agent/observe',{type,source:'ui',payload});
+      if(!r){resEl.textContent='Request failed';return;}
+      const d=await r.json();
+      resEl.textContent=JSON.stringify(d,null,2);
+    }catch(e){resEl.textContent='Error: '+e;}
   },
 
   // ── VS CODE ────────────────────────────────────────────────────────────────
@@ -7095,6 +7517,8 @@ const App = {
 
 };
 
+// Force reload if JS version mismatch (clears stale cached page)
+(function(){const V='2026041301';const k='nsops_js_v';if(localStorage.getItem(k)!==V){localStorage.setItem(k,V);location.reload(true);}})();
 document.addEventListener('DOMContentLoaded', () => App.init());
 document.addEventListener('click', ()=>{ const dd=document.getElementById('user-dropdown'); if(dd&&dd.style.display==='block')App.closeUserDropdown(); });
 </script>

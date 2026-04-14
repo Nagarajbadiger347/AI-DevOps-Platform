@@ -1,8 +1,66 @@
-# NexusOps — AI DevOps Intelligence Platform
+# NsOps — AI DevOps Platform
 
-Autonomous DevOps management powered by a **multi-agent AI system**.
+**Your AI-powered DevOps command center.** Connect your AWS, Kubernetes, GitHub, and Slack — then ask the AI anything, debug incidents automatically, and manage your entire infrastructure from one place.
 
-One platform to detect incidents, analyse root cause, plan and safely execute remediation, assess deployments, run interactive Slack war rooms, analyse costs, and close the loop back to Jira and GitHub — automatically.
+---
+
+## What can I do with it?
+
+| I want to… | Where to go |
+|---|---|
+| Ask about my infrastructure in plain English | **AI Assistant** — type anything |
+| Debug a crashing K8s pod automatically | **AI Agents** → Debug with AI (K8s Pod) |
+| Run full AI analysis on an incident | **Incidents** → Run Pipeline or Debug with AI |
+| See my AWS costs breakdown | **Cost Analysis** |
+| Monitor live infra status | **Infrastructure** or **Dashboard** |
+| Set up a Slack war room for an incident | **War Room** or the Incidents pipeline |
+| Approve or reject AI-suggested actions | **Approvals** |
+| Review a GitHub PR with AI | **GitHub** → PR Review |
+| View past incidents and post-mortems | **Incidents** history |
+
+---
+
+## Quick Start (after login)
+
+**Step 1 — Connect your tools**
+Go to **Integrations** and add credentials for AWS, GitHub, K8s, Slack, Jira. All integrations are optional — the platform works with whatever you have.
+
+**Step 2 — Try the AI Chat**
+Go to **AI Assistant** and type:
+```
+check my infra
+```
+The AI will pull live data from all connected integrations and give you a full status report.
+
+**Step 3 — Debug an incident**
+Go to **AI Agents** → fill in a namespace and pod name → click **Run AI Debug**.
+The 5-agent system collects logs, events, and AWS data, then tells you the root cause and fix.
+
+**Step 4 — Run the incident pipeline**
+Go to **Incidents** → describe what's wrong → click **Run Pipeline**.
+The AI collects all context, identifies root cause, and can automatically create a Jira ticket, open a Slack war room, and page on-call.
+
+**Step 5 — Check your AWS costs**
+Go to **Cost Analysis** → see live spend by service, by account, and trend charts.
+Or just ask the AI: *"how much am I spending on RDS this month?"*
+
+---
+
+## Example AI Chat prompts
+
+```
+check my infra
+list my EC2 instances
+are there any firing CloudWatch alarms?
+restart the payment-service deployment in production
+check github repos
+how much am I spending on AWS this month?
+why is my pod crashing in namespace production?
+list failed GitLab pipelines
+check kubernetes pod logs for api-server
+```
+
+---
 
 ---
 
@@ -10,7 +68,8 @@ One platform to detect incidents, analyse root cause, plan and safely execute re
 
 | Capability | Description |
 |---|---|
-| 🤖 **Multi-Agent Incident Pipeline** | LangGraph-orchestrated agents collect context, plan remediation, score risk, execute safely with policy guardrails, validate outcome, and store to memory |
+| 🤖 **Multi-Agent Incident Pipeline** | LangGraph-orchestrated 5-agent workflow: Planner → Gather Data → Debugger → Executor → Reporter — with RBAC, dry-run mode, and ChromaDB memory recall |
+| 🐛 **Debug with AI** | One-click AI debugging from Incidents or the Agents page: K8s pod analysis via `/debug-pod` (LangGraph) or full general incident pipeline (AWS + K8s + GitHub) |
 | 🎬 **Real-Time Pipeline Streaming** | Animated 5-stage pipeline UI — watch AI work step-by-step: Context → Analysis → Plan → Execute → Complete |
 | 🔍 **Pre-Deployment Assessment** | Before any deploy, the AI assesses cluster state, active alarms, and past incidents → go / no-go decision |
 | 🎫 **Jira → Auto PR** | When a Jira change-request ticket is created, the AI reads it and opens a GitHub PR with file patches |
@@ -36,57 +95,85 @@ One platform to detect incidents, analyse root cause, plan and safely execute re
 
 ## Architecture
 
-```
-                         ┌─────────────────────────────────────────┐
-  API Request            │         LangGraph Orchestrator           │
-  Webhook         ──────▶│                                         │
-  Monitor Loop           │  collect_context                        │
-                         │       │  (AWS + K8s + GitHub agents     │
-                         │       │   + ChromaDB similar incidents) │
-                         │       ▼                                 │
-                         │  PlannerAgent  ──── LLMFactory          │
-                         │       │         (Claude / Groq / Ollama)│
-                         │       ▼                                 │
-                         │  DecisionAgent (risk score + approval)  │
-                         │       │                                 │
-                         │       ├── auto_remediate=true ──▶ Executor
-                         │       └── high risk / low confidence ──▶ awaiting_approval
-                         │                          │              │
-                         │                     PolicyEngine        │
-                         │                     ActionRegistry      │
-                         │                          │              │
-                         │                       Validator         │
-                         │                     (re-check health)   │
-                         │                       /       \         │
-                         │               passed           failed   │
-                         │                 │              retry / escalate
-                         │                 ▼                       │
-                         │           MemoryAgent (ChromaDB)        │
-                         └─────────────────────────────────────────┘
+### 1. LangGraph K8s Debugging Workflow — `POST /debug-pod`
 
-  Browser / API Client
-        │
-        ▼
-  Nginx (TLS + Rate Limiting)
-        │
-        ▼
-  FastAPI App (4 uvicorn workers)
-        │
-        ├── JWT Auth middleware
-        ├── Redis (rate limiting + response cache)
-        └── ChromaDB (incident memory)
+```
+  Input: { namespace, pod_name, dry_run, auto_fix }
+         │
+         ▼
+  ┌─────────────┐   ┌──────────────┐   ┌─────────────┐
+  │   Planner   │──▶│  Gather Data │──▶│   Debugger  │
+  │             │   │              │   │             │
+  │ Recall mem  │   │ Pod details  │   │ LLM reasons │
+  │ Validate    │   │ Logs (200)   │   │ failure_type│
+  │ Plan steps  │   │ K8s events   │   │ root_cause  │
+  └─────────────┘   │ Resources    │   │ severity    │
+                    └──────────────┘   └──────┬──────┘
+                                              │
+                          ┌───────────────────┴──────────────────┐
+                          │ auto_fix=true?                        │
+                          ▼                                       ▼
+                   ┌────────────┐                         ┌──────────────┐
+                   │  Executor  │────────────────────────▶│   Reporter   │
+                   │ dry_run    │                         │ Markdown     │
+                   │ RBAC check │                         │ Memory store │
+                   │ restart/   │                         │ Slack alert  │
+                   │ scale pod  │                         │ (critical)   │
+                   └────────────┘                         └──────────────┘
+```
+
+### 2. General Incident Pipeline — `POST /incidents/run`
+
+```
+  Input: { incident_id, description, severity, aws_cfg, k8s_cfg }
+         │
+         ├──▶ _collect_aws()    ─┐
+         ├──▶ _collect_k8s()    ─┼─ parallel (ThreadPoolExecutor)
+         └──▶ _collect_github() ─┘
+                    │
+                    ▼
+         AI Synthesis (Groq/Claude)
+           └── summary, root_cause, findings, actions_to_take
+                    │
+                    ▼
+         Execute Actions
+           ├── k8s_restart / k8s_scale  (requires auto_remediate=true)
+           ├── github_pr  (AI-generated file patches)
+           ├── jira_ticket
+           ├── slack_warroom  (dedicated incident channel)
+           └── opsgenie_alert
+                    │
+                    ▼
+         ChromaDB Memory  →  future incident recall
+```
+
+### 3. Full Stack
+
+```
+  Browser ──▶ Nginx (TLS + rate limiting)
+                │
+                ▼
+         FastAPI (4 workers)
+           ├── /debug-pod          LangGraph 5-agent K8s debugger
+           ├── /agent/*            Plan · Execute · Observe · Workflows
+           ├── /incidents/*        General incident pipeline
+           ├── /chat/stream        Groq-first AI chat (SSE)
+           ├── /aws/*  /k8s/*      Infra read + ops
+           ├── JWT + RBAC          viewer / developer / operator / admin
+           ├── SQLite              Per-session chat history
+           └── ChromaDB            Incident vector memory
 ```
 
 ### Core Design Principles
 
 | Layer | Responsibility |
 |---|---|
-| **Agents** | Decision / data collection units — no direct infra calls |
-| **LangGraph Graph** | Controls workflow, branching, retry logic, error propagation |
-| **LLM** | Reasoning only — PlannerAgent and analysis functions |
-| **Executor** | Performs all actions safely via ActionRegistry |
-| **PolicyEngine** | Enforces guardrails before every action (role + parameter limits) |
-| **Memory** | ChromaDB stores outcomes and informs future planning |
+| **Agents** | Specialised units: Planner, Debugger, Executor, Observer, Reporter |
+| **LangGraph** | `StateGraph` controls flow, branching, conditional edges |
+| **LLM** | Reasoning only — Debugger analysis, Planner decomposition |
+| **Tools** | `KubernetesTool`, `AWSTool`, `GitLabTool` wrap all infra calls |
+| **RBAC** | `require_operator` gate on destructive actions; dry-run mode |
+| **Memory** | ChromaDB stores past incidents; Planner recalls similar events |
 
 ---
 
@@ -101,14 +188,23 @@ app/
 │   └── runner.py         # run_pipeline() — public entry point
 │
 ├── agents/
-│   ├── base.py                    # BaseAgent ABC
-│   ├── planner/agent.py           # PlannerAgent → structured JSON plan via LLM
-│   ├── decision/agent.py          # DecisionAgent → risk score + approval gate
-│   ├── infra/aws_agent.py         # AWS context collector (read-only)
-│   ├── infra/k8s_agent.py         # K8s context collector (read-only)
-│   ├── scm/github_agent.py        # GitHub commits/PRs collector
-│   ├── memory/agent.py            # ChromaDB read (retrieve) + write (store)
-│   └── incident_pipeline.py       # v1 pipeline (backwards-compatible)
+│   ├── planner.py          # PlannerAgent — LLM task decomposition into steps
+│   ├── debugger.py         # DebuggerAgent — failure type detection + root cause analysis
+│   ├── executor.py         # ExecutorAgent — RBAC-gated action execution + dry-run mode
+│   ├── observer.py         # ObserverAgent — routes k8s/gitlab/prometheus/manual events
+│   ├── reporter.py         # ReporterAgent — Markdown report + Slack notification
+│   └── incident_pipeline.py  # General incident pipeline (AWS + K8s + GitHub + actions)
+│
+├── tools/
+│   ├── kubernetes.py       # KubernetesTool — pods, logs, events, restart, scale
+│   ├── aws.py              # AWSTool — EC2, CloudWatch, Secrets Manager, Cost
+│   └── gitlab.py           # GitLabTool — pipeline logs, retry, failed jobs
+│
+├── workflows/
+│   └── incident_workflow.py  # LangGraph StateGraph: Planner→Gather→Debugger→Executor→Reporter
+│
+├── routes/
+│   └── agentic.py          # POST /debug-pod, /agent/plan, /agent/execute, /agent/observe, /agent/workflows
 │
 ├── chat/
 │   ├── intelligence.py    # AI chat with tool use — AWS, GitHub, K8s, Jira, Slack routing
@@ -383,6 +479,115 @@ All integrations degrade gracefully — missing credentials return a structured 
 
 ---
 
+## How to Use
+
+### 1. AI Chat Assistant
+Go to **Intelligence → AI Assistant**. Type naturally — the AI reads your configured integrations and answers or takes action.
+
+**Example prompts:**
+```
+check my infra                          → full AWS + K8s + GitHub status report
+list my EC2 instances                   → shows all EC2 with state, type, region
+restart the payment-service deployment  → asks for confirmation, then restarts
+check github repos                      → lists repos + recent commits
+how much am I spending on AWS this month → cost breakdown
+```
+
+The AI selects the right tool automatically. It uses **Groq (Llama 3.3-70B)** by default — switch to Claude or GPT-4 from the provider selector. Chat history persists across page refreshes.
+
+---
+
+### 2. Run an Incident Pipeline
+Go to **Operations → Incidents**.
+
+1. Fill in **Description** — describe what's wrong (e.g. "API pods crash-looping in prod")
+2. Set **Severity** and optional **Lookback Hours**
+3. Click **Run Pipeline** — the AI collects AWS + K8s + GitHub context in parallel, synthesises root cause, and executes recommended actions
+
+Optional toggles:
+- **Auto-Remediate** — let the AI execute K8s restarts/scaling automatically (admin only)
+- **Dry Run** — see what the AI *would* do without executing anything
+- **Create Slack Channel** — auto-create a war room channel
+
+---
+
+### 3. Debug with AI (LangGraph 5-Agent Workflow)
+
+**From Incidents page:** Fill in the description → click **Debug with AI** (purple button). This navigates to the Agents page and runs a full AI debug session.
+
+**From Intelligence → AI Agents directly:**
+
+**K8s Pod Debugging:**
+1. Select target: **Kubernetes Pod**
+2. Enter namespace (e.g. `production`) and pod name (e.g. `payment-api-abc123`)
+3. Check **Dry Run** to preview, or uncheck to allow real fixes
+4. Click **Run AI Debug**
+
+The 5-agent LangGraph workflow runs:
+- **Planner** — checks memory for similar past incidents
+- **Gather Data** — fetches pod details, last 200 log lines, K8s events
+- **Debugger** — LLM identifies failure type (`CrashLoopBackOff`, `OOMKilled`, etc.), root cause, severity
+- **Executor** — optionally restarts/scales the pod (respects dry-run + RBAC)
+- **Reporter** — generates structured Markdown report, stores to memory, alerts Slack if critical
+
+**General Incident Debugging:**
+1. Select target: **General Incident (AWS + K8s + GitHub)**
+2. Describe the issue, set severity
+3. Click **Run AI Debug** — runs the full multi-source incident pipeline
+
+---
+
+### 4. Observer — Trigger Events
+In **AI Agents → Observer**, send events to route through the agent system:
+
+| Event Type | When to use |
+|---|---|
+| `manual_debug` | Manually trigger a debug session for any component |
+| `k8s_alert` | Simulate a Kubernetes alert (e.g. from Alertmanager) |
+| `prometheus_alert` | Simulate a Prometheus firing alert |
+| `gitlab_pipeline` | Simulate a failed GitLab pipeline event |
+
+**Example payload** for `k8s_alert`:
+```json
+{"namespace": "production", "pod_name": "api-server-abc123", "reason": "OOMKilled"}
+```
+
+---
+
+### 5. API Usage
+
+All endpoints require a JWT token (or `X-User` header in dev mode):
+
+```bash
+# Get token
+curl -X POST http://localhost:8000/auth/token \
+  -d "username=admin&password=yourpassword"
+
+# Debug a K8s pod
+curl -X POST http://localhost:8000/debug-pod \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"namespace":"default","pod_name":"my-app-abc123","dry_run":true,"auto_fix":false}'
+
+# Run general incident pipeline
+curl -X POST http://localhost:8000/incidents/run \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"incident_id":"INC-001","description":"High CPU on payment service","severity":"high","auto_remediate":false}'
+
+# List available workflows
+curl http://localhost:8000/agent/workflows \
+  -H "Authorization: Bearer <token>"
+
+# AI Chat
+curl -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"check my infra","session_id":"sess-123"}'
+```
+
+---
+
 ## Dashboard
 
 The main dashboard gives a full-platform overview at a glance.
@@ -427,77 +632,73 @@ Data sources:
 
 ---
 
-## Multi-Agent Pipeline (v2)
+## Unified LangGraph Workflow
 
-**`POST /v2/incident/run`** — the flagship endpoint.
+Both `POST /debug-pod` and `POST /incidents/run` now use the **same** LangGraph 5-agent workflow (`app/workflows/unified_workflow.py`). The input determines what gets collected and executed.
 
-The UI renders a live animated 5-stage pipeline as the request runs:
+### The 5 Agents
 
-```
-🔍 Collecting Context  →  🤖 AI Analysis  →  📋 Building Plan
-→  ⚡ Executing Actions  →  ✅ Pipeline Complete
-```
-
-Each stage shows a pulsing indicator while active, then snaps to ✅ done (or ⚠️ warn / ❌ error). Real results fill in when the API responds.
-
-```
-Input → collect_context → PlannerAgent → DecisionAgent
-      → Executor (policy-gated) → Validator
-      → MemoryAgent → Final Response
-```
-
-| Step | Agent / Node | What happens |
-|---|---|---|
-| **1. Context** | `AWSAgent` `K8sAgent` `GitHubAgent` | Parallel data collection + ChromaDB similar incident retrieval |
-| **2. Plan** | `PlannerAgent` + LLM | Structured JSON plan: actions, confidence, risk, root_cause |
-| **3. Decide** | `DecisionAgent` | Risk score + approval gate (no LLM call) |
-| **4. Execute** | `Executor` + `PolicyEngine` | Each action checked against `rules.json` before running |
-| **5. Validate** | `Validator` | Re-checks K8s health; triggers retry (up to 3×) or escalates |
-| **6. Memory** | `MemoryAgent` | Stores outcome + actions to ChromaDB |
-
-**Response fields:**
-
-| Field | Description |
+| Agent | Role |
 |---|---|
-| `plan` | Structured JSON plan with actions, confidence, risk, root_cause |
-| `executed_actions` | Each action's result |
-| `blocked_actions` | Actions blocked by policy with reason |
-| `validation_passed` | Post-execution health check result |
-| `requires_human_approval` | Whether the approval gate was triggered |
-| `status` | `completed` \| `escalated` \| `awaiting_approval` \| `failed` |
+| **Planner** | Validates input, searches ChromaDB for similar past incidents, plans debug steps |
+| **Gather All** | Collects K8s + AWS + GitHub data **in parallel** (ThreadPoolExecutor, 8s timeout) |
+| **Debugger** | LLM analyses all gathered data → `failure_type`, `root_cause`, `findings`, `actions_to_take` |
+| **Executor** | Executes K8s actions (restart/scale) + notifications (Jira, Slack, OpsGenie, GitHub PR) |
+| **Reporter** | Generates Markdown report, stores to ChromaDB memory, Slack alert for critical severity |
 
-**Request body:**
+### What gets collected per source
+
+| Source | What is fetched |
+|---|---|
+| **Kubernetes** | Pod describe, last 200 log lines, K8s events (filtered to pod), resource usage |
+| **AWS** | EC2 instances + state, CloudWatch alarms, logs (if `aws_cfg` provided) |
+| **GitHub** | Recent commits, open PRs |
+
+### Request — K8s Pod Debug
+
 ```json
+POST /debug-pod
+{
+  "namespace": "production",
+  "pod_name":  "payment-api-abc123",
+  "dry_run":   true,
+  "auto_fix":  false
+}
+```
+
+`dry_run=true` (default) — safe in production, shows what the AI would do without executing.
+`auto_fix=true` — executor restarts/scales the pod. Requires operator or admin role.
+
+### Request — General Incident
+
+```json
+POST /incidents/run
 {
   "incident_id":    "INC-001",
-  "description":   "API pods crash-looping in prod",
-  "severity":      "critical",
+  "description":   "High CPU on payment service, API latency spiking",
+  "severity":      "high",
   "auto_remediate": false,
-  "aws":           {"resource_type": "ecs", "resource_id": "prod-cluster"},
   "k8s":           {"namespace": "production"},
+  "aws":           {"resource_type": "ecs", "resource_id": "prod-cluster"},
   "hours":          2
 }
 ```
 
-### Policy Engine
+`auto_remediate=true` — executor runs Jira ticket, Slack war room, OpsGenie alert, GitHub PR.
 
-Actions are evaluated against `app/policies/rules.json` before execution. No Python changes needed — just edit the JSON:
+### Response fields (both endpoints)
 
-```json
-{
-  "blocked_actions": ["delete_cluster", "drop_database", "terminate_all_instances"],
-  "guardrails": {
-    "max_replicas": 20,
-    "restricted_namespaces": ["kube-system", "kube-public"]
-  }
-}
-```
-
-### Conditional Branching
-
-- **High risk / low confidence / `auto_remediate=false`** → pipeline ends at `awaiting_approval`, no actions executed
-- **Validation failed + retries < 3** → re-runs `execute` node
-- **Validation failed + retries exhausted** → `escalate` node notifies Slack + OpsGenie
+| Field | Description |
+|---|---|
+| `failure_type` | `CrashLoopBackOff` / `OOMKilled` / `HighCPU` / `General` / etc. |
+| `severity_ai` | AI-assessed severity: `critical` / `high` / `medium` / `low` |
+| `root_cause` | 2–3 sentence explanation |
+| `fix_suggestion` | Specific actionable fix with commands |
+| `findings` | List of specific observations from the data |
+| `actions_taken` | Each action's result (skipped / dry-run / success / failed) |
+| `report` | Full Markdown incident report |
+| `steps_taken` | Every step each agent took |
+| `elapsed_s` | Total wall-clock time |
 
 ---
 
@@ -647,16 +848,28 @@ Tap the **☰** hamburger button to slide the sidebar in. Tapping the overlay ou
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/chat` | viewer | Conversational DevOps AI with tool use (AWS, GitHub, K8s, Jira, Slack) |
+| `POST` | `/chat/stream` | viewer | Streaming SSE chat — used by the UI (Groq-first, persists history) |
+| `GET` | `/chat/history/{session_id}` | viewer | Load conversation history for a session |
+| `GET` | `/chat/sessions` | viewer | List all chat sessions |
 | `GET` | `/chat/action_count` | viewer | Number of actions executed this session |
 
-### Incident Pipelines
+### Unified LangGraph Workflow (AI Agents)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/debug-pod` | viewer | Unified 5-agent workflow — K8s pod debug or general incident |
+| `POST` | `/incidents/run` | developer | Same unified workflow — AWS+K8s+GitHub+actions |
+| `POST` | `/agent/plan` | viewer | Planner agent — decompose a task into steps |
+| `POST` | `/agent/execute` | operator | Executor agent — run a single action with RBAC + dry-run |
+| `POST` | `/agent/observe` | viewer | Observer — route an event to the right workflow |
+| `GET` | `/agent/workflows` | viewer | List available workflows and agents |
+
+### Incident Pipelines (legacy — still work)
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/incident/run` | developer | v1 monolithic pipeline |
-| `POST` | `/incidents/run` | developer | Alias for `/incident/run` |
 | `POST` | `/incidents/run/async` | developer | Fire-and-forget — returns job ID immediately |
-| `POST` | `/v2/incident/run` | developer | v2 LangGraph multi-agent pipeline with policy engine |
 
 ### War Room
 

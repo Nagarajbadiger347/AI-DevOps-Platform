@@ -831,6 +831,9 @@ async def chat_stream(payload: ChatPayload, auth: AuthContext = Depends(require_
                     result = _chat_inner(payload, auth.username)
                     reply = result.get("reply", "")
                     suggestions = result.get("suggestions", [])
+                    # Save assistant reply to memory so history loads correctly on refresh
+                    if reply:
+                        _am(sid, "assistant", reply)
                     loop.call_soon_threadsafe(queue.put_nowait,
                         _json.dumps({"type": "chunk", "text": reply}))
                     loop.call_soon_threadsafe(queue.put_nowait,

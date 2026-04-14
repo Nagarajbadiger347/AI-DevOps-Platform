@@ -153,6 +153,14 @@ def require_admin(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
     return auth
 
 
+def require_operator(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    if getattr(auth, "_bad_token", False):
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+    if auth.role not in ("super_admin", "admin", "operator", "developer"):
+        raise HTTPException(status_code=403, detail="Operator role or above required")
+    return auth
+
+
 def require_developer(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
     if getattr(auth, "_bad_token", False):
         raise HTTPException(status_code=401, detail="Session expired. Please log in again.")

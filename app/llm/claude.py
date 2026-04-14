@@ -109,7 +109,7 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
                 messages=messages,
                 temperature=temperature,
             )
-            return resp.content[0].text
+            return resp.content[0].text or ""
         except Exception as _ant_exc:
             _err = str(_ant_exc)
             _billing = (
@@ -139,7 +139,7 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
                 max_tokens=groq_max,
                 temperature=temperature,
             )
-            return resp.choices[0].message.content
+            return resp.choices[0].message.content or ""
         except Exception as groq_exc:
             err = str(groq_exc)
             if "rate_limit" in err.lower() or "429" in err:
