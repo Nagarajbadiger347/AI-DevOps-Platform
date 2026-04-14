@@ -189,3 +189,24 @@ def health_integrations():
     }
 
     return {"llm": llm, "github": github, "integrations": integrations}
+
+
+@router.get("/health/cache")
+def health_cache(_: AuthContext = Depends(require_viewer)):
+    """LLM response cache stats — hit rate, size, TTL."""
+    try:
+        from app.core.llm_cache import llm_cache
+        return {"cache": llm_cache.stats()}
+    except Exception as exc:
+        return {"cache": {}, "error": str(exc)}
+
+
+@router.post("/health/cache/clear")
+def health_cache_clear(_: AuthContext = Depends(require_viewer)):
+    """Clear the LLM response cache."""
+    try:
+        from app.core.llm_cache import llm_cache
+        llm_cache.clear()
+        return {"cleared": True}
+    except Exception as exc:
+        return {"cleared": False, "error": str(exc)}

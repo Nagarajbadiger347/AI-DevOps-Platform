@@ -1,8 +1,8 @@
 """
-Miscellaneous routes: LLM, correlate, metrics, grafana, secrets, audit, settings.
-Paths: /correlate, /llm/*, /metrics, /audit/log, /rate-limit/*, /settings/*, /grafana/*, /secrets/*
+Miscellaneous routes: LLM settings, correlate, metrics, grafana, secrets, audit, rate-limit.
+Paths: /audit/log, /rate-limit/status, /settings/llm, /llm/analyze, /correlate, /metrics,
+       /grafana/*, /secrets/status
 """
-from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
@@ -17,7 +17,7 @@ class LLMSettingPayload(BaseModel):
 
 @router.get("/audit/log")
 def get_audit_log_endpoint(limit: int = 50, user: str = "", action: str = "",
-                            auth: AuthContext = Depends(require_viewer)):
+                            _: AuthContext = Depends(require_viewer)):
     """Return recent audit log entries (newest first). Filter by user or action."""
     from app.core.audit import get_audit_log
     return {"entries": get_audit_log(limit=limit, user=user, action=action)}
@@ -31,7 +31,7 @@ def rate_limit_status(x_user: str = Header(default="anonymous")):
 
 
 @router.post("/settings/llm")
-def set_llm_provider(payload: LLMSettingPayload, auth: AuthContext = Depends(require_viewer)):
+def set_llm_provider(payload: LLMSettingPayload, _: AuthContext = Depends(require_viewer)):
     """Set the global LLM provider used by chat, pipeline, and all agents."""
     from app.llm.factory import set_global_provider, get_global_provider
     provider = payload.provider.lower().strip()
@@ -43,28 +43,26 @@ def set_llm_provider(payload: LLMSettingPayload, auth: AuthContext = Depends(req
 
 
 @router.get("/settings/llm")
-def get_llm_provider(auth: AuthContext = Depends(require_viewer)):
-    """Get the current global LLM provider."""
+def get_llm_provider(_: AuthContext = Depends(require_viewer)):
+    """Get the current global LLM provider and its status."""
     from app.llm.factory import get_global_provider
-    return {"provider": get_global_provider()}
-
-
-@router.get("/llm/status")
-def llm_status(auth: AuthContext = Depends(require_viewer)):
-    """Return current LLM provider status and available providers."""
     from app.llm.claude import _provider, _provider_warning
-    return {"provider": _provider, "warning": _provider_warning}
+    return {
+        "provider":         get_global_provider(),
+        "active_provider":  _provider,
+        "warning":          _provider_warning,
+    }
 
 
 @router.post("/llm/analyze")
-def llm_analyze(payload: dict, auth: AuthContext = Depends(require_viewer)):
+def llm_analyze(payload: dict, _: AuthContext = Depends(require_viewer)):
     """Run LLM analysis on arbitrary context dict."""
     from app.llm.claude import analyze_context
     return analyze_context(payload)
 
 
 @router.post("/correlate")
-def correlate_events_endpoint(events: list, auth: AuthContext = Depends(require_viewer)):
+def correlate_events_endpoint(events: list, _: AuthContext = Depends(require_viewer)):
     """Correlate a list of events and return grouped clusters."""
     from app.agents.correlator import correlate_events
     return {"correlation": correlate_events(events)}
@@ -73,30 +71,28 @@ def correlate_events_endpoint(events: list, auth: AuthContext = Depends(require_
 @router.get("/metrics")
 def prometheus_metrics():
     """Expose Prometheus-format metrics."""
-    from app.api.deps import _METRICS, _METRICS_HIST
-    lines = []
-    for k, v in _METRICS.items():
-        lines.append(f"nsops_{k} {v}")
+    from app.api.deps import _METRICS
+    lines = [f"nsops_{k} {v}" for k, v in _METRICS.items()]
     return "\n".join(lines)
 
 
 @router.get("/grafana/alerts")
-def grafana_alerts(auth: AuthContext = Depends(require_viewer)):
+def grafana_alerts(_: AuthContext = Depends(require_viewer)):
     """Firing Grafana alerts."""
     from app.integrations.grafana import get_firing_alerts
     return get_firing_alerts()
 
 
 @router.get("/grafana/dashboards")
-def grafana_dashboards(auth: AuthContext = Depends(require_viewer)):
+def grafana_dashboards(_: AuthContext = Depends(require_viewer)):
     """Grafana datasources."""
     from app.integrations.grafana import get_datasources
     return get_datasources()
 
 
 @router.get("/secrets/status")
-def secrets_status(auth: AuthContext = Depends(require_developer)):
-    """Return which secrets/env vars are configured (no values)."""
+def secrets_status(_: AuthContext = Depends(require_developer)):
+    """Return which secrets/env vars are configured (values never returned)."""
     import os
     keys = [
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY",
@@ -107,14 +103,7 @@ def secrets_status(auth: AuthContext = Depends(require_developer)):
     return {k: bool(os.getenv(k, "").strip()) for k in keys}
 
 
-@router.get("/secrets")
-def list_secrets(auth: AuthContext = Depends(require_developer)):
-    """Alias for /secrets/status."""
-    import os
-    keys = [
-        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY",
-        "GITHUB_TOKEN", "SLACK_BOT_TOKEN", "JIRA_URL", "JIRA_TOKEN",
-        "OPSGENIE_API_KEY", "AWS_ACCESS_KEY_ID", "KUBECONFIG",
-        "GRAFANA_URL", "GRAFANA_TOKEN", "GITLAB_TOKEN",
-    ]
-    return {"secrets": {k: bool(os.getenv(k, "").strip()) for k in keys}}
+# Backward-compatible alias — kept for any clients using the old path
+@router.get("/secrets", include_in_schema=False)
+def list_secrets(_: AuthContext = Depends(require_developer)):
+    return secrets_status(_)
