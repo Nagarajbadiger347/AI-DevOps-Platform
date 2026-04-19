@@ -407,7 +407,7 @@ def analyze_action_costs(
         })
     except Exception as exc:
         warnings.append(f"AWS Cost Explorer unavailable — using estimates only. ({exc})")
-        logger.warning("cost_explorer_unavailable", extra={"error": str(exc)})
+        logger.debug("cost_explorer_unavailable", extra={"error": str(exc)})
 
     # Estimate each action
     for action in actions:
@@ -539,7 +539,7 @@ def fetch_cost_dashboard(aws_cfg: dict = None) -> dict:
             "accounts": accounts,
         }
     except Exception as exc:
-        logger.warning("cost_dashboard_unavailable", extra={"error": str(exc)})
+        logger.debug("cost_dashboard_unavailable", extra={"error": str(exc)})
         return {
             "available": False,
             "error": str(exc),

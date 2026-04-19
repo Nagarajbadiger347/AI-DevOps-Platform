@@ -166,26 +166,83 @@ def _fetch_aws_context(question: str) -> str:
 
 # ── AI answer builder ──────────────────────────────────────────
 
+def _get_war_room_context(incident_id: str) -> dict:
+    """Fetch the war room context for this incident."""
+    try:
+        from app.incident.war_room_store import WAR_ROOMS
+        wr = next((w for w in WAR_ROOMS.values() if w.incident_id == incident_id), None)
+        if wr:
+            return {
+                "war_room_id":   wr.war_room_id,
+                "description":   wr.incident_description,
+                "root_cause":    wr.pipeline_state.get("root_cause", ""),
+                "summary":       wr.pipeline_state.get("summary", ""),
+                "severity":      wr.pipeline_state.get("severity", ""),
+                "status":        wr.pipeline_state.get("status", "active"),
+                "findings":      wr.pipeline_state.get("findings", []),
+                "fix_suggestion":wr.pipeline_state.get("fix_suggestion", ""),
+                "executed_actions": wr.pipeline_state.get("executed_actions") or wr.pipeline_state.get("actions_taken", []),
+                "blocked_actions":  wr.pipeline_state.get("blocked_actions", []),
+            }
+    except Exception:
+        pass
+    return {}
+
+
 def _build_answer(question: str, intents: list, data_snippets: dict, incident_id: str) -> str:
-    """Pass question + fetched data to LLM for a coherent Slack reply."""
+    """Pass question + war room context + live data to LLM for a coherent Slack reply."""
     try:
         from app.llm.claude import _llm
-        context_text = "\n\n".join(
-            f"=== {k.upper()} DATA ===\n{v}"
+
+        # Pull stored war room context (root cause, summary, actions)
+        wr_ctx = _get_war_room_context(incident_id)
+
+        # Build incident context block
+        incident_lines = [f"*Incident ID:* {incident_id}"]
+        if wr_ctx.get("description"):
+            incident_lines.append(f"*Description:* {wr_ctx['description']}")
+        if wr_ctx.get("severity"):
+            incident_lines.append(f"*Severity:* {wr_ctx['severity'].upper()}")
+        if wr_ctx.get("status"):
+            incident_lines.append(f"*Status:* {wr_ctx['status'].upper()}")
+        if wr_ctx.get("root_cause"):
+            incident_lines.append(f"*Root Cause:* {wr_ctx['root_cause']}")
+        if wr_ctx.get("summary"):
+            incident_lines.append(f"*AI Summary:* {wr_ctx['summary']}")
+        if wr_ctx.get("fix_suggestion"):
+            incident_lines.append(f"*Recommended Fix:* {wr_ctx['fix_suggestion']}")
+        executed = wr_ctx.get("executed_actions", [])
+        if executed:
+            acts = ", ".join(a.get("type", "?") for a in executed[:5])
+            incident_lines.append(f"*Actions Executed:* {acts}")
+        blocked = wr_ctx.get("blocked_actions", [])
+        if blocked:
+            blk = ", ".join(a.get("type", "?") for a in blocked[:5])
+            incident_lines.append(f"*Blocked (need approval):* {blk}")
+
+        incident_context = "\n".join(incident_lines)
+
+        # Live infra data from fetchers
+        live_data = "\n\n".join(
+            f"=== {k.upper()} ===\n{v}"
             for k, v in data_snippets.items() if v
         )
+
         system = (
-            "You are a DevOps AI assistant inside a Slack war room channel for an active incident. "
-            "Answer the engineer's question concisely using the live data provided. "
-            "Be specific — mention exact pod names, PR titles, commit SHAs, alarm names. "
-            "Use Slack mrkdwn formatting (bold with *text*, code with `code`, bullets with •). "
-            "If you don't have enough data to answer fully, say what you know and what to check next. "
-            "Keep the reply under 400 words."
+            "You are a DevOps AI assistant inside a Slack war room for an active incident. "
+            "You have access to the incident's root cause, AI analysis, and live infrastructure data. "
+            "Answer the engineer's question directly and specifically based on THIS incident's context. "
+            "Do NOT give generic advice — reference the actual incident details, root cause, and actions taken. "
+            "Use Slack mrkdwn formatting (*bold*, `code`, • bullets). "
+            "Keep the reply under 400 words. If data is missing, say what you know and what to check next."
         )
-        prompt = f"Incident: {incident_id}\n\nQuestion from engineer: {question}\n\n{context_text}"
-        return _llm(system, [{"role": "user", "content": prompt}], max_tokens=600)
+        prompt = (
+            f"=== INCIDENT CONTEXT ===\n{incident_context}\n\n"
+            f"=== LIVE INFRA DATA ===\n{live_data or 'No live data available.'}\n\n"
+            f"=== ENGINEER QUESTION ===\n{question}"
+        )
+        return _llm(system, [{"role": "user", "content": prompt}], max_tokens=700)
     except Exception as e:
-        # If LLM fails, return the raw data
         raw = "\n\n".join(f"*{k.upper()}*\n{v}" for k, v in data_snippets.items() if v)
         return raw or f"Could not process question: {e}"
 
@@ -212,6 +269,7 @@ def handle_slack_event(payload: dict) -> dict:
         return {"ok": True}
 
     channel  = event.get("channel", "")
+    user_id  = event.get("user", "")
     text     = re.sub(r"<@\w+>", "", event.get("text", "")).strip()
     thread   = event.get("thread_ts") or event.get("ts", "")
 
@@ -277,4 +335,36 @@ def handle_slack_event(payload: dict) -> dict:
     post_thread_reply(channel=channel, thread_ts=thread, text=answer)
     log.info("War room bot replied in %s (intents: %s)", channel_name, intents)
 
+    # Mirror Q&A into the in-app war room chat so UI users see Slack conversations too
+    _mirror_to_war_room(incident_id, user_id, text, answer)
+
     return {"ok": True}
+
+
+def _mirror_to_war_room(incident_id: str, slack_user: str, question: str, answer: str) -> None:
+    """Push the Slack Q&A into the matching in-app war room chat history."""
+    try:
+        from app.incident.war_room_store import WAR_ROOMS
+        from app.chat.memory import get_or_create_session, add_message
+
+        # Find the war room for this incident
+        wr = next((w for w in WAR_ROOMS.values() if w.incident_id == incident_id), None)
+        if not wr:
+            return
+
+        sid = f"war_room::{wr.war_room_id}"
+        get_or_create_session(sid)
+
+        # Add user question (tagged as from Slack)
+        add_message(sid, "user", question, metadata={
+            "source":     "slack",
+            "slack_user": slack_user,
+            "channel":    f"inc-{incident_id}",
+        })
+        # Add bot answer
+        add_message(sid, "assistant", answer, metadata={
+            "source": "slack_bot",
+        })
+        log.info("Mirrored Slack Q&A to war room %s", wr.war_room_id)
+    except Exception as exc:
+        log.warning("mirror_to_war_room failed incident=%s error=%s", incident_id, exc)

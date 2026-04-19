@@ -328,6 +328,11 @@ def _prefetch_infra(message: str, session_id: str) -> str:
 
     msg = message.lower()
 
+    # Don't fetch infra for greetings or very short casual messages
+    _greeting_kw = {"hey", "hi", "hello", "sup", "yo", "howdy", "hiya", "what's up", "whats up", "how are you"}
+    if msg.strip() in _greeting_kw or any(msg.strip() == g for g in _greeting_kw):
+        return ""
+
     # General infra check — fetch everything when user asks for overview
     general_kw = {"infra", "infrastructure", "check", "status", "overview", "health", "what's running",
                   "whats running", "show me", "my setup", "my aws", "my cloud", "everything", "all services"}
@@ -497,8 +502,52 @@ def _prefetch_infra(message: str, session_id: str) -> str:
         except Exception:
             return None
 
+    def _fetch_ec2_logs():
+        """Fetch EC2 console output (system logs) when user asks about logs/errors."""
+        log_kw = {"log", "logs", "error", "errors", "console output", "system log", "crash", "kernel", "boot", "syslog", "dmesg"}
+        if not (_AWS_OK and any(k in msg for k in log_kw)):
+            return None
+        # Extract instance IDs mentioned in the message
+        import re as _re
+        instance_ids = _re.findall(r'i-[0-9a-f]{8,17}', message)
+        if not instance_ids:
+            # Try to get from cached EC2 list
+            cached = _get_cached_ec2(session_id)
+            if cached:
+                instance_ids = [i["id"] for i in cached[:2]]
+        if not instance_ids:
+            return None
+        try:
+            from app.integrations.aws_ops import get_ec2_console_output
+            lines = []
+            for iid in instance_ids[:2]:  # limit to 2 instances
+                result = get_ec2_console_output(iid)
+                output = result.get("output", "").strip()
+                if output:
+                    # Show last 50 lines of console output
+                    tail = "\n".join(output.splitlines()[-50:])
+                    lines.append(f"EC2 Console Output ({iid}):\n{tail[:2000]}")
+                else:
+                    # Check instance state to give a useful message
+                    try:
+                        cached = _get_cached_ec2(session_id) or []
+                        inst = next((i for i in cached if i.get("id") == iid), {})
+                        state = inst.get("state", "unknown")
+                    except Exception:
+                        state = "unknown"
+                    lines.append(
+                        f"EC2 Console Output ({iid}): No output available. "
+                        f"Instance state: {state}. "
+                        + ("The instance is stopped — start it first to generate new logs. "
+                           "Check CloudWatch Logs for pre-stop log data." if state == "stopped"
+                           else "Output may not be available yet — try again after the instance boots.")
+                    )
+            return "\n\n".join(lines) if lines else None
+        except Exception:
+            return None
+
     # Run all fetches in parallel — collect results that arrive within 4s, skip the rest
-    fetchers = [_fetch_ec2, _fetch_alarms, _fetch_k8s, _fetch_ecs, _fetch_rds, _fetch_lambda, _fetch_github, _fetch_incident_memory]
+    fetchers = [_fetch_ec2, _fetch_alarms, _fetch_k8s, _fetch_ecs, _fetch_rds, _fetch_lambda, _fetch_github, _fetch_incident_memory, _fetch_ec2_logs]
     pool = _cf.ThreadPoolExecutor(max_workers=min(len(fetchers), 10))
     futures = {pool.submit(f): f for f in fetchers}
     parts = []
@@ -541,19 +590,24 @@ _SYSTEM_PROMPT = """You are **NexusOps AI** — the senior SRE assistant embedde
 
 **Infrastructure questions** → use the live data injected below. Be specific: real instance IDs, real states, real counts. Never say "I don't have access" when data is already in context.
 
-**Action requests** (restart, scale, stop, run pipeline) → confirm the exact action and target before executing. Show the equivalent CLI command so the user knows what will happen.
+**Action requests** (restart, scale, stop, start, run pipeline) → execute directly through the platform. Do NOT give AWS CLI commands — the platform can perform the action right now. Say "I'll start it now" and trigger the action. Only show a CLI command if the user explicitly asks "how do I do this manually".
 
 **Incident questions** → structure as: what broke → why → impact → fix → prevention. Use real IDs and metrics from context.
 
+**Instance stopped / no logs available** → never just say "stopped, no events" and never give a CLI command. Instead: ask the user "Should I start instance `<id>` now?" or say "I can start it — want me to?" and wait for confirmation. If they say yes, trigger `start_ec2` directly.
+
 **"check infra" / "health report" / "status"** → return a FULL report covering every section: 🖥 EC2, 🔔 CloudWatch Alarms, 🐳 ECS, 🗄 RDS, λ Lambda, ☸ Kubernetes, 🐙 GitHub — even if empty. End with a health verdict and top 3 recommended actions.
 
-**"what can you do"** → give 5 concrete examples with real-looking commands, not generic descriptions.
+**Greetings / casual messages** ("hey", "hi", "hello", "what's up") → respond briefly and naturally. Do NOT generate a status report unless the user explicitly asks for one.
+
+**"what can you do" / "tell me about this tool" / "what is this"** → respond conversationally in 3-4 short paragraphs. Lead with what the platform solves (incident response, infra automation). Give 3-4 concrete examples of real things it can do right now ("I can restart your crashed pod, start a stopped EC2 instance, or run the full incident pipeline and auto-remediate"). End with an invite to try something. Never bullet-dump the full capability list.
 
 ## Rules:
 1. **Direct.** No filler. Lead with the answer.
 2. **Specific.** Use real IDs, names, metrics from context — never placeholders like `<instance_id>`.
 3. **No unnecessary confirms.** If you already have the info, act or answer — don't ask again.
 4. **Honest.** If data is missing, say exactly what is missing and how to get it.
+8. **NEVER fabricate metrics.** If CloudWatch data, CPU percentages, response times, error rates, or any numeric metric is not present in the injected live data, say "I don't have that metric available right now" and offer to fetch it via the platform. Never invent percentages, timestamps, or trends. Fabricated data is worse than no data.
 5. **Format.** Markdown always. Code blocks for commands. Bold the critical thing in each section.
 6. **Memory-aware.** Reference conversation history. If the user asked about an instance 2 messages ago, remember it.
 7. **Audit-aware.** When actions are executed, they are logged with action_id, duration_ms, and outcome. Mention this when relevant (e.g. "this will be audited").

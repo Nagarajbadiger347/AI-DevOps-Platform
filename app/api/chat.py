@@ -58,6 +58,7 @@ def _build_catalogue():
     )
     from app.integrations.aws_ops import (
         list_ec2_instances, get_ec2_instance_info, get_ec2_status_checks,
+        get_ec2_console_output,
         start_ec2_instance, stop_ec2_instance, reboot_ec2_instance,
         list_ecs_services, get_ecs_service_detail, scale_ecs_service,
         force_new_ecs_deployment, get_stopped_ecs_tasks,
@@ -65,7 +66,7 @@ def _build_catalogue():
         list_rds_instances, get_rds_instance_detail, get_rds_events, reboot_rds_instance,
         list_cloudwatch_alarms, set_alarm_state, search_logs, get_recent_logs,
         get_cloudtrail_events, list_sqs_queues, get_sqs_queue_depth,
-        list_s3_buckets, list_dynamodb_tables,
+        list_s3_buckets, list_dynamodb_tables, get_metric,
     )
     from app.integrations.github import create_issue
     from app.integrations.slack import post_message
@@ -160,6 +161,16 @@ def _build_catalogue():
             "desc": "Get system and instance status checks for EC2",
             "params": ["instance_id"],
             "handler": lambda p: get_ec2_status_checks(p.get("instance_id", "")),
+        },
+        "get_ec2_logs": {
+            "desc": "Get EC2 instance console output / system logs",
+            "params": ["instance_id"],
+            "handler": lambda p: get_ec2_console_output(p.get("instance_id", "")),
+        },
+        "get_ec2_console_output": {
+            "desc": "Get EC2 instance console output / system logs",
+            "params": ["instance_id"],
+            "handler": lambda p: get_ec2_console_output(p.get("instance_id", "")),
         },
         "start_ec2": {
             "desc": "Start a stopped EC2 instance",
@@ -260,6 +271,17 @@ def _build_catalogue():
             "desc": "Get recent log events from a CloudWatch log group",
             "params": ["log_group", "minutes"],
             "handler": lambda p: get_recent_logs(p["log_group"], int(p.get("minutes", 30))),
+        },
+        "get_cloudwatch_metric": {
+            "desc": "Fetch CloudWatch metric datapoints (CPU, memory, network, etc.) for any AWS resource",
+            "params": ["namespace", "metric_name", "dimensions", "hours", "stat"],
+            "handler": lambda p: get_metric(
+                namespace   = p.get("namespace", "AWS/EC2"),
+                metric_name = p.get("metric_name", "CPUUtilization"),
+                dimensions  = p.get("dimensions", []),
+                hours       = int(p.get("hours", 24)),
+                stat        = p.get("stat", "Average"),
+            ),
         },
         "get_cloudtrail": {
             "desc": "Get recent CloudTrail API events",
@@ -420,6 +442,7 @@ RDS:
 - reboot_rds: db_instance_id
 
 CLOUDWATCH / LOGS:
+- get_cloudwatch_metric: namespace, metric_name, dimensions (list of {Name,Value}), hours (optional int, default 24), stat (optional: Average/Maximum/Minimum)
 - get_alarms: (no params)
 - get_firing_alarms: (no params)
 - set_alarm_state: alarm_name, state (OK/ALARM/INSUFFICIENT_DATA), reason
@@ -454,12 +477,59 @@ Rules:
 - COST QUERIES: If the user asks "how much does X cost", always use estimate_cost action
 - If a required param is missing and cannot be inferred, output {"intent": "question"} instead
 - GENERAL QUERIES: Phrases like "check my infra", "check infrastructure", "show my setup", "what's running", "how is my infra", "infrastructure status", "check health" are QUESTIONS not actions — output {"intent": "question"}
+- EXPLORATORY / INFORMATIONAL: Phrases like "explore", "understand", "explain", "how does X work", "tell me about", "learn about", "walk me through", "overview of" are always QUESTIONS — never map to an action even if the topic is a pipeline or runnable operation
+- EC2 DETAIL QUERIES: Phrases like "tell me details", "show details", "instance details", "more info", "tell me about the instance", "what is the instance", "describe the instance" → use get_ec2_info with the instance_id from context
+- EC2 STATUS QUERIES: Phrases like "instance status", "health check", "status checks" → use get_ec2_status with instance_id from context
+- EC2 LOG QUERIES: Phrases like "show logs", "check logs", "console output", "system logs", "error logs" → use get_ec2_logs with instance_id from context
 - Output ONLY valid JSON, no markdown, nothing else"""
+
+
+def _rule_based_intent(message: str, conv_context: str = "") -> dict | None:
+    """Fast rule-based intent detection for common patterns — runs before LLM to avoid misclassification."""
+    import re
+    msg = message.lower().strip()
+
+    # Extract instance ID from message or conversation context
+    iid_match = re.search(r'i-[0-9a-f]{8,17}', message) or re.search(r'i-[0-9a-f]{8,17}', conv_context)
+    iid = iid_match.group(0) if iid_match else ""
+
+    # Informational / exploratory queries — always questions, never actions
+    info_kw = ["explore", "understand", "explain", "how does", "how do", "what is", "what are",
+               "tell me about", "learn about", "show me how", "walk me through", "how can i",
+               "how to", "what happens", "overview of", "explain the", "describe the pipeline"]
+    if any(k in msg for k in info_kw):
+        return {"intent": "question"}
+
+    # EC2 detail queries
+    detail_kw = ["details", "detail", "describe", "tell me about", "more info", "more information",
+                 "full info", "show info", "instance info", "what is the instance", "about the instance",
+                 "about this instance", "about that instance"]
+    if any(k in msg for k in detail_kw) and ("instance" in msg or iid):
+        return {"intent": "action", "action": "get_ec2_info", "params": {"instance_id": iid}}
+
+    # EC2 status/health checks
+    status_kw = ["status check", "health check", "instance health", "system check", "status checks"]
+    if any(k in msg for k in status_kw) and ("instance" in msg or iid):
+        return {"intent": "action", "action": "get_ec2_status", "params": {"instance_id": iid}}
+
+    # EC2 log queries
+    log_kw = ["system log", "console output", "check log", "show log", "get log", "error log",
+              "instance log", "boot log", "kernel log"]
+    if any(k in msg for k in log_kw) and ("instance" in msg or iid):
+        return {"intent": "action", "action": "get_ec2_logs", "params": {"instance_id": iid}}
+
+    return None
 
 
 def _detect_intent(message: str, force_provider: str = "", conv_context: str = "") -> dict:
     import json as _json
     from app.llm.claude import _llm, _extract_json
+
+    # Try rule-based first — faster and more reliable for known patterns
+    rule = _rule_based_intent(message, conv_context)
+    if rule:
+        return rule
+
     content = message
     if conv_context:
         content = (
@@ -518,23 +588,36 @@ def _build_action_reply(action_name: str, user_msg: str, action_result: dict,
     succeeded = action_result.get("success", False) if isinstance(action_result, dict) else True
     result_json = _j.dumps(action_result, default=str, indent=2)
     ACTION_REPLY_SYSTEM = (
-        "You are a DevOps assistant. The user asked you to perform an operation. "
-        "The ACTUAL result from executing that operation is shown below as JSON — use ONLY the values in it. "
-        "RESPONSE LENGTH: "
-        "If success=true and the result is simple: 1-2 sentences confirming what happened using real values. "
-        "If success=true and the result contains a list: present it in a clean readable format. "
-        "If success=false or there is an error key: state it failed, quote the exact error message. "
-        "FORMATTING: NEVER show raw JSON. Translate everything to natural English. "
-        "Use **bold** for resource names and states. "
-        "Use \u2705 for success, \u274c for failure, \u26a0\ufe0f for warnings. "
-        "NEVER claim success if success=false. NEVER fabricate values."
+        "You are a senior SRE assistant. The user asked you to perform an operation and you executed it. "
+        "The ACTUAL result is shown as JSON below — use ONLY those values, never fabricate. "
+        "\n\n"
+        "FORMAT RULES:\n"
+        "- NEVER show raw JSON or field names like 'instance_id'. Translate to natural English.\n"
+        "- Use **bold** for resource IDs, states, and key values.\n"
+        "- Use ✅ for success, ❌ for failure, ⚠️ for warnings.\n"
+        "- NEVER claim success if success=false.\n"
+        "\n"
+        "CONTENT RULES by operation type:\n"
+        "- EC2 instance details (get_ec2_info, get_ec2_status): Show a structured summary with sections: "
+        "Instance ID, Name, Type, State, Region/AZ, Private/Public IP, Security Groups, Launch Time, "
+        "CPU credits if available, status checks (system + instance). End with a one-line health assessment "
+        "and suggest next action if state is stopped/degraded.\n"
+        "- EC2 console output / logs: Extract and highlight any ERROR, WARN, kernel panic, OOM killer, "
+        "or failed service lines. Summarise what went wrong. If no errors found, say so clearly.\n"
+        "- start/stop/reboot EC2: Confirm new state, show previous→new transition, mention it is audited.\n"
+        "- List operations (list_ec2, list_rds, etc.): Show a clean table or bullet list with key fields. "
+        "End with a count summary.\n"
+        "- CloudWatch alarms/logs: Highlight firing alarms in red (❌), OK in green (✅). "
+        "Show alarm name, metric, threshold, current value.\n"
+        "- Errors: State what failed, quote the exact error, suggest what to check next.\n"
+        "Keep responses concise but complete — no padding, no filler sentences."
     )
     try:
         return _llm(
             ACTION_REPLY_SYSTEM,
             [{"role": "user", "content":
                 f"User asked: {user_msg}\n\nOperation: {action_name}\nResult:\n{result_json}"}],
-            max_tokens=600,
+            max_tokens=900,
             force_provider=force_prov,
         )
     except Exception:
@@ -616,7 +699,8 @@ def _chat_inner(payload: ChatPayload, x_user: str):
             action_def  = catalogue.get(action_name)
 
             # EC2 instance ID validation
-            if action_name in ("start_ec2", "stop_ec2", "reboot_ec2"):
+            if action_name in ("start_ec2", "stop_ec2", "reboot_ec2",
+                               "get_ec2_info", "get_ec2_status", "get_ec2_logs", "get_ec2_console_output"):
                 raw_iid = params.get("instance_id", "")
                 if not raw_iid or not str(raw_iid).startswith("i-"):
                     from app.chat.intelligence import _ec2_session_cache

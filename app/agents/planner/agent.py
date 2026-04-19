@@ -118,6 +118,7 @@ Allowed action types — use ONLY types matching available infrastructure:
   Always available:
     investigate     → {{"type":"investigate","description":"...","target":"..."}} — use ONLY when action type unknown
     slack_notify    → {{"type":"slack_notify","channel":"#incidents","message":"...","description":"..."}}
+    slack_warroom   → {{"type":"slack_warroom","incident_id":"...","description":"...","severity":"..."}} — create a war room for coordination
     create_jira     → {{"type":"create_jira","summary":"...","description":"..."}}
     opsgenie_alert  → {{"type":"opsgenie_alert","message":"...","alias":"...","description":"..."}}
 """
@@ -308,6 +309,13 @@ class PlannerAgent(BaseAgent):
 
                 # Hard-filter: remove actions for unavailable OR irrelevant infrastructure
                 plan["actions"] = _clean_actions(plan.get("actions", []), aws_ok, k8s_ok, classification)
+
+                # Enrich slack_warroom actions with incident context from state
+                for a in plan.get("actions", []):
+                    if a.get("type") == "slack_warroom":
+                        a.setdefault("incident_id", state.get("incident_id", "unknown"))
+                        a.setdefault("severity", state.get("severity", "medium"))
+                        a.setdefault("description", state.get("description", ""))
 
                 # Strip fabricated identifiers from data_gaps
                 plan = _strip_fabricated(plan)

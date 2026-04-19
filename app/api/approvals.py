@@ -114,7 +114,17 @@ def reject_approval_endpoint(correlation_id: str, req: ApprovalDecision, auth: A
     try:
         from app.incident.approval import reject_approval
         result = reject_approval(correlation_id, req.reason or "Rejected by user", auth.username)
-        _PENDING_PIPELINE_STATES.pop(correlation_id, None)
+
+        # Update the incident result cache so the UI reflects the rejection immediately
+        saved_state = _PENDING_PIPELINE_STATES.pop(correlation_id, None)
+        if saved_state:
+            incident_id = saved_state.get("incident_id", "")
+            if incident_id:
+                saved_state["status"]      = "rejected"
+                saved_state["rejected_by"] = auth.username
+                saved_state["reject_reason"] = req.reason or "Rejected by user"
+                _cache_result(incident_id, saved_state)
+
         from app.core.audit import audit_log as _al
         _al(user=auth.username, action="approval_rejected",
             params={"correlation_id": correlation_id, "reason": req.reason or "Rejected by user",
@@ -186,10 +196,36 @@ def resume_approved_pipeline(
         resume_state["status"]       = "completed"
         resume_state["completed_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
         resume_state["resumed_by"]   = auth.username
+        resume_state["approved_by"]  = auth.username
     except Exception as exc:
         resume_state["status"] = "failed"
         resume_state["errors"] = resume_state.get("errors", []) + [str(exc)]
 
     _PENDING_PIPELINE_STATES.pop(correlation_id, None)
     _cache_result(resume_state.get("incident_id", ""), resume_state)
+
+    # Auto-create war room after successful resume
+    if resume_state.get("status") == "completed":
+        try:
+            from app.incident.war_room_store import create as _create_war_room
+            incident_id = resume_state.get("incident_id", "unknown")
+            plan = resume_state.get("plan") or {}
+            _create_war_room(
+                incident_id    = incident_id,
+                description    = resume_state.get("description", ""),
+                pipeline_state = {
+                    "root_cause":    plan.get("root_cause", ""),
+                    "summary":       plan.get("summary", ""),
+                    "severity":      resume_state.get("severity", "medium"),
+                    "status":        "active",
+                    "actions_taken": resume_state.get("executed_actions", []),
+                    "approved_by":   auth.username,
+                },
+                slack_channel  = (resume_state.get("metadata") or {}).get("slack_channel", ""),
+            )
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("auto_warroom_failed incident=%s error=%s",
+                                                resume_state.get("incident_id"), exc)
+
     return resume_state

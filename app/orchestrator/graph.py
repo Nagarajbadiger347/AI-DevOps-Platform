@@ -19,6 +19,7 @@ Design rules:
 """
 from __future__ import annotations
 
+import contextvars
 import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,7 +42,6 @@ logger = get_logger(__name__)
 _MAX_RETRIES          = 3
 _MIN_CONFIDENCE       = 0.3    # plans below this confidence → escalate immediately
 _BACKOFF_BASE         = 2.0    # retry delays: 2s, 4s, 8s
-_CONTEXT_TIMEOUT_SECS = 10     # per-collector timeout — pipeline continues with partial data after this
 _APPROVAL_WINDOW_SECS = 1800   # 30-minute approval deadline
 
 
@@ -76,8 +76,12 @@ def collect_context(state: PipelineState) -> PipelineState:
     results: dict = {}
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(fn): name for name, fn in tasks.items()}
-        for future in as_completed(futures, timeout=_CONTEXT_TIMEOUT_SECS):
+        # Each thread gets its own copy of the context so trace_id/incident_id propagate correctly
+        futures = {
+            pool.submit(contextvars.copy_context().run, fn): name
+            for name, fn in tasks.items()
+        }
+        for future in as_completed(futures):
             name = futures[future]
             try:
                 results[name] = future.result()

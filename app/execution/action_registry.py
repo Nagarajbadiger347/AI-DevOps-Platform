@@ -140,6 +140,33 @@ def _opsgenie_alert(action: dict) -> dict:
     )
 
 
+def _slack_warroom(action: dict) -> dict:
+    """Create a war room in the platform and optionally a Slack channel."""
+    incident_id = action.get("incident_id") or action.get("target") or "unknown"
+    description = action.get("description") or action.get("title") or ""
+    try:
+        from app.incident.war_room_store import create as _wr_create
+        war_room = _wr_create(
+            incident_id=incident_id,
+            description=description,
+            pipeline_state={
+                "root_cause": action.get("root_cause", ""),
+                "severity":   action.get("severity", "medium"),
+                "status":     "active",
+                "summary":    description,
+            },
+            slack_channel=action.get("channel", ""),
+        )
+        return {
+            "success":     True,
+            "war_room_id": war_room.war_room_id,
+            "incident_id": incident_id,
+            "action":      f"War room created for {incident_id}",
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
 # ── Registry ────────────────────────────────────────────────────────────────
 
 ACTION_REGISTRY: dict[str, Callable[[dict], dict]] = {
@@ -164,4 +191,5 @@ ACTION_REGISTRY: dict[str, Callable[[dict], dict]] = {
     "slack_notify":   _slack_notify,
     "create_pr":      _create_pr,
     "opsgenie_alert": _opsgenie_alert,
+    "slack_warroom":  _slack_warroom,
 }

@@ -134,6 +134,24 @@ async def ask_war_room_ai(war_room_id: str, req: WarRoomQuestion, auth: AuthCont
         return {"answer": f"War room AI unavailable: {e}", "war_room_id": war_room_id}
 
 
+@router.get("/warroom/{war_room_id}/history")
+def get_war_room_history(war_room_id: str, auth: AuthContext = Depends(require_viewer)):
+    """Return full chat history for a war room, including messages mirrored from Slack."""
+    if war_room_id not in _WAR_ROOMS:
+        raise HTTPException(status_code=404, detail=f"War room {war_room_id} not found")
+    try:
+        from app.chat.memory import get_history
+        raw = get_history(f"war_room::{war_room_id}", max_messages=200) or []
+        messages = [
+            {"role": m.role, "content": m.content,
+             "metadata": m.metadata or {}, "ts": m.timestamp}
+            for m in raw
+        ]
+        return {"war_room_id": war_room_id, "history": messages or []}
+    except Exception as exc:
+        return {"war_room_id": war_room_id, "history": [], "error": str(exc)}
+
+
 @router.get("/warroom/active")
 def list_active_war_rooms(auth: AuthContext = Depends(require_viewer)):
     return {"war_rooms": [

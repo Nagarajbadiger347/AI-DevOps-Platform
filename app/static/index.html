@@ -1457,7 +1457,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
               <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
                 <div style="font-weight:600;margin-bottom:3px">&#128203; AWS Pricing Calculator</div>
                 <div class="text-muted">Official AWS tool to model full architecture costs before deploying.</div>
-                <a href="https://calculator.aws/pricing/2/home" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Open &#8599;</a>
+                <a href="https://calculator.aws" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Open &#8599;</a>
               </div>
             </div>
           </div>
@@ -1613,7 +1613,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
                 <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
                   <div style="font-weight:600;margin-bottom:4px;color:var(--text)">&#128203; AWS Pricing Calculator</div>
                   <div class="text-muted">Official AWS tool to estimate full architecture costs before deploying.</div>
-                  <a href="https://calculator.aws/pricing/2/home" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Open Calculator &#8599;</a>
+                  <a href="https://calculator.aws" target="_blank" rel="noopener" style="color:var(--cyan);font-size:.9em">Open Calculator &#8599;</a>
                 </div>
                 <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
                   <div style="font-weight:600;margin-bottom:4px;color:var(--text)">&#128269; AWS Cost Explorer</div>
@@ -2437,10 +2437,10 @@ const App = {
       // Restore saved provider to server on page load
       const saved=localStorage.getItem('nexusops_llm')||'';
       if(saved) this.api('POST','/settings/llm',{provider:saved}).catch(()=>{});
-      const r=await this.api('GET','/llm/status');
+      const r=await this.api('GET','/settings/llm');
       if(!r||!r.ok) return;
       const d=await r.json();
-      const active=d.active||'';
+      const active=d.active_provider||d.provider||'';
       // If user has no saved preference OR saved Groq but Claude is now available, auto-upgrade
       if(!saved || (saved==='groq' && active==='anthropic')){
         this.setGlobalLLM('');  // blank = Auto (best available)
@@ -2448,17 +2448,14 @@ const App = {
       // Show a badge on the selector indicating active provider
       const sel=document.getElementById('global-llm-select');
       if(sel){
-        const groqUnavail=d.providers&&d.providers.find(p=>p.name==='groq'&&!p.available);
-        const claudeAvail=d.providers&&d.providers.find(p=>p.name==='anthropic'&&p.available);
-        if(active==='anthropic'||claudeAvail){
+        if(active==='anthropic'||active==='claude'){
           sel.style.color='#a3e635';  // green = Claude active
         } else if(active==='groq'){
           sel.style.color='#f59e0b';  // amber = Groq (may hit limits)
         }
       }
       // Warn if Groq is the only available provider (prone to 100k TPD exhaustion)
-      const claudeAvail=d.providers&&d.providers.find(p=>p.name==='anthropic'&&p.available);
-      if(active==='groq'&&!claudeAvail){
+      if(active==='groq'){
         const existing=document.getElementById('llm-warn-banner');
         if(!existing){
           const bar=document.createElement('div');
@@ -2927,7 +2924,7 @@ const App = {
     const el=document.getElementById('dash-llm-status');
     if(!el)return;
     try{
-      const r=await this.api('GET','/llm/status');
+      const r=await this.api('GET','/settings/llm');
       if(!r||!r.ok){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">LLM status unavailable</div>';return;}
       const d=await r.json();
       const active=d.active_provider||d.provider||'unknown';
@@ -3350,7 +3347,7 @@ const App = {
     const executedActions=d.executed_actions||[];
     const blockedActions=d.blocked_actions||[];
     const status=d.status||'completed';
-    const statusCls=status==='completed'?'badge-green':status==='awaiting_approval'?'badge-amber':status==='failed'?'badge-red':'badge-cyan';
+    const statusCls=status==='completed'?'badge-green':status==='awaiting_approval'?'badge-amber':status==='failed'||status==='rejected'?'badge-red':'badge-cyan';
     const planActions=plan.actions||[];
 
     // Merge plan actions with execution results
@@ -3452,6 +3449,7 @@ const App = {
             :`<div class="step-reason" style="color:#fbbf24;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.18);border-radius:6px;padding:4px 8px;font-size:.78em">&#9888; Policy: ${blockReason}</div>`
           ):''}
           ${execResultHtml}
+          ${isExec&&d.approved_by?`<div style="margin-top:6px;font-size:.75em;color:var(--muted)">&#10003; Approved by <b style="color:#4ade80">${d.approved_by}</b></div>`:''}
           ${approvalBtn}
         </div>
       </li>`;
@@ -3468,7 +3466,7 @@ const App = {
         <span class="badge ${statusCls}">${status.replace(/_/g,' ')}</span>
         <span class="badge ${riskCls}">${risk} risk</span>
         ${isDry?'<span class="badge badge-cyan">&#128065; DRY RUN</span>':''}
-        ${d.requires_human_approval?'<span class="badge badge-amber">&#9888; Awaiting Approval</span>':''}
+        ${d.requires_human_approval&&status!=='rejected'?'<span class="badge badge-amber">&#9888; Awaiting Approval</span>':''}
         ${traceId?`<span title="Trace ID: ${traceId}" style="font-size:.68em;color:var(--muted);font-family:monospace;margin-left:4px;cursor:default" onclick="navigator.clipboard&&navigator.clipboard.writeText('${traceId}')">#${traceId.slice(0,8)}</span>`:''}
         ${elapsedLabel}
       </div>
@@ -4376,10 +4374,11 @@ const App = {
     const r=await this.api('DELETE',`/incidents/${encodeURIComponent(incidentId)}`);
     if(r&&r.ok){
       this.toast(`Incident "${incidentId}" deleted`,'success');
-      // Remove from in-memory item list
+      // Remove from in-memory list immediately for instant feedback
       this._incidentItems=this._incidentItems.filter(i=>i._id!==incidentId);
-      // Re-render the list from updated items
       this.filterIncidents();
+      // Reload from server so stats (Total, Active, Awaiting) update correctly
+      this.loadIncidents();
       // Clear result panel if it's showing this incident
       const resultEl=document.getElementById('inc-result');
       if(resultEl&&resultEl.textContent.includes(incidentId))resultEl.innerHTML='';
@@ -4641,6 +4640,8 @@ const App = {
     this.wrTab('ai',document.getElementById('wrt-ai'));
     if(slackChannel)this.refreshSlackHistory();
     this._loadWarRoomContext();
+    // Load full chat history (includes mirrored Slack Q&A)
+    this.loadWarRoomHistory(warRoomId);
   },
 
   wrQuickPrompt(text){
@@ -4832,19 +4833,41 @@ const App = {
     }catch(e){this.appendWarRoomMsg('assistant','Error: '+e.message);}
   },
 
-  appendWarRoomMsg(role,text){
+  appendWarRoomMsg(role, text, meta={}){
     if(text==null||text==='')return;
     text=String(text);
     const msgs=document.getElementById('warroom-messages');
     if(role==='typing'){const el=document.createElement('div');el.className='typing-bubble';el.style.cssText='font-size:.8em;color:var(--muted);padding:6px 0';el.textContent='AI is thinking...';msgs.appendChild(el);msgs.scrollTop=msgs.scrollHeight;return;}
     if(msgs.querySelector('.empty-state')) msgs.innerHTML='';
+    const fromSlack = meta.source==='slack'||meta.source==='slack_bot';
+    const slackBadge = fromSlack?'<span style="margin-left:6px;font-size:.68em;padding:1px 5px;background:rgba(74,144,226,.15);border:1px solid rgba(74,144,226,.3);border-radius:4px;color:#4a90e2">via Slack</span>':'';
+    const sender = role==='user'
+      ? (meta.slack_user ? `@${meta.slack_user}` : this.username)
+      : 'NsOps AI';
     const el=document.createElement('div');
     el.className='chat-row '+(role==='user'?'user':'');
     const bubbleContent=role==='user'
       ?'<div class="chat-bubble user"><div>'+text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</div></div>'
       :'<div class="chat-bubble assistant" style="max-width:100%">'+this._md(text)+'</div>';
-    el.innerHTML='<div class="chat-body">'+bubbleContent+'<div class="chat-meta">'+(role==='user'?this.username:'NsOps AI')+' &bull; '+new Date().toLocaleTimeString()+'</div></div>';
+    el.innerHTML='<div class="chat-body">'+bubbleContent+'<div class="chat-meta">'+sender+slackBadge+' &bull; '+(meta.ts?new Date(meta.ts).toLocaleTimeString():new Date().toLocaleTimeString())+'</div></div>';
     msgs.appendChild(el);msgs.scrollTop=msgs.scrollHeight;
+  },
+
+  async loadWarRoomHistory(warRoomId){
+    try{
+      const r=await this.api('GET','/warroom/'+warRoomId+'/history');
+      if(!r||!r.ok)return;
+      const d=await r.json();
+      const msgs=document.getElementById('warroom-messages');
+      if(!msgs)return;
+      const history=d.history||[];
+      if(!history.length)return;
+      msgs.innerHTML='';
+      history.forEach(m=>{
+        if(m.role==='system')return; // skip system seed messages
+        this.appendWarRoomMsg(m.role,m.content,m.metadata||{});
+      });
+    }catch(e){}
   },
 
   async suggestNextSteps(){
@@ -5038,7 +5061,7 @@ const App = {
         <!-- Requested by banner -->
         <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin-bottom:14px;font-size:.83em;display:flex;align-items:center;gap:8px">
           <span style="color:var(--muted)">&#128100; Raised by:</span>
-          <span style="font-weight:700;color:var(--purple)">${ap.requested_by||'pipeline (automatic)'}</span>
+          <span style="font-weight:700;color:var(--purple)">${(!ap.requested_by||ap.requested_by==='system'||ap.requested_by==='pipeline')?'pipeline (automatic)':ap.requested_by}</span>
           ${ap.created_at?`<span style="margin-left:auto;color:var(--muted);font-size:.9em">${new Date(ap.created_at).toLocaleString()}</span>`:''}
         </div>
         <!-- Plan summary -->
@@ -5340,7 +5363,15 @@ const App = {
       const r=await this.api('GET','/cost/dashboard');
       if(!r||!r.ok){el.innerHTML='<div style="padding:12px;color:var(--muted);font-size:.83em">&#9888; Cost Explorer unavailable — check AWS credentials and that Cost Explorer is enabled.</div>';return;}
       const d=await r.json();
-      if(!d.available){el.innerHTML=`<div style="padding:12px;color:var(--amber);font-size:.83em">&#9888; ${d.error||'Cost Explorer unavailable'}</div>`;return;}
+      if(!d.available){
+        const isCEError=d.error&&d.error.includes('cost explorer');
+        el.innerHTML=`<div style="padding:14px 16px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.2);border-radius:8px;font-size:.83em;color:var(--amber)">
+          &#9888; <b>AWS Cost Explorer not enabled</b><br>
+          <span style="color:var(--muted);display:block;margin-top:4px">To enable: AWS Console → Billing &amp; Cost Management → Cost Explorer → <b>Enable Cost Explorer</b><br>
+          Note: It may take up to 24 hours for data to appear after enabling.</span>
+        </div>`;
+        return;
+      }
       const accounts=d.accounts||[];
       const total=accounts.reduce((s,a)=>s+a.amount_usd,0);
       const days=30;
@@ -5397,7 +5428,13 @@ const App = {
       const r=await this.api('GET','/cost/dashboard');
       if(!r||!r.ok){listEl.innerHTML='<div style="padding:12px;color:var(--muted);font-size:.83em">&#9888; Cost Explorer unavailable. See setup guide →</div>';return;}
       const d=await r.json();
-      if(!d.available){listEl.innerHTML=`<div style="padding:12px;color:var(--amber);font-size:.83em">&#9888; ${d.error||'Cost Explorer unavailable'}</div>`;return;}
+      if(!d.available){
+        listEl.innerHTML=`<div style="padding:14px 16px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.2);border-radius:8px;font-size:.83em;color:var(--amber)">
+          &#9888; <b>AWS Cost Explorer not enabled</b><br>
+          <span style="color:var(--muted);display:block;margin-top:4px">Enable at: AWS Console → Billing &amp; Cost Management → Cost Explorer → <b>Enable Cost Explorer</b></span>
+        </div>`;
+        return;
+      }
       const accounts=d.accounts||[];
       const total=accounts.reduce((s,a)=>s+a.amount_usd,0);
       if(!accounts.length){listEl.innerHTML='<div class="empty-state"><p>No linked accounts found — single-account or no spend data.</p></div>';return;}
@@ -6418,12 +6455,160 @@ what failed pipelines do I have in GitLab?
         let ok=false;
         if(i.key==='github') ok=!!(d.github&&d.github.repo_valid);
         else ok=!!(integs[i.key]&&integs[i.key].configured);
+        const statusDot=`<span class="status-dot ${ok?'dot-green':'dot-gray'}"></span>`;
+        const statusText=ok?'<span style="color:#4ade80">Configured</span>':'<span style="color:var(--muted)">Not configured</span>';
+        const testBtn=ok?`<button class="btn btn-ghost btn-sm" style="font-size:.74em" onclick="App.testIntegration('${i.key}')">&#128268; Test</button>`:'';
+        const configBtn=`<button class="btn btn-ghost btn-sm" style="font-size:.74em;color:#a78bfa" onclick="App.configureIntegration('${i.key}','${i.name}',${ok})">&#9881; ${ok?'Reconfigure':'Configure'}</button>`;
         return`<div class="integration-card">
-          <div class="int-header"><div class="int-icon" style="background:${i.color}22;color:${i.color}">${i.icon}</div><div><div class="int-name">${i.name}</div></div></div>
-          <div class="int-status"><span class="status-dot ${ok?'dot-green':'dot-gray'}"></span>${ok?'Configured':'Not configured'}</div>
+          <div class="int-header"><div class="int-icon" style="background:${i.color}22;color:${i.color};font-size:1.4em;width:38px;height:38px;display:flex;align-items:center;justify-content:center;border-radius:10px">${i.icon}</div>
+            <div style="flex:1"><div class="int-name" style="font-weight:700">${i.name}</div>
+            <div class="int-status" style="margin-top:2px">${statusDot}${statusText}</div></div>
+          </div>
+          <div style="display:flex;gap:6px;margin-top:10px">${testBtn}${configBtn}</div>
         </div>`;
       }).join('');
     }catch(e){el.innerHTML='<div class="empty-state" style="grid-column:1/-1"><p>Could not load integrations</p></div>';}
+  },
+
+  async testIntegration(key){
+    this.toast(`Testing ${key} connection...`,'info');
+    try{
+      const r=await this.api('POST',`/integrations/test/${key}`);
+      if(!r){this.toast(`${key} test failed`,'error');return;}
+      const d=await r.json();
+      if(d.ok) this.toast(`✅ ${key} OK — ${d.detail||'connected'}`, 'success');
+      else this.toast(`⚠️ ${key}: ${d.detail||'check credentials'}`, 'warning');
+    }catch(e){this.toast(`${key} test error: ${e.message}`,'error');}
+  },
+
+  async configureIntegration(key, name, isConfigured){
+    const role=localStorage.getItem('nexusops_role')||'viewer';
+    if(!['admin','super_admin'].includes(role)){
+      this._requireRole(`Configure ${name}`);
+      return;
+    }
+    // Fetch fields from backend
+    let fields=[];
+    try{
+      const r=await this.api('GET',`/integrations/fields/${key}`);
+      if(r&&r.ok){const d=await r.json();fields=d.fields||[];}
+    }catch(e){}
+    if(!fields.length){
+      this._showInfoModal(`Configure ${name}`,`<div style="text-align:center;padding:20px 0;color:var(--muted)">
+        <div style="font-size:2em;margin-bottom:12px">⚙️</div>
+        <p style="margin-bottom:8px">This integration is configured via environment variables.</p>
+        <p style="font-size:.82em">Add the required keys to your <code>.env</code> file and restart the server.</p>
+      </div>`);
+      return;
+    }
+
+    const statusBadge=isConfigured
+      ?'<span style="color:#4ade80;font-size:.82em">✅ Currently configured</span>'
+      :'<span style="color:#f87171;font-size:.82em">❌ Not yet configured</span>';
+
+    const _fieldMeta={
+      KUBECONFIG:{label:'Kubeconfig Path',hint:'Path to your kubeconfig file (e.g. /home/user/.kube/config)',type:'text',placeholder:'/home/user/.kube/config'},
+      K8S_NAMESPACE:{label:'Default Namespace',hint:'Default namespace to use (leave blank for "default")',type:'text',placeholder:'default'},
+      K8S_CONTEXT:{label:'Kube Context',hint:'Context name from kubeconfig (leave blank to use current context)',type:'text',placeholder:'my-cluster'},
+      SLACK_BOT_TOKEN:{label:'Bot Token',hint:'Starts with xoxb-',type:'password'},
+      SLACK_SIGNING_SECRET:{label:'Signing Secret',hint:'From Slack app settings',type:'password'},
+      SLACK_BOT_USER_ID:{label:'Bot User ID',hint:'Starts with U (e.g. U012AB3CD)',type:'text'},
+      GITHUB_TOKEN:{label:'Personal Access Token',hint:'Needs repo, read:org scopes',type:'password'},
+      GITHUB_REPO:{label:'Repository',hint:'Format: owner/repo (e.g. acme/backend)',type:'text',placeholder:'owner/repo'},
+      AWS_ACCESS_KEY_ID:{label:'Access Key ID',hint:'From IAM → Security credentials',type:'text'},
+      AWS_SECRET_ACCESS_KEY:{label:'Secret Access Key',hint:'Shown once when key is created',type:'password'},
+      AWS_DEFAULT_REGION:{label:'Default Region',hint:'e.g. us-east-1, ap-southeast-1',type:'text',placeholder:'us-east-1'},
+      GRAFANA_URL:{label:'Grafana URL',hint:'e.g. http://localhost:3000',type:'text',placeholder:'http://localhost:3000'},
+      GRAFANA_TOKEN:{label:'Service Account Token',hint:'From Grafana → Administration → Service accounts',type:'password'},
+      GROQ_API_KEY:{label:'API Key',hint:'From console.groq.com → API Keys',type:'password'},
+      ANTHROPIC_API_KEY:{label:'API Key',hint:'From console.anthropic.com → API Keys',type:'password'},
+      OPENAI_API_KEY:{label:'API Key',hint:'From platform.openai.com → API Keys',type:'password'},
+      JIRA_URL:{label:'Jira URL',hint:'e.g. https://yourcompany.atlassian.net',type:'text'},
+      JIRA_EMAIL:{label:'Email',hint:'Your Atlassian account email',type:'text'},
+      JIRA_TOKEN:{label:'API Token',hint:'From id.atlassian.com → Security → API tokens',type:'password'},
+    };
+    const inputs=fields.map(f=>{
+      const m=_fieldMeta[f.name]||{};
+      const inputType=m.type||'password';
+      const lbl=m.label||f.name;
+      const hint=m.hint||'';
+      const ph=f.configured?'(leave blank to keep current value)':(m.placeholder||'Enter value');
+      return`<div style="margin-bottom:14px">
+        <label style="display:block;font-size:.8em;font-weight:600;margin-bottom:2px">${lbl} ${f.configured?'<span style="color:#4ade80;font-weight:400;font-size:.9em">✓ configured</span>':'<span style="color:#f87171;font-weight:400;font-size:.9em">not set</span>'}</label>
+        ${hint?`<div style="font-size:.74em;color:var(--muted);margin-bottom:5px">${hint}</div>`:''}
+        <input type="${inputType}" id="_cfg_${f.name}" placeholder="${ph}"
+          style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid ${f.configured?'var(--border)':'rgba(248,113,113,.4)'};background:var(--surface2);color:var(--text);font-size:.82em;font-family:monospace;box-sizing:border-box">
+        <div style="font-size:.72em;color:var(--muted);margin-top:3px;font-family:monospace">${f.name}</div>
+      </div>`;
+    }).join('');
+
+    const formHtml=`<div>
+      <div style="margin-bottom:16px;padding:10px 12px;background:var(--surface2);border-radius:8px;display:flex;align-items:center;gap:10px">
+        ${isConfigured
+          ?'<span style="color:#4ade80;font-size:1.1em">✅</span><span style="font-size:.82em;color:#4ade80">Integration is active</span>'
+          :'<span style="color:#f87171;font-size:1.1em">⚠️</span><span style="font-size:.82em;color:#f87171">Not configured — fill in the fields below</span>'}
+      </div>
+      ${inputs}
+      <div style="display:flex;gap:10px;margin-top:16px">
+        <button id="_cfg_save_btn" class="btn btn-primary" style="flex:1;justify-content:center" onclick="App._saveIntegrationConfig('${key}','${name}')">💾 Save & Apply</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('_info-modal').style.display='none'" style="padding:0 16px">Cancel</button>
+      </div>
+      <div style="margin-top:10px;font-size:.74em;color:var(--muted);display:flex;align-items:center;gap:6px">
+        <span>🔒</span> Values are encrypted in .env and applied immediately — no server restart needed.
+      </div>
+    </div>`;
+    this._showInfoModal(`Configure ${name}`, formHtml);
+  },
+
+  async _saveIntegrationConfig(key, name){
+    const inputs=document.querySelectorAll('[id^="_cfg_"]');
+    const config={};
+    inputs.forEach(el=>{
+      if(el.tagName==='INPUT'&&el.value.trim()){
+        const envKey=el.id.replace('_cfg_','');
+        config[envKey]=el.value.trim();
+      }
+    });
+    if(!Object.keys(config).length){this.toast('No changes — all fields empty','info');return;}
+    const btn=document.getElementById('_cfg_save_btn');
+    if(btn){btn.disabled=true;btn.textContent='Saving...';}
+    try{
+      const r=await this.api('POST','/integrations/configure',{integration:key,config});
+      if(r&&r.ok){
+        const d=await r.json();
+        document.getElementById('_info-modal').style.display='none';
+        this.toast(`✅ ${name} configured — ${d.updated_keys.join(', ')} saved`,'success');
+        this.loadIntegrations();
+      } else {
+        const d=await r.json().catch(()=>({}));
+        this.toast(`Failed: ${d.detail||'unknown error'}`,'error');
+        if(btn){btn.disabled=false;btn.textContent='💾 Save Configuration';}
+      }
+    }catch(e){
+      this.toast(`Save error: ${e.message}`,'error');
+      if(btn){btn.disabled=false;btn.textContent='💾 Save Configuration';}
+    }
+  },
+
+  _showInfoModal(title, htmlContent){
+    let modal=document.getElementById('info-modal');
+    if(!modal){
+      modal=document.createElement('div');
+      modal.id='info-modal';
+      modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+      modal.onclick=e=>{if(e.target===modal)modal.remove();};
+      document.body.appendChild(modal);
+    }
+    modal.innerHTML=`<div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;max-width:440px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.4)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div style="font-weight:700;font-size:1em">${title}</div>
+        <button onclick="document.getElementById('info-modal').remove()" style="background:none;border:none;color:var(--muted);font-size:1.2em;cursor:pointer">✕</button>
+      </div>
+      ${htmlContent}
+      <div style="margin-top:16px;display:flex;justify-content:flex-end">
+        <button class="btn btn-sm" onclick="document.getElementById('info-modal').remove()">Close</button>
+      </div>
+    </div>`;
   },
 
   // ── GITHUB ───────────────────────────────────────────────────────

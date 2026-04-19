@@ -123,7 +123,126 @@ def create(incident_id: str, description: str, pipeline_state: dict,
     except Exception:
         pass
 
+    # Post full incident briefing to Slack war room channel
+    _post_war_room_briefing(wr)
+
     return wr
+
+
+def _post_war_room_briefing(wr: WarRoomSession) -> None:
+    """Post a comprehensive incident briefing to the Slack war room channel."""
+    try:
+        from app.integrations.slack import post_message, SLACK_BOT_TOKEN
+        if not SLACK_BOT_TOKEN:
+            return
+
+        channel = wr.slack_channel
+        if not channel:
+            # Fall back to default incidents channel
+            from app.integrations.slack import SLACK_CHANNEL
+            channel = SLACK_CHANNEL
+        if not channel:
+            return
+
+        ps          = wr.pipeline_state
+        severity    = (ps.get("severity") or "medium").upper()
+        root_cause  = ps.get("root_cause") or "Under investigation"
+        summary     = ps.get("summary") or wr.incident_description
+        status      = (ps.get("status") or "active").upper()
+        confidence  = ps.get("confidence") or 0.0
+        conf_pct    = int(float(confidence) * 100) if confidence else 0
+        conf_bar    = "█" * int(float(confidence) * 10) + "░" * (10 - int(float(confidence) * 10))
+        executed    = ps.get("executed_actions") or ps.get("actions_taken") or []
+        blocked     = ps.get("blocked_actions") or []
+        actions     = ps.get("actions") or []
+        triggered_by = ps.get("triggered_by") or "system"
+        triggered_at = ps.get("triggered_at") or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        approved_by  = ps.get("approved_by") or ""
+
+        sev_emoji = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}.get(severity, "⚪")
+
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": f"{sev_emoji} War Room — {wr.incident_id}"}},
+            {"type": "section", "fields": [
+                {"type": "mrkdwn", "text": f"*🕐 Opened*\n{triggered_at}"},
+                {"type": "mrkdwn", "text": f"*⚠️ Severity*\n{sev_emoji} {severity}"},
+                {"type": "mrkdwn", "text": f"*📊 Status*\n{status}"},
+                {"type": "mrkdwn", "text": f"*🎯 AI Confidence*\n`{conf_bar}` {conf_pct}%"},
+            ]},
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*📋 Incident*\n{wr.incident_description}"}},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*🔍 Root Cause*\n{root_cause}"}},
+        ]
+
+        if summary and summary != wr.incident_description:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*📝 AI Analysis*\n{summary}"}})
+
+        # Contributing factors / reasoning
+        reasoning = ps.get("reasoning") or ps.get("findings") or []
+        if reasoning:
+            if isinstance(reasoning, list):
+                reasoning_text = "\n".join(f"• {f}" for f in reasoning[:5])
+            else:
+                reasoning_text = str(reasoning)[:500]
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*🧠 Contributing Factors*\n{reasoning_text}"}})
+
+        # Actions taken / planned
+        action_lines = []
+        for a in executed[:8]:
+            atype = a.get("type") or a.get("action", "?")
+            desc  = a.get("description") or a.get("result", {}).get("action", "")
+            action_lines.append(f"✅ *{atype}* — {str(desc)[:80]}")
+        for a in blocked[:4]:
+            atype = a.get("type", "?")
+            reason = a.get("reason") or a.get("blocked_by", "policy")
+            action_lines.append(f"🚫 *{atype}* blocked — {str(reason)[:60]}")
+        for a in actions[:6]:
+            if a.get("type") not in {x.get("type") for x in executed + blocked}:
+                action_lines.append(f"📋 *{a.get('type','?')}* — {str(a.get('description',''))[:80]}")
+        if action_lines:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": "*⚡ Actions Taken / Planned*\n" + "\n".join(action_lines)}})
+
+        # What to do next
+        fix_suggestion = ps.get("fix_suggestion") or ps.get("recommended_actions") or ""
+        data_gaps      = ps.get("data_gaps") or []
+        next_lines = []
+        if fix_suggestion:
+            next_lines.append(f"• {fix_suggestion[:200]}")
+        if blocked:
+            next_lines.append(f"• *{len(blocked)} action(s) require manual approval* — review in NexusOps Approvals tab")
+        if data_gaps:
+            next_lines.append(f"• *Data gaps detected* — {', '.join(str(g)[:60] for g in data_gaps[:3])}")
+        if not executed and not blocked:
+            next_lines.append("• No automated actions executed — manual investigation required")
+        if next_lines:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": "*🔜 What Next*\n" + "\n".join(next_lines)}})
+
+        # Approval info
+        if approved_by:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*✅ Approved & executed by*\n{approved_by}"}})
+
+        blocks += [
+            {"type": "divider"},
+            {"type": "context", "elements": [
+                {"type": "mrkdwn",
+                 "text": (
+                     f"🤖 *NexusOps AI War Room* · {wr.incident_id} · "
+                     f"Mention `@nsops` or prefix with `ai:` to ask questions in this channel. "
+                     f"War Room ID: `{wr.war_room_id}`"
+                 )},
+            ]},
+        ]
+
+        post_message(channel=channel, text=f"{sev_emoji} War Room opened for {wr.incident_id}", blocks=blocks)
+    except Exception:
+        pass  # Best-effort — never fail war room creation due to Slack errors
 
 
 def answer(war_room_id: str, question: str, asked_by: str) -> str:
