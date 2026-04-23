@@ -72,6 +72,7 @@ def _build_chain(preferred: str) -> list[tuple[str, BaseLLM]]:
     """Import providers lazily to avoid hard failures at import time."""
     from app.llm.claude import ClaudeProvider
     from app.llm.openai import OpenAIProvider
+    from app.llm.ollama import OllamaProvider
 
     _alias = {"anthropic": "claude"}
     preferred = _alias.get(preferred, preferred)
@@ -80,7 +81,7 @@ def _build_chain(preferred: str) -> list[tuple[str, BaseLLM]]:
         "claude":  ClaudeProvider(),
         "openai":  OpenAIProvider(),
         "groq":    ClaudeProvider(force_provider="groq"),
-        "ollama":  ClaudeProvider(force_provider="ollama"),
+        "ollama":  OllamaProvider(),
     }
     order = [preferred] + [k for k in providers if k != preferred]
     return [(k, providers[k]) for k in order if k in providers]

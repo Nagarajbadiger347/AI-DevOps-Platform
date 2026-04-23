@@ -7,8 +7,30 @@ import re
 from app.agents.base import BaseAgent
 from app.llm.factory import LLMFactory, mark_rate_limited
 from app.core.logging import get_logger
+from app.core.audit import audit_log
 
 logger = get_logger(__name__)
+
+
+def _log_ai_decision(incident_id: str, provider: str, prompt: str, response_content: str, plan: dict) -> None:
+    """Persist LLM prompt + response for auditability. Content is truncated at safe limits."""
+    audit_log(
+        user="planner_agent",
+        action="llm_decision",
+        params={
+            "incident_id": incident_id,
+            "provider":    provider,
+            # Store first 2000 chars of prompt — enough to reconstruct context without bloating audit log
+            "prompt_snippet": prompt[:2000],
+        },
+        result={
+            "response_snippet": response_content[:1000],
+            "confidence": plan.get("confidence"),
+            "risk":       plan.get("risk"),
+            "action_count": len(plan.get("actions", [])),
+        },
+        source="planner_agent",
+    )
 
 _SYSTEM = (
     "You are an expert SRE. You produce lean, precise, EXECUTABLE incident remediation plans. "
@@ -341,6 +363,14 @@ class PlannerAgent(BaseAgent):
                     risk=plan.get("risk"),
                     confidence=plan.get("confidence"),
                     provider=response.provider,
+                )
+                # Audit: persist LLM prompt + response for AI decision traceability
+                _log_ai_decision(
+                    incident_id=state.get("incident_id", "unknown"),
+                    provider=str(response.provider),
+                    prompt=prompt,
+                    response_content=response.content,
+                    plan=plan,
                 )
                 return state
             except Exception as exc:

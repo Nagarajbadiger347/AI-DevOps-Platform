@@ -17,12 +17,19 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from botocore.config import Config as _BotoCfg
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from app.core.metrics import integration_failures_total
 
 _BOTO_CFG = _BotoCfg(connect_timeout=10, read_timeout=30, retries={"max_attempts": 2})
 
 
 _DEFAULT_REGION = os.getenv("AWS_REGION", "us-east-1")
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type((BotoCoreError, ClientError)),
+)
 def _client(service: str, region: str = ""):
     """Return a boto3 client for *service* in *region* (or the configured default)."""
     region = region.strip() or _DEFAULT_REGION

@@ -105,18 +105,21 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class AuthContext:
-    def __init__(self, username: str, role: str):
+    def __init__(self, username: str, role: str, tenant_id: str = "default"):
         self.username = username
         self.role = role
+        self.tenant_id = tenant_id
 
 
 def _resolve_auth(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
     x_user: Optional[str] = Header(default=None),
+    x_tenant_id: Optional[str] = Header(default=None),
 ) -> "AuthContext":
     from app.security.rbac import get_user_role
     username = None
     jwt_role = None
+    jwt_tenant = None
     token_provided = bool(credentials and credentials.credentials)
     if token_provided:
         try:
@@ -124,6 +127,7 @@ def _resolve_auth(
             payload = decode_token(credentials.credentials)
             username = payload.get("sub")
             jwt_role = payload.get("role")
+            jwt_tenant = payload.get("tenant_id")
         except HTTPException:
             username = None
             jwt_role = None
@@ -132,7 +136,9 @@ def _resolve_auth(
     if not username:
         username = "anonymous"
     role = get_user_role(username) if username != "anonymous" else (jwt_role or "viewer")
-    ctx = AuthContext(username=username, role=role)
+    # Tenant resolution: JWT claim > X-Tenant-ID header > "default"
+    tenant_id = jwt_tenant or x_tenant_id or "default"
+    ctx = AuthContext(username=username, role=role, tenant_id=tenant_id)
     ctx._bad_token = token_provided and username == "anonymous" and not jwt_role
     return ctx
 
@@ -224,8 +230,6 @@ class IncidentRunRequest(BaseModel):
     k8s:            K8sConfig = None
     auto_remediate: bool = False
     hours:          int  = 2
-    user:           str  = "system"
-    role:           str  = "admin"
     aws_cfg:        Optional[Dict[str, Any]] = None
     k8s_cfg:        Optional[Dict[str, Any]] = None
     slack_channel:  str  = "#incidents"
@@ -233,3 +237,4 @@ class IncidentRunRequest(BaseModel):
     llm_provider:        str  = ""
     create_slack_channel: bool = False
     metadata:            Optional[Dict[str, Any]] = None
+    # NOTE: user and role are resolved server-side from JWT — do NOT add them here

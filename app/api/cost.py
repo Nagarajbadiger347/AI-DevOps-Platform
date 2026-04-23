@@ -85,7 +85,8 @@ async def cost_dashboard_endpoint(auth: AuthContext = Depends(require_viewer)):
 @router.get("/cost/resources")
 async def cost_resources_endpoint(auth: AuthContext = Depends(require_viewer)):
     """List all AWS resources with estimated monthly cost (EC2, RDS, Lambda, ECS)."""
-    resources = []
+    import asyncio as _asyncio
+    import concurrent.futures as _cf
 
     def _boto(svc):
         import boto3
@@ -97,106 +98,99 @@ async def cost_resources_endpoint(auth: AuthContext = Depends(require_viewer)):
             aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
         )
 
-    try:
-        ec2 = _boto("ec2")
-        paginator = ec2.get_paginator("describe_instances")
-        EC2_RATES = {
-            "t2.micro":0.0116,"t2.small":0.023,"t2.medium":0.0464,"t2.large":0.0928,
-            "t3.micro":0.0104,"t3.small":0.0208,"t3.medium":0.0416,"t3.large":0.0832,
-            "t3.xlarge":0.1664,"t3.2xlarge":0.3328,
-            "m5.large":0.096,"m5.xlarge":0.192,"m5.2xlarge":0.384,"m5.4xlarge":0.768,
-            "m6i.large":0.096,"m6i.xlarge":0.192,"m6i.2xlarge":0.384,
-            "c5.large":0.085,"c5.xlarge":0.17,"c5.2xlarge":0.34,"c5.4xlarge":0.68,
-            "r5.large":0.126,"r5.xlarge":0.252,"r5.2xlarge":0.504,"r5.4xlarge":1.008,
-        }
-        for page in paginator.paginate():
-            for res in page["Reservations"]:
-                for inst in res["Instances"]:
-                    if inst.get("State", {}).get("Name") not in ("running", "stopped"):
-                        continue
-                    itype = inst.get("InstanceType", "")
-                    name = next((t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"), "")
-                    hourly = EC2_RATES.get(itype, 0.05)
-                    monthly = hourly * 730
-                    resources.append({
-                        "service": "EC2",
-                        "resource_id": inst["InstanceId"],
-                        "name": name,
-                        "region": os.getenv("AWS_REGION", "us-east-1"),
-                        "instance_type": itype,
-                        "details": inst.get("State", {}).get("Name", ""),
-                        "monthly_usd": round(monthly, 2),
-                    })
-    except Exception:
-        pass
+    def _fetch_ec2():
+        results = []
+        try:
+            ec2 = _boto("ec2")
+            EC2_RATES = {
+                "t2.micro":0.0116,"t2.small":0.023,"t2.medium":0.0464,"t2.large":0.0928,
+                "t3.micro":0.0104,"t3.small":0.0208,"t3.medium":0.0416,"t3.large":0.0832,
+                "t3.xlarge":0.1664,"t3.2xlarge":0.3328,
+                "m5.large":0.096,"m5.xlarge":0.192,"m5.2xlarge":0.384,"m5.4xlarge":0.768,
+                "m6i.large":0.096,"m6i.xlarge":0.192,"m6i.2xlarge":0.384,
+                "c5.large":0.085,"c5.xlarge":0.17,"c5.2xlarge":0.34,"c5.4xlarge":0.68,
+                "r5.large":0.126,"r5.xlarge":0.252,"r5.2xlarge":0.504,"r5.4xlarge":1.008,
+            }
+            for page in ec2.get_paginator("describe_instances").paginate():
+                for res in page["Reservations"]:
+                    for inst in res["Instances"]:
+                        if inst.get("State", {}).get("Name") not in ("running", "stopped"):
+                            continue
+                        itype = inst.get("InstanceType", "")
+                        name = next((t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"), "")
+                        monthly = EC2_RATES.get(itype, 0.05) * 730
+                        results.append({"service":"EC2","resource_id":inst["InstanceId"],"name":name,
+                            "region":os.getenv("AWS_REGION","us-east-1"),"instance_type":itype,
+                            "details":inst.get("State",{}).get("Name",""),"monthly_usd":round(monthly,2)})
+        except Exception:
+            pass
+        return results
 
-    try:
-        rds = _boto("rds")
-        RDS_RATES = {
-            "db.t3.micro":0.017,"db.t3.small":0.034,"db.t3.medium":0.068,"db.t3.large":0.136,
-            "db.m5.large":0.171,"db.m5.xlarge":0.342,"db.m5.2xlarge":0.684,
-            "db.r5.large":0.24,"db.r5.xlarge":0.48,"db.r5.2xlarge":0.96,"db.r5.4xlarge":1.92,
-        }
-        for db in rds.describe_db_instances().get("DBInstances", []):
-            itype = db.get("DBInstanceClass", "")
-            hourly = RDS_RATES.get(itype, 0.1)
-            multi_az = db.get("MultiAZ", False)
-            monthly = hourly * 730 * (2 if multi_az else 1)
-            resources.append({
-                "service": "RDS",
-                "resource_id": db["DBInstanceIdentifier"],
-                "name": db["DBInstanceIdentifier"],
-                "region": os.getenv("AWS_REGION", "us-east-1"),
-                "instance_type": itype,
-                "details": f"{db.get('Engine','')} {'Multi-AZ' if multi_az else 'Single-AZ'}",
-                "monthly_usd": round(monthly, 2),
-            })
-    except Exception:
-        pass
+    def _fetch_rds():
+        results = []
+        try:
+            rds = _boto("rds")
+            RDS_RATES = {
+                "db.t3.micro":0.017,"db.t3.small":0.034,"db.t3.medium":0.068,"db.t3.large":0.136,
+                "db.m5.large":0.171,"db.m5.xlarge":0.342,"db.m5.2xlarge":0.684,
+                "db.r5.large":0.24,"db.r5.xlarge":0.48,"db.r5.2xlarge":0.96,"db.r5.4xlarge":1.92,
+            }
+            for db in rds.describe_db_instances().get("DBInstances", []):
+                itype = db.get("DBInstanceClass", "")
+                multi_az = db.get("MultiAZ", False)
+                monthly = RDS_RATES.get(itype, 0.1) * 730 * (2 if multi_az else 1)
+                results.append({"service":"RDS","resource_id":db["DBInstanceIdentifier"],
+                    "name":db["DBInstanceIdentifier"],"region":os.getenv("AWS_REGION","us-east-1"),
+                    "instance_type":itype,"details":f"{db.get('Engine','')} {'Multi-AZ' if multi_az else 'Single-AZ'}",
+                    "monthly_usd":round(monthly,2)})
+        except Exception:
+            pass
+        return results
 
-    try:
-        lam = _boto("lambda")
-        paginator = lam.get_paginator("list_functions")
-        for page in paginator.paginate():
-            for fn in page["Functions"]:
-                mem_mb = fn.get("MemorySize", 128)
-                gb_seconds = (mem_mb / 1024) * 0.5 * 1_000_000
-                compute_cost = gb_seconds * 0.0000166667
-                request_cost = 1_000_000 * 0.0000002
-                monthly = round(compute_cost + request_cost, 4)
-                resources.append({
-                    "service": "Lambda",
-                    "resource_id": fn["FunctionArn"].split(":")[-1],
-                    "name": fn["FunctionName"],
-                    "region": os.getenv("AWS_REGION", "us-east-1"),
-                    "instance_type": f"{mem_mb}MB",
-                    "details": fn.get("Runtime", ""),
-                    "monthly_usd": monthly,
-                })
-    except Exception:
-        pass
+    def _fetch_lambda():
+        results = []
+        try:
+            lam = _boto("lambda")
+            for page in lam.get_paginator("list_functions").paginate():
+                for fn in page["Functions"]:
+                    mem_mb = fn.get("MemorySize", 128)
+                    monthly = round((mem_mb/1024)*0.5*1_000_000*0.0000166667 + 1_000_000*0.0000002, 4)
+                    results.append({"service":"Lambda","resource_id":fn["FunctionArn"].split(":")[-1],
+                        "name":fn["FunctionName"],"region":os.getenv("AWS_REGION","us-east-1"),
+                        "instance_type":f"{mem_mb}MB","details":fn.get("Runtime",""),"monthly_usd":monthly})
+        except Exception:
+            pass
+        return results
 
-    try:
-        ecs = _boto("ecs")
-        clusters = ecs.list_clusters().get("clusterArns", [])
-        for cluster_arn in clusters[:5]:
-            svc_arns = ecs.list_services(cluster=cluster_arn).get("serviceArns", [])
-            if not svc_arns:
-                continue
-            for svc in ecs.describe_services(cluster=cluster_arn, services=svc_arns[:10]).get("services", []):
-                tasks = svc.get("runningCount", 0)
-                monthly = tasks * (0.5 * 0.04048 + 1 * 0.004445) * 730
-                resources.append({
-                    "service": "ECS",
-                    "resource_id": svc["serviceArn"].split("/")[-1],
-                    "name": svc["serviceName"],
-                    "region": os.getenv("AWS_REGION", "us-east-1"),
-                    "instance_type": f"{tasks} tasks",
-                    "details": svc.get("launchType", "FARGATE"),
-                    "monthly_usd": round(monthly, 2),
-                })
-    except Exception:
-        pass
+    def _fetch_ecs():
+        results = []
+        try:
+            ecs = _boto("ecs")
+            for cluster_arn in ecs.list_clusters().get("clusterArns", [])[:5]:
+                svc_arns = ecs.list_services(cluster=cluster_arn).get("serviceArns", [])
+                if not svc_arns:
+                    continue
+                for svc in ecs.describe_services(cluster=cluster_arn, services=svc_arns[:10]).get("services", []):
+                    tasks = svc.get("runningCount", 0)
+                    monthly = tasks * (0.5*0.04048 + 1*0.004445) * 730
+                    results.append({"service":"ECS","resource_id":svc["serviceArn"].split("/")[-1],
+                        "name":svc["serviceName"],"region":os.getenv("AWS_REGION","us-east-1"),
+                        "instance_type":f"{tasks} tasks","details":svc.get("launchType","FARGATE"),
+                        "monthly_usd":round(monthly,2)})
+        except Exception:
+            pass
+        return results
+
+    # Run all 4 AWS service fetches in parallel
+    loop = _asyncio.get_event_loop()
+    with _cf.ThreadPoolExecutor(max_workers=4) as pool:
+        ec2_f   = loop.run_in_executor(pool, _fetch_ec2)
+        rds_f   = loop.run_in_executor(pool, _fetch_rds)
+        lam_f   = loop.run_in_executor(pool, _fetch_lambda)
+        ecs_f   = loop.run_in_executor(pool, _fetch_ecs)
+        ec2_r, rds_r, lam_r, ecs_r = await _asyncio.gather(ec2_f, rds_f, lam_f, ecs_f)
+
+    resources = ec2_r + rds_r + lam_r + ecs_r
 
     if not resources:
         return {"resources": [], "error": "No resources found — check AWS credentials and region configuration"}

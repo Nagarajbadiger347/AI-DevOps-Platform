@@ -337,23 +337,18 @@ def revoke_all_user(username: str, auth: AuthContext = Depends(require_admin)):
     return {"success": True, "message": f"All tokens for '{username}' have been revoked"}
 
 
-# ── ChromaDB backup endpoints ──────────────────────────────────
+# ── Database backup endpoints ──────────────────────────────────
 
-@router.post("/admin/backup/chromadb", tags=["admin"])
+@router.post("/admin/backup/database", tags=["admin"])
 def trigger_backup(auth: AuthContext = Depends(require_admin)):
-    """Manually trigger a ChromaDB backup."""
-    from app.memory.vector_db import backup_chromadb
-    result = backup_chromadb()
-    if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Backup failed"))
-    return result
+    """PostgreSQL is backed up via pg_dump or managed service. Returns status."""
+    return {"success": True, "message": "PostgreSQL backup is handled by your database host or pg_dump."}
 
 
 @router.get("/admin/backup/list", tags=["admin"])
 def list_backups(auth: AuthContext = Depends(require_admin)):
-    """List available ChromaDB backups."""
-    from app.memory.vector_db import get_backup_list
-    return {"backups": get_backup_list()}
+    """List available backups."""
+    return {"backups": []}
 
 
 # ── User invite endpoints ──────────────────────────────────────

@@ -1,12 +1,12 @@
 # NexusOps — AI DevOps Platform
 
-An AI-powered DevOps command center. Connect AWS, Kubernetes, GitHub, and Slack — then ask the AI to debug incidents, review PRs, analyze costs, and manage infrastructure from one interface.
+An AI-powered DevOps command center built for SaaS multi-tenancy. Connect AWS, Kubernetes, GitHub, and Slack — then ask the AI to debug incidents, review PRs, analyze costs, and manage infrastructure from one interface.
 
 ---
 
 ## Features
 
-- **Multi-agent incident pipeline** — LangGraph 5-agent workflow (Planner → Gather → Debug → Execute → Report) with RBAC, dry-run, and ChromaDB memory
+- **Multi-agent incident pipeline** — LangGraph 5-agent workflow (Planner → Gather → Debug → Execute → Report) with RBAC, dry-run, and pgvector memory
 - **AI chat assistant** — Conversational interface with live infra context, tool routing, and streaming responses
 - **K8s operations** — Health checks, rolling restarts, scale deployments, pod log analysis
 - **AWS observability** — EC2, ECS, Lambda, RDS, ALB, CloudWatch, CloudTrail, S3, SQS, DynamoDB
@@ -18,6 +18,8 @@ An AI-powered DevOps command center. Connect AWS, Kubernetes, GitHub, and Slack 
 - **Post-mortem generation** — AI-generated reports enriched from past incident memory
 - **JWT auth + RBAC** — Role-based access control enforced at route and execution layers
 - **Multi-LLM support** — Claude → OpenAI → Groq → Ollama with automatic fallback
+- **Multi-tenancy** — Full tenant isolation: incidents, chat, approvals, users all scoped per tenant
+- **pgvector memory** — Semantic incident search powered by PostgreSQL + pgvector (no ChromaDB)
 
 ---
 
@@ -34,9 +36,14 @@ Browser ──▶ Nginx (TLS + rate limiting)
           ├── app/agents/       Decision units — read state, return diffs
           ├── app/execution/    RBAC + policy gated; audit log per action
           ├── app/integrations/ Pure I/O adapters (AWS, K8s, GitHub, Slack...)
-          ├── app/memory/       Short-term scratchpad, long-term ChromaDB, knowledge base
+          ├── app/memory/       Short-term scratchpad, long-term pgvector, knowledge base
           ├── app/security/     JWT auth, RBAC roles, audit trail
-          └── app/core/         Config, logging, trace middleware
+          ├── app/tenants/      Multi-tenant isolation middleware + store
+          └── app/core/         Config, logging, trace middleware, DB pool, migrations
+               │
+               ▼
+        PostgreSQL + pgvector   ← all data, all tenants, fully isolated
+        Redis                   ← rate limiting, session cache
 ```
 
 ### Incident Pipeline
@@ -60,8 +67,52 @@ Input (incident description + severity)
        └── OpsGenie alert
              │
              ▼
-     Store to ChromaDB → future recall
+     Store to pgvector → future recall (per tenant)
 ```
+
+### Multi-Tenancy Model
+
+```
+Every API request carries a tenant_id (from JWT or X-Tenant-ID header)
+  │
+  ▼
+AuthContext.tenant_id flows through every route
+  │
+  ▼
+PostgreSQL enforces isolation via tenant_id column on every table:
+  ├── tenants        — tenant registry
+  ├── users          — per-tenant users
+  ├── incidents      — per-tenant incident memory + vectors
+  ├── chat_sessions  — per-tenant war room history
+  ├── chat_messages  — per-tenant conversation log
+  ├── approvals      — per-tenant approval workflow
+  └── post_mortems   — per-tenant post-mortem documents
+
+Company A never sees Company B's data.
+```
+
+### Database Migrations
+
+NexusOps uses a custom lightweight migration system for production-grade database schema management:
+
+- **Versioned migrations** in `app/migrations/` with upgrade/downgrade functions
+- **Automatic execution** on application startup (Docker) or via CLI
+- **Rollback support** for emergency recovery
+- **Migration tracking** in `schema_migrations` table
+
+**Migration Commands:**
+```bash
+# Check status
+python manage.py status
+
+# Apply pending migrations
+python manage.py migrate
+
+# Rollback last migration
+python manage.py rollback
+```
+
+**Creating new migrations:** Add Python files to `app/migrations/` with `version`, `upgrade()`, and `downgrade()` functions.
 
 ---
 
@@ -70,20 +121,41 @@ Input (incident description + severity)
 ### Requirements
 
 - Python 3.9+ (3.11 recommended)
+- PostgreSQL 16 + pgvector extension
 - Docker + Docker Compose (for production)
 
 ### Local Development
 
 ```bash
+# 1. Install PostgreSQL + pgvector (Mac)
+brew install postgresql@16
+brew services start postgresql@16
+
+# Build pgvector from source
+git clone https://github.com/pgvector/pgvector.git /tmp/pgvector
+cd /tmp/pgvector
+PG_CONFIG=/opt/homebrew/opt/postgresql@16/bin/pg_config make && make install
+
+# 2. Create database
+psql postgres -c "CREATE USER nexusops WITH PASSWORD 'nexusops';"
+psql postgres -c "CREATE DATABASE nexusops OWNER nexusops;"
+psql nexusops -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# 3. Install app
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env          # fill in credentials
+
+# 4. Run database migrations
+python manage.py migrate
+
+# 5. Run app
 uvicorn app.orchestrator.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Open **http://127.0.0.1:8000**
 
-On first run with no users, a temporary admin account is created and credentials are printed to stdout. Change the password immediately or set `ADMIN_PASSWORD` in `.env`.
+On first run, a temporary admin account is created and credentials are printed to stdout. Change the password immediately or set `ADMIN_PASSWORD` in `.env`.
 
 ### Production (Docker)
 
@@ -92,11 +164,26 @@ cp .env.example .env          # set AUTH_ENABLED=true and a strong JWT_SECRET_KE
 docker compose up --build -d
 ```
 
+The application automatically runs database migrations on startup. For manual migration management:
+
+```bash
+# Check migration status
+docker compose exec app python manage.py status
+
+# Apply pending migrations
+docker compose exec app python manage.py migrate
+
+# Rollback last migration (emergency)
+docker compose exec app python manage.py rollback
+```
+
 | Service | Description |
 |---|---|
 | **nginx** | TLS termination, rate limiting, security headers (port 443) |
-| **app** | FastAPI with 4 uvicorn workers (2 CPU / 2 GB limit) |
+| **postgres** | PostgreSQL 15 with pgvector extension |
 | **redis** | Rate limiting + response cache (256 MB LRU) |
+| **prometheus** | Metrics collection |
+| **app** | FastAPI with 4 uvicorn workers (2 CPU / 2 GB limit) |
 
 **TLS setup:**
 ```bash
@@ -132,12 +219,14 @@ curl http://localhost:8000/aws/ec2/instances \
 | `developer` | Deploy, read, write |
 | `viewer` | Read-only |
 
+### Multi-Tenant API Usage
+
 ```bash
-# Assign a role (admin token required)
-curl -X POST http://localhost:8000/security/roles/assign \
-  -H "Authorization: Bearer <admin-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"user": "alice", "role": "developer"}'
+# All requests are scoped to the tenant in the JWT token automatically.
+# To override (dev/testing), pass X-Tenant-ID header:
+curl http://localhost:8000/memory/incidents \
+  -H "Authorization: Bearer <token>" \
+  -H "X-Tenant-ID: acme"
 ```
 
 ---
@@ -155,6 +244,12 @@ curl -X POST http://localhost:8000/security/roles/assign \
 | `ADMIN_USERNAME` | `admin` | Bootstrap admin username |
 | `ADMIN_PASSWORD` | — | Bootstrap admin password (auto-generated if not set) |
 
+### Database
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://nexusops:nexusops@localhost:5432/nexusops` | PostgreSQL connection string |
+
 ### LLM Providers
 
 | Variable | Description |
@@ -164,6 +259,7 @@ curl -X POST http://localhost:8000/security/roles/assign \
 | `OPENAI_API_KEY` | OpenAI GPT-4o (fallback) |
 | `GROQ_API_KEY` | Groq Llama 3.3-70B (secondary fallback, 100k tokens/day free) |
 | `OLLAMA_HOST` | Local Ollama — default `http://localhost:11434` |
+| `OLLAMA_MODEL` | Model to use with Ollama — default `llama3` |
 
 ### AWS
 
@@ -229,6 +325,10 @@ All integrations degrade gracefully — missing credentials return a structured 
 | `POST` | `/chat` | AI chat (non-streaming) |
 | `GET` | `/chat/stream` | AI chat (SSE streaming) |
 | `GET` | `/health` | Platform health check |
+| `GET` | `/memory/incidents` | List stored incidents (tenant-scoped) |
+| `GET` | `/memory/incidents/search?q=cpu` | Semantic search (tenant-scoped) |
+| `GET` | `/memory/incidents/trends` | Trend analysis (tenant-scoped) |
+| `GET` | `/approvals/pending` | Pending approvals (tenant-scoped) |
 
 ### Debug a K8s Pod
 
@@ -317,21 +417,46 @@ app/
 ├── agents/            # Planner, Decision, Memory, Executor, Infra agents
 ├── execution/         # RBAC + policy gated executor; audit log per action
 ├── policies/          # PolicyEngine + rules.json
-├── memory/            # Short-term, long-term (ChromaDB), knowledge base
+├── memory/            # Short-term, long-term (pgvector), knowledge base
+├── migrations/        # Database schema migrations (upgrade/downgrade)
 ├── integrations/      # AWS, K8s, GitHub, Slack, Jira, OpsGenie, Grafana...
-├── llm/               # LLMFactory — provider selection and fallback chain
-├── core/              # Config, structured logging, TraceMiddleware, audit
-├── security/          # RBAC roles, JWT auth, user store
+├── llm/               # LLMFactory — Claude, OpenAI, Groq, Ollama providers
+├── core/              # Config, structured logging, TraceMiddleware, DB pool, schema migrations
+├── security/          # RBAC roles, JWT auth, user store (PostgreSQL)
+├── tenants/           # Multi-tenant middleware, store, models
 ├── incident/          # Approval workflow, post-mortem, war room state
 ├── cost/              # AWS Cost Explorer, price estimation
 ├── monitoring/        # Background anomaly detection loop
-├── chat/              # AI chat intelligence, session memory
+├── chat/              # AI chat intelligence, session memory (PostgreSQL)
 └── tools/             # LangChain-style K8s/AWS/GitLab tool wrappers
+
+manage.py              # Database migration CLI
+scripts/
+├── export_training_data.py   # Export incident data for LLM fine-tuning
 
 nginx/nginx.conf        # Reverse proxy: TLS, rate limiting, security headers
 Dockerfile              # Multi-stage build (non-root production user)
-docker-compose.yml      # App + Nginx + Redis with health checks
+docker-compose.yml      # App + Nginx + Redis + PostgreSQL with health checks
 ```
+
+---
+
+## SaaS Roadmap
+
+| Status | Feature |
+|---|---|
+| ✅ Done | PostgreSQL + pgvector (replaces ChromaDB) |
+| ✅ Done | Full multi-tenant data isolation |
+| ✅ Done | tenant_id wired through all API routes |
+| ✅ Done | Ollama local LLM provider (zero API cost) |
+| ✅ Done | Fine-tuning data export (`scripts/export_training_data.py`) |
+| ✅ Done | Production-grade migration system with rollback |
+| ✅ Done | Docker Compose with automated migrations |
+| 🔜 Next | Post-mortems → PostgreSQL |
+| 🔜 Next | Self-serve signup page |
+| 🔜 Next | Stripe billing + subscription plans |
+| 🔜 Next | Per-tenant usage quotas |
+| 🔜 Next | SAML/SSO (Okta, Azure AD) |
 
 ---
 

@@ -75,12 +75,47 @@ def correlate_events_endpoint(events: list, _: AuthContext = Depends(require_vie
     return {"correlation": correlate_events(events)}
 
 
-@router.get("/metrics")
+@router.get("/metrics", response_class=None)
 def prometheus_metrics():
-    """Expose Prometheus-format metrics."""
-    from app.api.deps import _METRICS
-    lines = [f"nsops_{k} {v}" for k, v in _METRICS.items()]
-    return "\n".join(lines)
+    """Expose Prometheus-compatible text metrics."""
+    import time
+    from fastapi.responses import PlainTextResponse
+    from app.api.deps import _METRICS, _METRICS_HIST
+
+    lines: list[str] = [
+        "# HELP nsops_requests_total Total HTTP requests by path",
+        "# TYPE nsops_requests_total counter",
+    ]
+    for k, v in _METRICS.items():
+        lines.append(f"nsops_{k} {v}")
+
+    # Latency p50/p95/p99 from histogram buckets
+    lines += [
+        "",
+        "# HELP nsops_request_duration_p99_seconds Request latency p99 by path",
+        "# TYPE nsops_request_duration_p99_seconds gauge",
+    ]
+    for path, durations in list(_METRICS_HIST.items()):
+        if durations:
+            sorted_d = sorted(durations[-1000:])  # last 1000 samples
+            p99_idx = int(len(sorted_d) * 0.99)
+            lines.append(f'nsops_request_duration_p99_seconds{{path="{path}"}} {sorted_d[p99_idx]:.4f}')
+
+    # Pipeline event bus stats
+    try:
+        from app.core.pipeline_events import bus
+        active_incidents = len(bus._subscribers)
+        lines += [
+            "",
+            "# HELP nsops_pipeline_active_incidents Incidents with live subscribers",
+            "# TYPE nsops_pipeline_active_incidents gauge",
+            f"nsops_pipeline_active_incidents {active_incidents}",
+        ]
+    except Exception:
+        pass
+
+    lines.append(f"\n# generated_at {time.time()}")
+    return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
 
 
 @router.get("/grafana/alerts")

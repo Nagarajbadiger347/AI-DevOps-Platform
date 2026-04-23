@@ -39,8 +39,11 @@ from app.execution.validator import Validator
 
 logger = get_logger(__name__)
 
+from app.core.config import settings as _settings
+from app.core.pipeline_events import bus as _bus
+
 _MAX_RETRIES          = 3
-_MIN_CONFIDENCE       = 0.3    # plans below this confidence → escalate immediately
+_MIN_CONFIDENCE       = _settings.MIN_CONFIDENCE_THRESHOLD  # configurable via env
 _BACKOFF_BASE         = 2.0    # retry delays: 2s, 4s, 8s
 _APPROVAL_WINDOW_SECS = 1800   # 30-minute approval deadline
 
@@ -67,6 +70,8 @@ def _set_pipeline_context(state: PipelineState) -> None:
 def collect_context(state: PipelineState) -> PipelineState:
     """Parallel context collection from AWS, K8s, and GitHub."""
     _set_pipeline_context(state)
+    iid = state.get("incident_id", "")
+    _bus.emit_stage(iid, "collect_context", "started", "Collecting AWS, K8s, and GitHub context…")
 
     tasks = {
         "aws":    lambda: AWSAgent().run(state),
@@ -103,6 +108,14 @@ def collect_context(state: PipelineState) -> PipelineState:
         state.get("description", ""), n=5
     )
 
+    aws_ok = state["aws_context"].get("_data_available", False)
+    k8s_ok = state["k8s_context"].get("_data_available", False)
+    github_ok = state["github_context"].get("_data_available", False)
+    _bus.emit_stage(iid, "collect_context", "completed",
+                    f"Context ready — AWS:{aws_ok} K8s:{k8s_ok} GitHub:{github_ok}",
+                    {"aws": aws_ok, "k8s": k8s_ok, "github": github_ok,
+                     "similar_incidents": len(state["similar_incidents"])})
+
     logger.info("context_collected", extra={
         "incident_id":       state.get("incident_id"),
         "trace_id":          state.get("trace_id"),
@@ -117,6 +130,8 @@ def collect_context(state: PipelineState) -> PipelineState:
 def plan(state: PipelineState) -> PipelineState:
     """Run the PlannerAgent and merge its result into state."""
     _set_pipeline_context(state)
+    iid = state.get("incident_id", "")
+    _bus.emit_stage(iid, "plan", "started", "Generating remediation plan with AI…")
 
     try:
         result     = PlannerAgent().run(state)
@@ -132,11 +147,15 @@ def plan(state: PipelineState) -> PipelineState:
             "risk":         risk,
             "action_count": len(actions),
         })
+        _bus.emit_stage(iid, "plan", "completed",
+                        f"Plan ready — {len(actions)} action(s), confidence {confidence:.0%}, risk {risk}",
+                        {"confidence": confidence, "risk": risk, "action_count": len(actions)})
 
         if isinstance(result, dict):
             state.update(result)
 
     except Exception as exc:
+        _bus.emit_stage(iid, "plan", "failed", f"Planner failed: {exc}")
         logger.error("plan_node_failed", extra={
             "incident_id": state.get("incident_id"),
             "trace_id":    state.get("trace_id"),
@@ -152,6 +171,8 @@ def plan(state: PipelineState) -> PipelineState:
 def decide(state: PipelineState) -> PipelineState:
     """Run the DecisionAgent to score risk and set approval requirements."""
     _set_pipeline_context(state)
+    iid = state.get("incident_id", "")
+    _bus.emit_stage(iid, "decide", "started", "Scoring risk and checking approval requirements…")
 
     try:
         result = DecisionAgent().run(state)
@@ -163,7 +184,12 @@ def decide(state: PipelineState) -> PipelineState:
             "risk_score":            state.get("risk_score"),
             "requires_approval":     state.get("requires_human_approval"),
         })
+        needs_approval = state.get("requires_human_approval", False)
+        _bus.emit_stage(iid, "decide", "completed",
+                        f"Decision: {'awaiting approval' if needs_approval else 'auto-execute'}",
+                        {"risk_score": state.get("risk_score"), "requires_approval": needs_approval})
     except Exception as exc:
+        _bus.emit_stage(iid, "decide", "failed", f"Decision agent failed: {exc}")
         logger.error("decide_node_failed", extra={
             "incident_id": state.get("incident_id"),
             "trace_id":    state.get("trace_id"),
@@ -179,8 +205,13 @@ def decide(state: PipelineState) -> PipelineState:
 def execute(state: PipelineState) -> PipelineState:
     """Execute planned actions with exponential backoff on retries."""
     _set_pipeline_context(state)
-
+    iid = state.get("incident_id", "")
+    actions = state.get("plan", {}).get("actions", [])
     retry = state.get("retry_count", 0)
+    _bus.emit_stage(iid, "execute", "started",
+                    f"Executing {len(actions)} action(s)" + (f" (retry {retry})" if retry else ""),
+                    {"action_count": len(actions), "retry": retry})
+
     if retry > 0:
         delay = _BACKOFF_BASE ** retry
         logger.info("execute_retry_backoff", extra={
@@ -191,18 +222,33 @@ def execute(state: PipelineState) -> PipelineState:
         })
         time.sleep(delay)
 
-    return Executor().run(state)
+    result_state = Executor().run(state)
+    executed = result_state.get("executed_actions", [])
+    blocked = result_state.get("blocked_actions", [])
+    _bus.emit_stage(iid, "execute", "completed",
+                    f"Executed {len(executed)} action(s), blocked {len(blocked)}",
+                    {"executed": len(executed), "blocked": len(blocked)})
+    return result_state
 
 
 def validate(state: PipelineState) -> PipelineState:
     """Verify that executed actions achieved the desired state."""
     _set_pipeline_context(state)
-    return Validator().run(state)
+    iid = state.get("incident_id", "")
+    _bus.emit_stage(iid, "validate", "started", "Validating remediation outcomes…")
+    result_state = Validator().run(state)
+    passed = result_state.get("validation_passed", False)
+    _bus.emit_stage(iid, "validate", "completed" if passed else "failed",
+                    "Validation passed" if passed else "Validation failed — may retry",
+                    {"passed": passed})
+    return result_state
 
 
 def store_memory(state: PipelineState) -> PipelineState:
     """Mark the pipeline complete and persist to ChromaDB."""
     _set_pipeline_context(state)
+    iid = state.get("incident_id", "")
+    _bus.emit_stage(iid, "store_memory", "started", "Persisting incident to memory…")
     state["completed_at"] = _now_iso()
     state["status"]       = "completed"
 
@@ -224,6 +270,8 @@ def store_memory(state: PipelineState) -> PipelineState:
         "actions_executed": len(state.get("executed_actions", [])),
         "actions_blocked":  len(state.get("blocked_actions", [])),
     })
+    _bus.emit_stage(iid, "store_memory", "completed", "Incident stored in memory")
+    _bus.close_incident(iid)
     return state
 
 
@@ -232,6 +280,7 @@ def escalate(state: PipelineState) -> PipelineState:
     _set_pipeline_context(state)
 
     incident_id = state.get("incident_id", "unknown")
+    _bus.emit_stage(incident_id, "escalate", "started", "Escalating to on-call team…")
     last_error  = (state.get("errors") or ["unknown"])[-1]
     retry_count = state.get("retry_count", 0)
     confidence  = state.get("plan", {}).get("confidence")
@@ -275,6 +324,8 @@ def escalate(state: PipelineState) -> PipelineState:
 
     state["status"]       = "escalated"
     state["completed_at"] = _now_iso()
+    _bus.emit_stage(incident_id, "escalate", "completed", "On-call notified")
+    _bus.close_incident(incident_id)
     return state
 
 

@@ -591,3 +591,40 @@ def format_cost_report(report: CostReport) -> str:
 
     lines.append("=" * 60)
     return "\n".join(lines)
+
+
+def record_tenant_cost(tenant_id: str, cost_usd: float, service: str = "unknown"):
+    """Record cost attribution for tenant metering."""
+    from app.core.database import execute
+    try:
+        execute(
+            """
+            INSERT INTO tenant_costs (tenant_id, cost_usd, service, recorded_at)
+            VALUES (%s, %s, %s, NOW())
+            """,
+            (tenant_id, cost_usd, service)
+        )
+    except Exception as e:
+        logger.error("Failed to record tenant cost: %s", e)
+
+
+def get_tenant_cost_summary(tenant_id: str, days: int = 30) -> dict:
+    """Get cost summary for a tenant."""
+    from app.core.database import execute_one
+    try:
+        result = execute_one(
+            """
+            SELECT 
+                SUM(cost_usd) as total_cost,
+                COUNT(*) as transaction_count,
+                AVG(cost_usd) as avg_cost_per_action
+            FROM tenant_costs 
+            WHERE tenant_id = %s 
+            AND recorded_at >= NOW() - INTERVAL '%s days'
+            """,
+            (tenant_id, days)
+        )
+        return result or {"total_cost": 0, "transaction_count": 0, "avg_cost_per_action": 0}
+    except Exception as e:
+        logger.error("Failed to get tenant cost summary: %s", e)
+        return {"total_cost": 0, "transaction_count": 0, "avg_cost_per_action": 0}

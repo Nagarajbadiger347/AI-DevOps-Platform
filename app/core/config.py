@@ -61,9 +61,8 @@ class Settings(BaseSettings):
     # ── JWT rotation ────────────────────────────────────────────────────────
     JWT_SECRET_KEY_OLD: str = ""   # previous key — kept during rotation grace period
 
-    # ── ChromaDB ────────────────────────────────────────────────────────────
-    CHROMA_DB_PATH:    str = "./chroma_db"
-    CHROMA_BACKUP_DIR: str = "./chroma_backups"
+    # ── PostgreSQL ──────────────────────────────────────────────────────────
+    DATABASE_URL: str = "postgresql://nexusops:nexusops@localhost:5432/nexusops"
 
     # ── Redis HA ────────────────────────────────────────────────────────────
     REDIS_SENTINEL_HOSTS:  str = ""   # host1:26379,host2:26379

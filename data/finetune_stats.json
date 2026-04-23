@@ -1,0 +1,10 @@
+{
+  "generated_at": "2026-04-22T07:24:47.489409Z",
+  "total_pairs": 60,
+  "sources": {
+    "chromadb_incidents": 0,
+    "post_mortems": 15,
+    "chat_history": 51
+  },
+  "output_file": "/Users/tazamacbang/Desktop/AI-DevOps-Platform/data/finetune_dataset.jsonl"
+}

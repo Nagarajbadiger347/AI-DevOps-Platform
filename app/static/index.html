@@ -879,7 +879,11 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
       <!-- MONITORING -->
       <div id="s-monitoring" class="section-page">
         <div class="section-header">
-          <div><div class="section-title">Monitoring</div><div class="section-sub">Real-time alerts from AWS CloudWatch, Grafana, and Kubernetes</div></div>
+          <div>
+            <div class="section-title">Monitoring</div>
+            <div class="section-sub">Real-time alerts from AWS CloudWatch, Grafana, and Kubernetes</div>
+            <div id="detector-health-banner" style="display:none;margin-top:6px;padding:5px 10px;border-radius:6px;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.3);font-size:.75em;color:#fbbf24"></div>
+          </div>
           <button class="btn btn-secondary btn-sm" onclick="App.loadMonitoring()">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             Refresh
@@ -1099,7 +1103,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
             <div id="inc-history-stats" style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap"></div>
             <!-- Filter bar -->
             <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
-              <input id="inc-filter-text" type="text" placeholder="Search ID or description..." class="form-input" style="flex:1;min-width:140px;padding:5px 10px;font-size:.8em" oninput="App.filterIncidents()"/>
+              <input id="inc-filter-text" type="text" placeholder="Search ID or description..." class="form-input" style="flex:1;min-width:140px;padding:5px 10px;font-size:.8em" oninput="App._debounce('incFilter',()=>App.filterIncidents())"/>
               <select id="inc-filter-status" class="form-input" style="width:140px;padding:5px 8px;font-size:.8em" onchange="App.filterIncidents()">
                 <option value="">All statuses</option>
                 <option value="active">🔴 Active (not done)</option>
@@ -1469,7 +1473,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
             <div class="card-header" style="flex-wrap:wrap;gap:10px">
               <div class="card-title">&#128187; Resource-Level Cost Breakdown</div>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                <input type="text" id="cost-res-search" class="form-input" style="width:200px;padding:5px 10px;font-size:.82em" placeholder="Search resource ID / name..." oninput="App.filterCostResources()"/>
+                <input type="text" id="cost-res-search" class="form-input" style="width:200px;padding:5px 10px;font-size:.82em" placeholder="Search resource ID / name..." oninput="App._debounce('costResFilter',()=>App.filterCostResources())"/>
                 <select id="cost-res-svc" class="form-input" style="width:140px;padding:5px 10px;font-size:.82em" onchange="App.filterCostResources()">
                   <option value="">All Services</option>
                   <option>EC2</option><option>RDS</option><option>Lambda</option><option>ECS</option><option>S3</option>
@@ -1707,7 +1711,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
               <button class="tab-pill" onclick="App.infraTab('k8s',this)">&#9112; Kubernetes</button>
             </div>
             <!-- Region selector -->
-            <select id="infra-region-select" class="form-input" style="padding:4px 10px;font-size:.82em;width:auto;min-width:160px" onchange="App.refreshInfra()">
+            <select id="infra-region-select" class="form-input" style="padding:4px 10px;font-size:.82em;width:auto;min-width:160px" onchange="App._debounce('infraRegion',()=>App.refreshInfra(),500)">
               <option value="">All Regions</option>
               <option value="us-east-1">us-east-1 (N. Virginia)</option>
               <option value="us-east-2">us-east-2 (Ohio)</option>
@@ -2059,7 +2063,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
           </div>
         </div>
         <!-- Action modal (hidden) -->
-        <div id="vscode-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:500;display:none;align-items:center;justify-content:center">
+        <div id="vscode-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:500;align-items:center;justify-content:center">
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;width:420px;max-width:90vw">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
               <div id="vscode-modal-title" style="font-weight:700;font-size:1em;color:var(--text)">Action</div>
@@ -2111,7 +2115,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3zM3 9h18M9 21V9"/></svg>
                 Repositories
               </div>
-              <input id="gh-repo-search" type="text" placeholder="Filter..." style="padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.78em;width:120px" oninput="App.filterGhRepos(this.value)">
+              <input id="gh-repo-search" type="text" placeholder="Filter..." style="padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.78em;width:120px" oninput="App._debounce('ghRepoFilter',()=>App.filterGhRepos(this.value),200)">
             </div>
             <div id="gh-repos-list" style="max-height:360px;overflow-y:auto"><div class="loading-state" style="padding:24px"><div class="spinner"></div></div></div>
           </div>
@@ -2198,7 +2202,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
                 Audit Log
               </div>
               <div style="display:flex;align-items:center;gap:8px">
-                <input id="audit-search" type="text" placeholder="Filter by user or action..." oninput="App._filterAudit(this.value)"
+                <input id="audit-search" type="text" placeholder="Filter by user or action..." oninput="App._debounce('auditFilter',()=>App._filterAudit(this.value),200)"
                   style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.75em;width:170px;outline:none">
                 <button class="btn btn-ghost btn-sm" onclick="App.loadAudit()" style="padding:3px 7px">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -2421,6 +2425,7 @@ const App = {
   refreshTimer: null,
   _sectionLoaded: {},   // section -> timestamp of last load
   _CACHE_TTL: 45000,    // 45s cache per section
+  _debounceTimers: {},  // key -> setTimeout handle
   _awsRegion: '{{ aws_region }}',
 
   setGlobalLLM(val){
@@ -2430,6 +2435,12 @@ const App = {
     if(sel) sel.value=val;
     // Persist to server so pipeline + agents use the same provider
     this.api('POST','/settings/llm',{provider:val}).catch(()=>{});
+  },
+
+  // Debounce helper — prevents rapid-fire calls on every keystroke
+  _debounce(key,fn,ms=280){
+    clearTimeout(this._debounceTimers[key]);
+    this._debounceTimers[key]=setTimeout(fn,ms);
   },
 
   async syncLLMStatus(){
@@ -2596,7 +2607,7 @@ const App = {
     // Navigate to incidents section (bust cache) and reset the form
     this._sectionLoaded['incidents']=0;
     this.navigate('incidents');
-    // Reset form fields
+    // Reset all form fields and toggles
     setTimeout(()=>{
       const idEl=document.getElementById('inc-id');
       const descEl=document.getElementById('inc-desc');
@@ -2604,6 +2615,7 @@ const App = {
       if(idEl) idEl.value='';
       if(descEl) descEl.value='';
       if(resultEl) resultEl.innerHTML='';
+      this._initIncidentForm();
     },50);
   },
 
@@ -2699,12 +2711,14 @@ const App = {
     clearInterval(this.refreshTimer);
     this.refreshTimer=setInterval(()=>{
       this.loadBadges();
-      // Only silently refresh dashboard stats if user is on dashboard
       if(this.currentSection==='dashboard'){
         this._sectionLoaded['dashboard']=0;
         this.loadDashboard();
+      } else if(this.currentSection==='monitoring'){
+        this._sectionLoaded['monitoring']=0;
+        this.loadMonitoring();
       }
-    },60000); // 60s — not 30s to reduce server load
+    },30000); // 30s refresh — dashboard + monitoring stay live
     this.syncLLMStatus();  // auto-detect active LLM on startup
   },
 
@@ -2718,14 +2732,15 @@ const App = {
   // ── DASHBOARD ────────────────────────────────────────────────────
   async loadDashboard(){
     this.loadBadges();
-    this.loadDashboardExtras();
     // Run all dashboard API calls in parallel for speed
-    const [healthR, approvalsR, alarmsR, k8sR, auditR] = await Promise.allSettled([
+    // audit/log fetched once with limit=12 — shared by activity widget + recent incidents widget
+    const [healthR, approvalsR, alarmsR, k8sR, auditR, integR] = await Promise.allSettled([
       this.api('GET','/health/full'),
       this.api('GET','/approvals/pending'),
       this.api('GET','/aws/cloudwatch/alarms'),
       this.api('GET','/check/k8s'),
-      this.api('GET','/audit/log?limit=8')
+      this.api('GET','/audit/log?limit=12'),
+      this.api('GET','/health/integrations')
     ]);
 
     // Hero banner
@@ -2746,6 +2761,22 @@ const App = {
       // Update badge
       const hb=document.getElementById('dash-health-badge');
       if(hb){hb.textContent=isOk?'healthy':d.status||'unknown';hb.style.background=isOk?'rgba(34,197,94,.15)':'rgba(239,68,68,.15)';hb.style.color=isOk?'#4ade80':'#f87171';hb.style.border=`1px solid ${isOk?'rgba(34,197,94,.3)':'rgba(239,68,68,.3)'}`;}
+
+      // Per-integration configured status from /health/integrations
+      let _integCfg={};
+      if(integR.status==='fulfilled'&&integR.value?.ok){
+        try{const id=await integR.value.json();_integCfg=id.integrations||{};}catch(e){}
+      }
+      // Map integration keys to configured status (env-var based)
+      const _cfgMap={
+        aws:  _integCfg.aws?.configured,
+        github: integR.status==='fulfilled'?((_integCfg.github||{}).repo_valid||false):undefined,
+        grafana: _integCfg.grafana?.configured,
+        k8s:  _integCfg.k8s?.configured,
+        vscode: false, // VS Code extension — never configured server-side
+        email: _integCfg.email?.configured||false,
+      };
+
       // Build integration checklist
       const allIntegrations=[
         {key:'aws',label:'AWS',icon:'☁️'},
@@ -2757,24 +2788,35 @@ const App = {
       ];
       let html=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:5px">`;
       html+=allIntegrations.map(({key,label,icon})=>{
-        const active=sources.some(s=>s.toLowerCase().includes(key))||isOk;
+        const configured=_cfgMap[key];  // true=configured, false=not configured, undefined=unknown
+        const inSources=sources.some(s=>s.toLowerCase().includes(key));
         const hasIssue=issues.some(i=>i.toLowerCase().includes(key));
-        const dot=hasIssue?'#f87171':active?'#22c55e':'#6b7280';
-        const bg=hasIssue?'rgba(239,68,68,.06)':active?'rgba(34,197,94,.04)':'rgba(255,255,255,.025)';
-        const bdr=hasIssue?'rgba(239,68,68,.2)':active?'rgba(34,197,94,.15)':'var(--border)';
-        const txt=hasIssue?'#f87171':active?'var(--text)':'var(--muted)';
-        return`<div style="display:flex;align-items:center;gap:7px;padding:7px 9px;background:${bg};border-radius:7px;border:1px solid ${bdr}">
+        // Green: configured + responding | Amber: configured but not in sources | Gray: not configured
+        let dot,bg,bdr,txt,tooltip;
+        if(hasIssue){
+          dot='#f87171';bg='rgba(239,68,68,.06)';bdr='rgba(239,68,68,.2)';txt='#f87171';tooltip='Issue detected';
+        } else if(configured===false){
+          dot='#6b7280';bg='rgba(255,255,255,.015)';bdr='var(--border)';txt='var(--muted)';tooltip='Not configured';
+        } else if(inSources){
+          dot='#22c55e';bg='rgba(34,197,94,.04)';bdr='rgba(34,197,94,.15)';txt='var(--text)';tooltip='Connected';
+        } else if(configured===true){
+          dot='#fbbf24';bg='rgba(251,191,36,.06)';bdr='rgba(251,191,36,.2)';txt='#fbbf24';tooltip='Configured — unreachable';
+        } else {
+          dot='#6b7280';bg='rgba(255,255,255,.015)';bdr='var(--border)';txt='var(--muted)';tooltip='Unknown';
+        }
+        return`<div title="${tooltip}" style="display:flex;align-items:center;gap:7px;padding:7px 9px;background:${bg};border-radius:7px;border:1px solid ${bdr}">
           <span style="font-size:.9em">${icon}</span>
           <span style="font-size:.78em;font-weight:500;color:${txt};flex:1">${label}</span>
-          <span style="width:6px;height:6px;border-radius:50%;background:${dot};box-shadow:0 0 ${active?'6px':'0'} ${dot};flex-shrink:0"></span>
+          <span style="width:6px;height:6px;border-radius:50%;background:${dot};box-shadow:0 0 ${inSources?'6px':'0'} ${dot};flex-shrink:0"></span>
         </div>`;
       }).join('');
       html+=`</div>`;
       if(issues.length){html+=`<div style="margin-top:10px">`+issues.map(i=>`<div style="padding:6px 10px;background:rgba(248,113,113,.07);border-left:2px solid var(--red);border-radius:0 6px 6px 0;font-size:.78em;margin-bottom:4px;color:var(--text2)">${i}</div>`).join('')+`</div>`;}
       document.getElementById('dash-health').innerHTML=html;
-      // Update health ring
-      const healthyCount=allIntegrations.filter(({key})=>sources.some(s=>s.toLowerCase().includes(key))||isOk).length;
-      const pct=Math.round((healthyCount/allIntegrations.length)*100);
+      // Update health ring — only count configured+connected integrations
+      const healthyCount=allIntegrations.filter(({key})=>sources.some(s=>s.toLowerCase().includes(key))).length;
+      const configuredCount=allIntegrations.filter(({key})=>_cfgMap[key]!==false).length||allIntegrations.length;
+      const pct=Math.round((healthyCount/configuredCount)*100);
       const ring=document.getElementById('health-ring-wrap');
       const rpct=document.getElementById('health-ring-pct');
       if(ring){const c=pct>=80?'#4ade80':pct>=50?'#fbbf24':'#f87171';ring.style.background=`conic-gradient(${c} ${pct}%,rgba(255,255,255,.06) ${pct}%)`;if(rpct){rpct.textContent=pct+'%';rpct.style.color=c;}}
@@ -2824,9 +2866,11 @@ const App = {
       document.getElementById('ds-k8s').innerHTML=`<span class="badge badge-gray" style="font-size:1em;padding:4px 12px">Unavailable</span>`;
     }
 
-    // Audit log / Recent Activity
+    // Audit log / Recent Activity — parse once, reuse for recent incidents widget
+    let _auditData=null;
     if(auditR.status==='fulfilled'&&auditR.value?.ok){
-      const d=await auditR.value.json();const logs=d.entries||d.logs||[];
+      _auditData=await auditR.value.json();
+      const logs=_auditData.entries||_auditData.logs||[];
       const el=document.getElementById('dash-activity');
       if(!logs.length){
         el.innerHTML=`<div style="display:flex;flex-direction:column;gap:0">
@@ -2853,14 +2897,16 @@ const App = {
     } else {
       document.getElementById('dash-activity').innerHTML=`<div style="font-size:.8em;color:var(--muted);padding:8px 0">Activity feed unavailable — check API connection.</div>`;
     }
+    // Fire extras in parallel — pass already-parsed audit data to avoid a second fetch
+    this.loadDashboardExtras(_auditData);
   },
 
   // ── DASHBOARD EXTRA WIDGETS ──────────────────────────────────────
-  async loadDashboardExtras(){
+  async loadDashboardExtras(auditData){
     this.loadDashboardAWS();
     this.loadDashboardVSCode();
     this.loadDashboardLLM();
-    this.loadDashboardRecentIncidents();
+    this.loadDashboardRecentIncidents(auditData);
     this.loadDashboardPlatformStats();
   },
 
@@ -2947,13 +2993,17 @@ const App = {
     }catch(e){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">LLM status unavailable</div>';}
   },
 
-  async loadDashboardRecentIncidents(){
+  async loadDashboardRecentIncidents(cachedAuditData){
     const el=document.getElementById('dash-recent-incidents');
     if(!el)return;
     try{
-      const r=await this.api('GET','/audit/log?limit=12');
-      if(!r||!r.ok){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">No data</div>';return;}
-      const d=await r.json();
+      // Reuse audit data already fetched by loadDashboard to avoid a duplicate request
+      let d=cachedAuditData;
+      if(!d){
+        const r=await this.api('GET','/audit/log?limit=12');
+        if(!r||!r.ok){el.innerHTML='<div style="font-size:.8em;color:var(--muted)">No data</div>';return;}
+        d=await r.json();
+      }
       const entries=(d.entries||d.logs||[]).filter(e=>(e.action||'').toLowerCase().includes('incident')||e.incident_id);
       if(!entries.length){
         el.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;padding:20px 0">
@@ -3025,6 +3075,22 @@ const App = {
     const alerts=[];const unavailable=[];
     const setDot=(id,color)=>{const d=document.getElementById(id);if(d)d.style.background=color;};
     const setVal=(id,v)=>{const d=document.getElementById(id);if(d)d.textContent=v;};
+
+    // Show stale detector banner if any detector hasn't run in 30+ minutes
+    this.api('GET','/health/detectors').then(r=>{
+      if(!r||!r.ok)return;
+      r.json().then(d=>{
+        const banner=document.getElementById('detector-health-banner');
+        if(!banner)return;
+        if(d.any_stale){
+          const stale=Object.entries(d.detectors).filter(([,v])=>v.stale).map(([k,v])=>`${k} (${Math.round(v.last_success_seconds_ago/60)}m ago)`);
+          banner.textContent=`⚠ Stale detectors — no data for: ${stale.join(', ')}`;
+          banner.style.display='block';
+        } else {
+          banner.style.display='none';
+        }
+      });
+    }).catch(()=>{});
 
     // CloudWatch
     try{
@@ -3232,6 +3298,21 @@ const App = {
   },
 
   _initIncidentForm(){
+    // Reset all toggle state so previous values don't leak across navigations
+    this.dryRun=false;
+    this.autoRemediate=false;
+    const dr=document.getElementById('dry-run-toggle');
+    const sl=document.getElementById('slack-ch-toggle');
+    const ar=document.getElementById('auto-rem-toggle');
+    if(dr)dr.classList.remove('on');
+    if(sl)sl.classList.remove('on');
+    if(ar)ar.classList.remove('on');
+    // Reset form fields to defaults
+    const sevEl=document.getElementById('inc-sev');
+    const hoursEl=document.getElementById('inc-hours');
+    if(sevEl)sevEl.value='high';
+    if(hoursEl)hoursEl.value='2';
+    // Admin lock on auto-remediate
     const isAdmin=this._isAdmin();
     const wrap=document.getElementById('auto-rem-wrap');
     const lock=document.getElementById('auto-rem-lock');
@@ -3337,7 +3418,11 @@ const App = {
 
   renderIncidentResult(el,d,id,isDry=false){
     const plan=d.plan||{};
-    const risk=(plan.risk||d.risk_level||'unknown').toLowerCase();
+    // risk can be a string label or a numeric score from the planner
+    const _rawRisk=plan.risk||plan.risk_level||d.risk_level||d.risk||'';
+    const _riskScore=typeof _rawRisk==='number'?_rawRisk:(d.risk_score||plan.risk_score||0);
+    const risk=(_rawRisk&&typeof _rawRisk==='string'?_rawRisk
+      :_riskScore>=0.8?'high':_riskScore>=0.5?'medium':_riskScore>0?'low':'unknown').toLowerCase();
     const riskCls=risk==='critical'?'badge-red':risk==='high'?'badge-red':risk==='medium'?'badge-amber':'badge-green';
     const conf=Math.round((plan.confidence||0)*100);
     const confCls=conf>=70?'high':conf>=40?'med':'low';
@@ -3449,7 +3534,7 @@ const App = {
             :`<div class="step-reason" style="color:#fbbf24;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.18);border-radius:6px;padding:4px 8px;font-size:.78em">&#9888; Policy: ${blockReason}</div>`
           ):''}
           ${execResultHtml}
-          ${isExec&&d.approved_by?`<div style="margin-top:6px;font-size:.75em;color:var(--muted)">&#10003; Approved by <b style="color:#4ade80">${d.approved_by}</b></div>`:''}
+          ${isExec&&(d._approved_by||d.approved_by)?`<div style="margin-top:6px;font-size:.75em;color:var(--muted)">&#10003; Approved by <b style="color:#4ade80">${d._approved_by||d.approved_by}</b></div>`:''}
           ${approvalBtn}
         </div>
       </li>`;
@@ -3590,7 +3675,11 @@ const App = {
           </div>
         </div>`;
       }
-    }catch(e){bannerEl.innerHTML='';}
+    }catch(e){
+      bannerEl.innerHTML=`<div style="margin:12px 0;padding:10px 14px;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:.78em;color:#f87171">
+        &#9888; Could not check approval status — <span style="color:var(--muted)">${e.message||'network error'}</span>
+      </div>`;
+    }
   },
 
   _incidentItems: [],
@@ -3624,6 +3713,9 @@ const App = {
     const el=document.getElementById('active-incidents');
     const banner=document.getElementById('active-incidents-banner');
     if(!el)return;
+
+    // Guard: if cache not loaded yet, trigger a load then return
+    if(!this._incidentItems){this.loadIncidents();return;}
 
     let items=[...this._incidentItems];
     const isActive=statusVal==='active';
@@ -3756,10 +3848,11 @@ const App = {
         const status=this._normaliseStatus(rawStatus.toString())||'unknown';
 
         // Actions count
-        const actionCount=p.actions_executed!==undefined?p.actions_executed
-          :(i.action_count!==undefined?i.action_count
-          :(p.actions_taken!==undefined?p.actions_taken
-          :(Array.isArray(i.actions)?i.actions.length:'—')));
+        const actionCount=typeof p.actions_executed==='number'?p.actions_executed
+          :typeof i.action_count==='number'?i.action_count
+          :typeof p.actions_taken==='number'?p.actions_taken
+          :Array.isArray(i.executed_actions)?i.executed_actions.length
+          :Array.isArray(i.actions)?i.actions.length:'—';
 
         // Timestamp
         const rawTs=i.created_at||p.created_at||i.requested_at||p.requested_at||'';
@@ -3950,6 +4043,13 @@ const App = {
           }
         }catch(e){}
         body.innerHTML='<div style="padding:32px;text-align:center;color:var(--muted);font-size:.84em">No stored data for this incident.<br><br><button id="inc-modal-fillbtn" class="btn btn-primary btn-sm">Fill &amp; Re-run Pipeline</button></div>';
+        // Show the Re-run header button so user isn't stuck
+        document.getElementById('inc-modal-rerun').style.display='';
+        document.getElementById('inc-modal-rerun').onclick=()=>{
+          App.closeModal('incident-detail-modal');
+          const el=document.getElementById('inc-id');if(el)el.value=incidentId;
+          const rb=document.getElementById('run-inc-btn');if(rb)rb.scrollIntoView({behavior:'smooth'});
+        };
         const fb=body.querySelector('#inc-modal-fillbtn');
         if(fb)fb.onclick=()=>{App.closeModal('incident-detail-modal');const el=document.getElementById('inc-id');if(el)el.value=incidentId;const rb=document.getElementById('run-inc-btn');if(rb)rb.scrollIntoView({behavior:'smooth'});};
         return;
@@ -5196,6 +5296,10 @@ const App = {
         const incidentId=d.incident_id;
         const executed=d.executed_actions||[];
         const statusLabel=(d.status||'completed').replace(/_/g,' ');
+        // Mark all inline resume buttons as executed so the card updates immediately
+        document.querySelectorAll('.btn-resume-inline').forEach(b=>{
+          b.disabled=true;b.textContent='✓ Executed';b.style.background='#374151';b.style.color='#9ca3af';
+        });
         // Show execution summary in modal body briefly
         const modalBody=document.getElementById('approve-modal-body');
         if(modalBody){
@@ -5245,9 +5349,15 @@ const App = {
           this.toast(`Executed — ${execSummary||statusLabel}`,'success');
           setTimeout(()=>this.loadIncidents(),500);
         },2500);
-      }else{const e=await r.json().catch(()=>({}));this.toast('Resume failed: '+(e.detail||'Unknown'),'error');}
-    }catch(e){this.toast('Error: '+e.message,'error');}
-    finally{
+      }else{
+        const e=await r.json().catch(()=>({}));
+        this.toast('Resume failed: '+(e.detail||'Unknown'),'error');
+        // Re-enable buttons only on failure so user can retry
+        if(btn){btn.disabled=false;btn.innerHTML='&#9654; Resume Pipeline';}
+        document.querySelectorAll('.btn-resume-inline').forEach(b=>{b.disabled=false;b.textContent='▶ Resume Pipeline';});
+      }
+    }catch(e){
+      this.toast('Error: '+e.message,'error');
       if(btn){btn.disabled=false;btn.innerHTML='&#9654; Resume Pipeline';}
       document.querySelectorAll('.btn-resume-inline').forEach(b=>{b.disabled=false;b.textContent='▶ Resume Pipeline';});
     }
@@ -6037,6 +6147,9 @@ what failed pipelines do I have in GitLab?
               msgs.scrollTop=msgs.scrollHeight;
             } else if(ev.type==='done'){
               this.chatSessionId=ev.session_id||this.chatSessionId;
+              // Update pending action state from server response (strict check to prevent stale state)
+              this.pendingAction=ev.needs_confirm===true?ev.pending_action:null;
+              this.pendingParams=ev.needs_confirm===true?ev.pending_params:null;
               // Update meta with resolved provider badge
               resolvedProvider=ev.llm_provider||ev.provider||'';
               if(resolvedProvider){
@@ -6758,7 +6871,7 @@ what failed pipelines do I have in GitLab?
             ${d.fix_suggestion?`<div><div style="font-size:.7em;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Fix Suggestion</div><div style="font-size:.85em;line-height:1.5">${d.fix_suggestion}</div></div>`:''}
             ${d.report?`<div><div style="font-size:.7em;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Report</div><pre style="font-size:.78em;white-space:pre-wrap;background:var(--surface2);border-radius:6px;padding:10px;margin:0">${d.report}</pre></div>`:''}
             ${d.actions_taken&&d.actions_taken.length?`<div><div style="font-size:.7em;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Actions Taken</div><div style="font-size:.82em">${d.actions_taken.map(a=>`<span style="display:inline-block;background:var(--surface2);border-radius:4px;padding:2px 8px;margin:2px">${a}</span>`).join('')}</div></div>`:''}
-            <div style="font-size:.75em;color:var(--text2)">Elapsed: ${d.elapsed_s}s · dry_run=${d.dry_run} · auto_fix=${d.auto_fix}</div>
+            <div style="font-size:.75em;color:var(--text2)">Elapsed: ${d.elapsed_s!=null?d.elapsed_s+'s':'—'} · dry_run=${d.dry_run??false} · auto_fix=${d.auto_fix??false}</div>
           </div>
         </div>`;
     }catch(e){resEl.style.display='block';resEl.textContent='Error: '+e;}
@@ -6767,7 +6880,7 @@ what failed pipelines do I have in GitLab?
 
   async debugWithAI(){
     // Pre-fill K8s tab from description and switch to it
-    const desc=document.getElementById('inc-description')?.value.trim()||'';
+    const desc=document.getElementById('inc-desc')?.value.trim()||'';
     this.switchIncidentTab('k8s');
     if(desc&&!document.getElementById('k8s-pod')?.value){
       this.toast('Switch to K8s tab — enter namespace and pod name, then click Run AI Debug','info');
@@ -7071,7 +7184,7 @@ what failed pipelines do I have in GitLab?
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
               Team Members
             </div>
-            <input id="users-search" type="text" placeholder="&#128269; Search by name..." style="padding:6px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.8em;width:200px;outline:none" oninput="App.filterUsers(this.value)">
+            <input id="users-search" type="text" placeholder="&#128269; Search by name..." style="padding:6px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg2);color:var(--text1);font-size:.8em;width:200px;outline:none" oninput="App._debounce('usersFilter',()=>App.filterUsers(this.value),200)">
           </div>
           <div id="role-filter-pills" style="display:flex;gap:6px;padding-bottom:12px;flex-wrap:wrap">
             ${['all','super_admin','admin','developer','viewer'].map((r,i)=>{

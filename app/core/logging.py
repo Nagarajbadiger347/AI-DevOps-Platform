@@ -72,11 +72,14 @@ def new_trace_id() -> str:
 # ── JSON formatter ────────────────────────────────────────────────────────────
 
 _NOISE_FIELDS = frozenset({
+    # Standard LogRecord instance attributes — never re-emit these
     "args", "exc_info", "exc_text", "stack_info",
     "lineno", "funcName", "filename", "module",
     "created", "msecs", "relativeCreated", "thread",
     "threadName", "processName", "process", "taskName",
-    "levelno", "pathname", "name", "message",
+    "levelno", "levelname", "pathname", "name", "message",
+    # Already mapped to our own keys
+    "msg", "levelname",
 })
 
 
@@ -101,11 +104,13 @@ class _JSONFormatter(logging.Formatter):
         if ten := tenant_id_var.get(""):
             base["tenant_id"] = ten
 
-        # Merge extra kwargs from the logger call
+        # Merge extra kwargs from the logger call (fields added via extra={...})
+        # Use record.__dict__ but exclude all standard LogRecord instance fields
+        # by name — checking against LogRecord.__dict__ (class dict) is wrong
+        # because instance fields like levelname/msg/args are NOT in the class dict.
         extra = {
             k: v for k, v in record.__dict__.items()
-            if k not in logging.LogRecord.__dict__
-            and k not in _NOISE_FIELDS
+            if k not in _NOISE_FIELDS
             and not k.startswith("_")
         }
         base.update(extra)

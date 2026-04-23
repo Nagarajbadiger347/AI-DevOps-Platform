@@ -83,6 +83,11 @@ def assign_role(user: str, role: str, changed_by: str = "system", changer_role: 
     previous = _user_roles.get(user, "none")
     _user_roles[user] = role
     _save_to_file(_config_path)
+    try:
+        from app.core.database import execute
+        execute("UPDATE users SET role = %s, updated_at = NOW() WHERE username = %s", (role, user))
+    except Exception:
+        pass
     _audit_log(user=changed_by, action="assign_role",
                params={"target_user": user, "new_role": role, "previous_role": previous},
                result={"success": True}, source="rbac")
@@ -102,8 +107,16 @@ def revoke_role(user: str, changed_by: str = "system") -> dict:
 
 
 def get_user_role(user: str) -> str:
-    """Return the role for a user, defaulting to 'viewer' if no role is assigned."""
+    """Return the role for a user — checks DB first, falls back to in-memory cache."""
     user = user.strip().lower()
+    try:
+        from app.core.database import execute_one
+        row = execute_one("SELECT role FROM users WHERE username = %s", (user,))
+        if row and row.get("role"):
+            _user_roles[user] = row["role"]  # sync cache
+            return row["role"]
+    except Exception:
+        pass
     return _user_roles.get(user, "viewer")
 
 

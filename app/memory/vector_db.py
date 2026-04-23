@@ -1,159 +1,235 @@
+"""Incident vector store — PostgreSQL + pgvector (replaces ChromaDB).
+
+Each incident is stored with:
+  - Full metadata (type, severity, source, root_cause, resolution)
+  - tenant_id for complete isolation between customers
+  - 1536-dim embedding vector for semantic similarity search
+
+Usage:
+    from app.memory.vector_db import store_incident, search_similar_incidents, get_all_incidents
+"""
+from __future__ import annotations
+
 import json
 import os
-import shutil
-import datetime
-import pathlib
-import chromadb
-from chromadb.config import Settings
+import logging
+from typing import Any
 
-_CHROMA_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
-_BACKUP_DIR  = pathlib.Path(os.getenv("CHROMA_BACKUP_DIR", "./chroma_backups"))
+logger = logging.getLogger(__name__)
 
-# Initialize Chroma client
-client = chromadb.PersistentClient(path=_CHROMA_PATH)
-collection = client.get_or_create_collection(name="incidents")
+_EMBEDDING_DIM = 1536  # OpenAI/Claude embedding size
+_VECTOR_SUPPORTED: bool | None = None
 
 
-def _flatten_metadata(data: dict) -> dict:
-    """Flatten a dict so all values are ChromaDB-compatible primitives."""
-    flat = {}
-    for k, v in data.items():
-        if isinstance(v, (str, int, float, bool)) or v is None:
-            flat[k] = v
-        else:
-            flat[k] = json.dumps(v)
-    return flat
-
-
-def store_incident(incident: dict) -> dict:
-    """Store incident in vector database."""
+def _vector_supports_pgvector() -> bool:
+    global _VECTOR_SUPPORTED
+    if _VECTOR_SUPPORTED is not None:
+        return _VECTOR_SUPPORTED
     try:
-        doc_id = str(incident.get("id", "unknown"))
-        content = f"Incident: {incident.get('type', 'unknown')} from {incident.get('source', 'unknown')} - {incident.get('payload', {})}"
+        from app.core.database import execute_one
+        row = execute_one("SELECT extname FROM pg_extension WHERE extname = %s", ("vector",))
+        _VECTOR_SUPPORTED = bool(row)
+    except Exception as exc:
+        logger.debug("vector_extension_check_failed error=%s", exc)
+        _VECTOR_SUPPORTED = False
+    return _VECTOR_SUPPORTED
 
-        collection.add(
-            documents=[content],
-            metadatas=[_flatten_metadata(incident)],
-            ids=[doc_id]
-        )
+
+# ---------------------------------------------------------------------------
+# Embedding helper
+# ---------------------------------------------------------------------------
+
+def _get_embedding(text: str) -> list[float] | None:
+    """Generate embedding vector for text. Returns None if unavailable."""
+    try:
+        import openai
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return None
+        client = openai.OpenAI(api_key=api_key)
+        resp = client.embeddings.create(input=text, model="text-embedding-3-small")
+        return resp.data[0].embedding
+    except Exception as e:
+        logger.debug("embedding_failed error=%s", e)
+        return None
+
+
+def _db():
+    from app.core.database import execute, execute_one
+    return execute, execute_one
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def store_incident(incident: dict, tenant_id: str = "default") -> dict:
+    """Store an incident in PostgreSQL with optional vector embedding."""
+    execute, execute_one = _db()
+    try:
+        doc_id      = str(incident.get("id", incident.get("incident_id", "unknown")))
+        inc_type    = incident.get("type", incident.get("incident_type", "unknown"))
+        source      = incident.get("source", "unknown")
+        description = incident.get("description", incident.get("payload", str(incident)))
+        root_cause  = incident.get("root_cause", incident.get("ai_root_cause", ""))
+        resolution  = incident.get("resolution", "")
+        severity    = incident.get("severity", "SEV3")
+        actions     = incident.get("actions_taken", incident.get("executed_actions", []))
+
+        # Generate embedding for semantic search
+        embed_text = f"{inc_type} {source} {description} {root_cause}"
+        embedding = _get_embedding(embed_text)
+        embed_str = f"[{','.join(str(v) for v in embedding)}]" if embedding else None
+        embedding_json = json.dumps(embedding) if embedding else None
+
+        metadata = {k: v for k, v in incident.items()
+                    if k not in ("id", "incident_id", "type", "source", "description",
+                                 "root_cause", "resolution", "severity", "actions_taken")}
+
+        if embed_str and _vector_supports_pgvector():
+            execute(
+                """
+                INSERT INTO incidents
+                    (incident_id, tenant_id, incident_type, source, description,
+                     root_cause, resolution, severity, actions_taken, metadata, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                ON CONFLICT (tenant_id, incident_id) DO UPDATE SET
+                    root_cause = EXCLUDED.root_cause,
+                    resolution = EXCLUDED.resolution,
+                    embedding  = EXCLUDED.embedding,
+                    metadata   = EXCLUDED.metadata
+                """,
+                (doc_id, tenant_id, inc_type, source, str(description),
+                 root_cause, resolution, severity,
+                 json.dumps(actions if isinstance(actions, list) else []),
+                 json.dumps(metadata), embed_str)
+            )
+        else:
+            execute(
+                """
+                INSERT INTO incidents
+                    (incident_id, tenant_id, incident_type, source, description,
+                     root_cause, resolution, severity, actions_taken, metadata, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (tenant_id, incident_id) DO UPDATE SET
+                    root_cause = EXCLUDED.root_cause,
+                    resolution = EXCLUDED.resolution,
+                    metadata   = EXCLUDED.metadata,
+                    embedding  = EXCLUDED.embedding
+                """,
+                (doc_id, tenant_id, inc_type, source, str(description),
+                 root_cause, resolution, severity,
+                 json.dumps(actions if isinstance(actions, list) else []),
+                 json.dumps(metadata), embedding_json)
+            )
         return {"stored": True, "id": doc_id}
     except Exception as e:
+        logger.warning("store_incident_failed error=%s", e)
         return {"stored": False, "error": str(e)}
 
 
-def delete_incident(incident_id: str) -> dict:
-    """Delete an incident from the vector database by ID."""
+def search_similar_incidents(query: str, n_results: int = 5, tenant_id: str = "default") -> list[dict]:
+    """Search for semantically similar past incidents using pgvector cosine similarity."""
+    execute, _ = _db()
     try:
-        collection.delete(ids=[str(incident_id)])
-        return {"deleted": True, "id": incident_id}
+        embedding = _get_embedding(query)
+        if embedding and _vector_supports_pgvector():
+            embed_str = f"[{','.join(str(v) for v in embedding)}]"
+            rows = execute(
+                """
+                SELECT *, 1 - (embedding <=> %s::vector) AS _similarity
+                FROM incidents
+                WHERE tenant_id = %s AND embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (embed_str, tenant_id, embed_str, n_results)
+            )
+        else:
+            # Fallback: keyword search on description
+            rows = execute(
+                """
+                SELECT *, 0.5 AS _similarity
+                FROM incidents
+                WHERE tenant_id = %s AND description ILIKE %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (tenant_id, f"%{query}%", n_results)
+            )
+        return [_row_to_dict(r) for r in rows]
+    except Exception as e:
+        logger.warning("search_similar_incidents_failed error=%s", e)
+        return [{"error": str(e)}]
+
+
+def search_incidents_by_type(incident_type: str, n_results: int = 20, tenant_id: str = "default") -> list[dict]:
+    """Fetch incidents filtered by type."""
+    execute, _ = _db()
+    try:
+        rows = execute(
+            "SELECT * FROM incidents WHERE tenant_id = %s AND incident_type = %s ORDER BY created_at DESC LIMIT %s",
+            (tenant_id, incident_type, n_results)
+        )
+        return [_row_to_dict(r) for r in rows]
+    except Exception as e:
+        logger.warning("search_incidents_by_type_failed error=%s", e)
+        return search_similar_incidents(incident_type, n_results, tenant_id)
+
+
+def get_all_incidents(limit: int = 200, tenant_id: str = "default") -> list[dict]:
+    """Fetch all stored incidents for trend analysis."""
+    execute, _ = _db()
+    try:
+        rows = execute(
+            "SELECT * FROM incidents WHERE tenant_id = %s ORDER BY created_at DESC LIMIT %s",
+            (tenant_id, limit)
+        )
+        return [_row_to_dict(r) for r in rows]
+    except Exception as e:
+        logger.warning("get_all_incidents_failed error=%s", e)
+        return []
+
+
+def delete_incident(incident_id: str, tenant_id: str = "default") -> dict:
+    execute, _ = _db()
+    try:
+        rows = execute(
+            "DELETE FROM incidents WHERE incident_id = %s AND tenant_id = %s RETURNING incident_id",
+            (incident_id, tenant_id)
+        )
+        return {"deleted": len(rows) > 0, "id": incident_id}
     except Exception as e:
         return {"deleted": False, "error": str(e)}
 
 
 def backup_chromadb() -> dict:
-    """Copy the ChromaDB directory to a timestamped backup folder.
-
-    Keeps the last 7 daily backups and deletes older ones automatically.
-    Returns {"success": True, "backup_path": "..."} or {"success": False, "error": "..."}.
-    """
-    try:
-        _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        dest = _BACKUP_DIR / f"chroma_{timestamp}"
-        shutil.copytree(_CHROMA_PATH, str(dest))
-
-        # Prune: keep only the 7 most recent backups
-        backups = sorted(_BACKUP_DIR.glob("chroma_*"), key=lambda p: p.name)
-        for old in backups[:-7]:
-            shutil.rmtree(old, ignore_errors=True)
-
-        return {"success": True, "backup_path": str(dest), "timestamp": timestamp}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    """No-op — PostgreSQL handles backups via pg_dump or managed service."""
+    return {"success": True, "message": "PostgreSQL does not require manual backups"}
 
 
 def get_backup_list() -> list[dict]:
-    """Return metadata for all available ChromaDB backups."""
-    try:
-        if not _BACKUP_DIR.exists():
-            return []
-        backups = sorted(_BACKUP_DIR.glob("chroma_*"), key=lambda p: p.name, reverse=True)
-        return [
-            {
-                "name": p.name,
-                "path": str(p),
-                "size_mb": round(sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) / 1024 / 1024, 2),
-            }
-            for p in backups
-        ]
-    except Exception:
-        return []
+    return []
 
 
-def search_similar_incidents(query: str, n_results: int = 5) -> list:
-    """Search for similar past incidents, returning metadata with distance scores."""
-    try:
-        results = collection.query(
-            query_texts=[query],
-            n_results=n_results,
-            include=["metadatas", "documents", "distances"],
-        )
-        metadatas = results.get("metadatas", [[]])[0]
-        distances = results.get("distances", [[]])[0]
-        documents = results.get("documents", [[]])[0]
-        enriched = []
-        for i, meta in enumerate(metadatas):
-            entry = dict(meta)
-            if i < len(distances):
-                # Convert cosine distance to 0-1 similarity score
-                entry["_similarity"] = round(max(0.0, 1.0 - distances[i]), 3)
-            if i < len(documents):
-                entry["_document"] = documents[i]
-            enriched.append(entry)
-        # Sort by similarity descending
-        enriched.sort(key=lambda x: x.get("_similarity", 0.0), reverse=True)
-        return enriched
-    except Exception as e:
-        return [{"error": str(e)}]
+# ---------------------------------------------------------------------------
+# Internal
+# ---------------------------------------------------------------------------
 
-
-def search_incidents_by_type(incident_type: str, n_results: int = 20) -> list:
-    """Fetch incidents filtered by type using metadata where clause."""
-    try:
-        results = collection.query(
-            query_texts=[incident_type],
-            n_results=n_results,
-            where={"type": {"$eq": incident_type}},
-            include=["metadatas", "distances"],
-        )
-        metadatas = results.get("metadatas", [[]])[0]
-        distances = results.get("distances", [[]])[0]
-        enriched = []
-        for i, meta in enumerate(metadatas):
-            entry = dict(meta)
-            entry["_similarity"] = round(max(0.0, 1.0 - distances[i]), 3) if i < len(distances) else 0.0
-            enriched.append(entry)
-        return enriched
-    except Exception:
-        # Fallback without where clause (older ChromaDB versions)
-        return search_similar_incidents(incident_type, n_results=n_results)
-
-
-def get_all_incidents(limit: int = 200) -> list:
-    """Fetch all stored incidents for trend analysis (up to limit)."""
-    try:
-        results = collection.get(
-            limit=limit,
-            include=["metadatas", "documents"],
-        )
-        metadatas = results.get("metadatas", [])
-        documents = results.get("documents", [])
-        enriched = []
-        for i, meta in enumerate(metadatas):
-            entry = dict(meta)
-            if i < len(documents):
-                entry["_document"] = documents[i]
-            enriched.append(entry)
-        return enriched
-    except Exception as e:
-        return []
+def _row_to_dict(row: dict) -> dict:
+    result = dict(row)
+    # Parse JSON fields
+    for field in ("actions_taken", "metadata"):
+        val = result.get(field)
+        if isinstance(val, str):
+            try:
+                result[field] = json.loads(val)
+            except Exception:
+                pass
+    # Convert timestamps to string
+    for field in ("created_at", "resolved_at"):
+        if result.get(field) is not None:
+            result[field] = str(result[field])
+    # Remove embedding from output (large vector, not needed in results)
+    result.pop("embedding", None)
+    return result

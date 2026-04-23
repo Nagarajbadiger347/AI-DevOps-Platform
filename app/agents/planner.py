@@ -26,15 +26,22 @@ Agents available:
 - observer: monitors real-time events and alerts
 - reporter: formats and sends outputs (Slack, API response)
 
+Safety Rules:
+- Never include destructive actions like 'delete', 'stop', 'terminate' without approval.
+- Validate all parameters for security (no arbitrary code execution).
+- For critical severity, always require approval.
+- Provide reasoning for each step.
+
 Respond ONLY with valid JSON:
 {
   "task_type": "<k8s_debug|aws_ops|pipeline_debug|general>",
   "severity": "<critical|high|medium|low>",
   "steps": [
-    {"step": 1, "agent": "<agent>", "action": "<description>", "tool": "<tool_name>", "params": {}}
+    {"step": 1, "agent": "<agent>", "action": "<description>", "tool": "<tool_name>", "params": {}, "reasoning": "<why this step>"}
   ],
   "requires_approval": <true|false>,
-  "estimated_duration_s": <int>
+  "estimated_duration_s": <int>,
+  "overall_reasoning": "<summary of plan>"
 }"""
 
     def plan(self, task: str, context: dict | None = None) -> dict:
@@ -55,6 +62,15 @@ Respond ONLY with valid JSON:
             plan = json.loads(clean)
             logger.info("[PLANNER] plan: type=%s steps=%d severity=%s",
                         plan.get("task_type"), len(plan.get("steps", [])), plan.get("severity"))
+            # Validate the plan
+            validation = self._validate_plan(plan)
+            if not validation["valid"]:
+                logger.warning("[PLANNER] plan validation failed: %s", validation["issues"])
+                return {
+                    "success": False,
+                    "plan": plan,
+                    "error": f"Validation failed: {validation['issues']}",
+                }
             return {"success": True, "plan": plan}
         except Exception as e:
             logger.warning("[PLANNER] JSON parse failed: %s — raw: %s", e, raw[:200])
@@ -63,3 +79,20 @@ Respond ONLY with valid JSON:
                 "plan": {"task_type": "general", "severity": "medium", "steps": [], "raw": raw},
                 "error": str(e),
             }
+
+    def _validate_plan(self, plan: dict) -> dict:
+        """Validate the generated plan for safety and completeness."""
+        issues = []
+        if not plan.get("steps"):
+            issues.append("No steps provided")
+        for step in plan.get("steps", []):
+            if "action" not in step:
+                issues.append(f"Step {step.get('step', '?')} missing action")
+            if step.get("action", "").lower() in ["delete", "stop", "terminate", "destroy"]:
+                if not plan.get("requires_approval", False):
+                    issues.append(f"Destructive action '{step['action']}' requires approval")
+            if "reasoning" not in step:
+                issues.append(f"Step {step.get('step', '?')} missing reasoning")
+        if plan.get("severity") == "critical" and not plan.get("requires_approval"):
+            issues.append("Critical severity requires approval")
+        return {"valid": len(issues) == 0, "issues": issues}

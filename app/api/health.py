@@ -36,7 +36,7 @@ def health_live():
 
 @router.get("/health/ready", tags=["health"])
 def health_ready():
-    """Readiness probe — checks ChromaDB, required env vars, and module imports."""
+    """Readiness probe — checks PostgreSQL, required env vars, and module imports."""
     from fastapi.responses import JSONResponse
     checks: dict = {}
     all_ok = True
@@ -50,11 +50,12 @@ def health_ready():
         all_ok = False
 
     try:
-        from app.memory.vector_db import search_similar_incidents
-        search_similar_incidents("probe", n_results=1)
-        checks["chroma"] = "ok"
+        from app.core.database import health_check
+        checks["database"] = "ok" if health_check() else "error: unreachable"
+        if checks["database"] != "ok":
+            all_ok = False
     except Exception as exc:
-        checks["chroma"] = f"error: {exc}"
+        checks["database"] = f"error: {exc}"
         all_ok = False
 
     import os as _os
@@ -68,12 +69,20 @@ def health_ready():
     return JSONResponse(status_code=code, content={"status": status, "checks": checks})
 
 
+_health_full_cache: dict = {"data": None, "ts": 0.0}
+_HEALTH_FULL_TTL = 30  # seconds
+
 @router.get("/health/full")
 def health_full():
     """Full health check — AWS, K8s, Grafana, Linux node, and all integrations."""
+    import time as _time
     import concurrent.futures as _cf
     from app.integrations.linux_checker import check_linux_node
     from app.integrations.grafana_checker import check_grafana
+
+    now = _time.time()
+    if _health_full_cache["data"] and (now - _health_full_cache["ts"]) < _HEALTH_FULL_TTL:
+        return _health_full_cache["data"]
 
     # Run all slow checks in parallel with tight timeouts
     context: dict = {}
@@ -121,12 +130,39 @@ def health_full():
     if grafana.get("firing_alerts", 0) > 0:
         overall = "degraded"
 
-    return {
+    result = {
         "status":     overall,
         "health":     health,
         "linux_node": linux,
         "grafana":    grafana,
     }
+    _health_full_cache["data"] = result
+    _health_full_cache["ts"]   = _time.time()
+    return result
+
+
+@router.get("/health/detectors")
+def health_detectors():
+    """Expose monitoring detector health — which detectors are active vs stale."""
+    import time as _time
+    try:
+        from app.monitoring.loop import _detector_health, _DETECTOR_WARN_AFTER
+    except ImportError:
+        return {"detectors": {}, "any_stale": False}
+    now = _time.time()
+    detectors = {}
+    any_stale = False
+    for name, last_ok in _detector_health.items():
+        seconds_ago = int(now - last_ok)
+        stale = seconds_ago > _DETECTOR_WARN_AFTER
+        if stale:
+            any_stale = True
+        detectors[name] = {
+            "last_success_seconds_ago": seconds_ago,
+            "stale": stale,
+            "status": "stale" if stale else "ok",
+        }
+    return {"detectors": detectors, "any_stale": any_stale}
 
 
 @router.get("/health/integrations")

@@ -316,12 +316,12 @@ def _build_catalogue():
         "get_recent_commits": {
             "desc": "Get recent commits from GitHub",
             "params": ["hours"],
-            "handler": lambda p: _get_recent_commits(hours=int(p.get("hours", 24))),
+            "handler": lambda p: _get_recent_commits(hours=max(1, int(p.get("hours") or 24))),
         },
         "get_recent_prs": {
             "desc": "Get recently merged pull requests",
             "params": ["hours"],
-            "handler": lambda p: _get_recent_prs(hours=int(p.get("hours", 48))),
+            "handler": lambda p: _get_recent_prs(hours=max(1, int(p.get("hours") or 48))),
         },
         "create_github_issue": {
             "desc": "Create a GitHub issue",
@@ -518,6 +518,29 @@ def _rule_based_intent(message: str, conv_context: str = "") -> dict | None:
     if any(k in msg for k in log_kw) and ("instance" in msg or iid):
         return {"intent": "action", "action": "get_ec2_logs", "params": {"instance_id": iid}}
 
+    # GitHub commit / repo review queries — always fetch real commits, never hallucinate
+    commit_kw = ["recent commit", "recent commits", "review commit", "review commits",
+                 "check commit", "show commit", "list commit", "github commit",
+                 "what commit", "latest commit", "last commit", "commit history",
+                 "commit review", "review recent", "recent changes", "recent change",
+                 "review your github", "review the github", "review github repo",
+                 "github repository", "any recent", "new commit", "new commits",
+                 "audit log", "audit logs", "examine the audit", "details on changes",
+                 "changes made during", "changes in the commit", "changes during commit"]
+    if any(k in msg for k in commit_kw) and any(g in msg for g in ("github", "commit", "repo", "repositor", "change", "recent", "audit")):
+        hours = 48
+        import re as _re
+        h_match = _re.search(r'(\d+)\s*hour', msg)
+        if h_match:
+            hours = max(1, int(h_match.group(1)))  # guard against 0
+        return {"intent": "action", "action": "get_recent_commits", "params": {"hours": hours}}
+
+    # GitHub PR queries — always fetch real PRs
+    pr_kw = ["recent pr", "recent pull request", "list pr", "show pr", "merged pr",
+             "open pr", "pull request review", "review pr"]
+    if any(k in msg for k in pr_kw):
+        return {"intent": "action", "action": "get_recent_prs", "params": {"hours": 48}}
+
     return None
 
 
@@ -536,6 +559,11 @@ def _detect_intent(message: str, force_provider: str = "", conv_context: str = "
             f"=== RECENT CONVERSATION ===\n{conv_context}\n"
             f"=== NEW MESSAGE ===\n{message}"
         )
+    # Add relevant context from past incidents
+    from app.chat.intelligence import get_relevant_context
+    relevant_ctx = get_relevant_context(message)
+    if relevant_ctx:
+        content += f"\n=== RELEVANT CONTEXT ===\n{relevant_ctx}"
     try:
         raw = _llm(_INTENT_SYSTEM, [{"role": "user", "content": content}],
                    max_tokens=400, force_provider=force_provider)
@@ -610,14 +638,21 @@ def _build_action_reply(action_name: str, user_msg: str, action_result: dict,
         "- CloudWatch alarms/logs: Highlight firing alarms in red (❌), OK in green (✅). "
         "Show alarm name, metric, threshold, current value.\n"
         "- Errors: State what failed, quote the exact error, suggest what to check next.\n"
-        "Keep responses concise but complete — no padding, no filler sentences."
+        "Keep responses concise but complete — no padding, no filler sentences.\n\n"
+        "After your response, append exactly 3 short follow-up suggestions the user might want to do next, "
+        "contextual to the operation just performed. Use this exact format:\n"
+        "[SUGGESTIONS]:\n"
+        "Suggestion one\n"
+        "Suggestion two\n"
+        "Suggestion three\n"
+        "[/SUGGESTIONS]"
     )
     try:
         return _llm(
             ACTION_REPLY_SYSTEM,
             [{"role": "user", "content":
                 f"User asked: {user_msg}\n\nOperation: {action_name}\nResult:\n{result_json}"}],
-            max_tokens=900,
+            max_tokens=1100,
             force_provider=force_prov,
         )
     except Exception:
@@ -639,9 +674,12 @@ def _chat_inner(payload: ChatPayload, x_user: str):
     history = [{"role": m.role, "content": m.content} for m in payload.history]
     catalogue = _get_catalogue()
 
-    allowed, remaining = check_chat(x_user)
-    if not allowed:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded — max 20 messages per minute.")
+    # Confirmations ("yes"/"no") are not new AI queries — exempt them from the chat rate limit
+    _is_confirmation = bool(payload.confirmed and payload.pending_action)
+    if not _is_confirmation:
+        allowed, remaining = check_chat(x_user)
+        if not allowed:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded — max 20 messages per minute.")
 
     action_result = None
     action_taken  = None
@@ -666,9 +704,17 @@ def _chat_inner(payload: ChatPayload, x_user: str):
                     _chat_action_count += 1
                 except Exception as exc:
                     action_result = {"success": False, "error": str(exc)}
+                    action_taken  = action_name
                 audit_log(user=x_user, action=action_name, params=params,
                           result=action_result or {}, source="chat")
-                reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
+                try:
+                    reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
+                except Exception as exc:
+                    import logging as _log_ar
+                    _log_ar.getLogger("chat").error("_build_action_reply failed for %s: %s", action_name, exc)
+                    success = (action_result or {}).get("success", True)
+                    reply = f"Action `{action_name}` {'succeeded' if success else 'failed'}." + (
+                        f" Error: {action_result['error']}" if not success else "")
         else:
             reply = "Sorry, I could not find that operation. Please try again."
 
@@ -768,9 +814,17 @@ def _chat_inner(payload: ChatPayload, x_user: str):
                     _chat_action_count += 1
                 except Exception as exc:
                     action_result = {"success": False, "error": str(exc)}
+                    action_taken  = action_name
                 audit_log(user=x_user, action=action_name, params=params,
                           result=action_result or {}, source="chat")
-                reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
+                try:
+                    reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
+                except Exception as exc:
+                    import logging as _log_ar2
+                    _log_ar2.getLogger("chat").error("_build_action_reply failed for %s: %s", action_name, exc)
+                    success = (action_result or {}).get("success", True)
+                    reply = f"Action `{action_name}` {'succeeded' if success else 'failed'}." + (
+                        f" Error: {action_result['error']}" if not success else "")
 
     # Path C: general question / conversation
     if not reply:
@@ -812,9 +866,17 @@ def _chat_inner(payload: ChatPayload, x_user: str):
             from app.llm.claude import chat_devops
             reply = chat_devops(payload.message, fallback_history, context, force_provider=force_prov)
 
+    # Extract suggestions from action replies (Path A/B) — Path C already extracts them
+    if reply and not _suggestions:
+        try:
+            from app.chat.intelligence import _extract_suggestions as _exs
+            reply, _suggestions = _exs(reply)
+        except Exception:
+            pass
+
     used_provider = force_prov or "none"
-    import uuid as _uuid2
-    sid_out = payload.session_id or f"chat-{x_user}-{_uuid2.uuid4().hex[:8]}"
+    # Use the same sid that was used for history storage (Path C), not a new random one
+    sid_out = payload.session_id or f"chat-{x_user}-default"
     return {
         "reply":          reply,
         "answer":         reply,
@@ -909,7 +971,9 @@ async def chat_stream(payload: ChatPayload, auth: AuthContext = Depends(require_
                     _am(sid, "assistant", clean_text or full_text)
                     loop.call_soon_threadsafe(queue.put_nowait,
                         _json.dumps({"type": "done", "suggestions": suggestions,
-                                     "session_id": sid, "llm_provider": "anthropic"}))
+                                     "session_id": sid, "llm_provider": "anthropic",
+                                     "pending_action": None, "pending_params": None,
+                                     "needs_confirm": False}))
                 else:
                     # Fast path: Groq-first, send full reply as one chunk
                     result = _chat_inner(payload, auth.username)
@@ -922,7 +986,10 @@ async def chat_stream(payload: ChatPayload, auth: AuthContext = Depends(require_
                         _json.dumps({"type": "chunk", "text": reply}))
                     loop.call_soon_threadsafe(queue.put_nowait,
                         _json.dumps({"type": "done", "suggestions": suggestions,
-                                     "session_id": sid, "llm_provider": result.get("llm_provider", "groq")}))
+                                     "session_id": sid, "llm_provider": result.get("llm_provider", "groq"),
+                                     "pending_action": result.get("pending_action"),
+                                     "pending_params": result.get("pending_params"),
+                                     "needs_confirm": result.get("needs_confirm", False)}))
 
             except Exception as exc:
                 import logging as _lg

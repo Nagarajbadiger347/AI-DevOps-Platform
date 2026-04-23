@@ -34,11 +34,19 @@ Thumbs.db
 .idea/
 *.swp
 
-# Logs
+# Logs — never commit log or audit files
 *.log
+logs/
+
+# SQLite databases — contain user data / PII
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
 
 # Vector/runtime databases
 chroma_db/
+chroma_backups/
 
 # Runtime data files
 post_mortems/

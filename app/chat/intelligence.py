@@ -128,6 +128,11 @@ def _llm_call(
 
     Raises RuntimeError if all providers are dead/unavailable.
     """
+    # Sanitize input to prevent prompt injection
+    user_message = _sanitize_input(user_message)
+    if system:
+        system = _sanitize_input(system)
+    
     history = history or []
     fallback_order = ["groq", "anthropic", "openai"]
     if provider:
@@ -185,6 +190,27 @@ def _llm_call(
     )
 
 
+def _sanitize_input(text: str) -> str:
+    """Sanitize user input to prevent prompt injection attacks."""
+    if not text:
+        return text
+    
+    # Remove or escape dangerous patterns
+    import re
+    
+    # Remove attempts to override system prompts
+    text = re.sub(r'(?i)(ignore|forget|override).*?(previous|system|instructions)', '', text)
+    
+    # Remove attempts to create new system prompts
+    text = re.sub(r'(?i)system.*?:', '', text)
+    
+    # Limit length to prevent token exhaustion attacks
+    if len(text) > 10000:
+        text = text[:10000] + "..."
+    
+    return text.strip()
+
+
 # ── Session memory ────────────────────────────────────────────────────────────
 
 _SESSIONS: dict[str, list[dict]] = {}   # session_id → list of {role, content}
@@ -230,6 +256,27 @@ def list_sessions() -> list[dict]:
 
 # ── Infra availability flags ──────────────────────────────────────────────────
 
+def get_relevant_context(query: str) -> str:
+    """Retrieve relevant context from past incidents and knowledge base."""
+    context = ""
+    if _MEMORY_OK:
+        similar = retrieve_similar(query, n_results=5)
+        if similar:
+            context += "\nRelevant past incidents:\n" + "\n".join([f"- {s}" for s in similar])
+    
+    # Add from post_mortems if available
+    import os
+    post_mortem_dir = Path(__file__).resolve().parents[2] / "post_mortems"
+    if post_mortem_dir.exists():
+        for file in post_mortem_dir.glob("*.md"):
+            with open(file, 'r') as f:
+                content = f.read()
+                if query.lower() in content.lower():
+                    context += f"\nFrom {file.name}:\n{content[:500]}...\n"
+                    break  # Limit to one
+    
+    return context[:1000]  # Limit length
+
 try:
     from app.memory.long_term import retrieve_similar, get_trend_report, get_trends
     _MEMORY_OK = True
@@ -259,10 +306,16 @@ except ImportError:
 
 try:
     from app.integrations import github as _github_ops
-    _GITHUB_OK = bool(os.getenv("GITHUB_TOKEN"))
+    _GITHUB_IMPORT_OK = True
 except ImportError:
     _github_ops = None
-    _GITHUB_OK = False
+    _GITHUB_IMPORT_OK = False
+
+# Checked dynamically so late .env loads and runtime config changes are picked up
+def _github_ok() -> bool:
+    return _GITHUB_IMPORT_OK and bool(os.getenv("GITHUB_TOKEN", "").strip())
+
+# Keep legacy name as a property-like alias used in prefetch_infra
 
 # ── Prefetch cache (avoids redundant AWS/K8s calls) ──────────────────────────
 
@@ -293,13 +346,18 @@ def _prefetch_get(message: str, session_id: str) -> str | None:
 
 
 def _prefetch_set(message: str, session_id: str, data: str) -> None:
-    if len(_PREFETCH_CACHE) > 1000:
-        # Evict expired entries
-        now = time.time()
+    # Evict expired entries every ~50 writes (probabilistic) and enforce hard cap
+    now = time.time()
+    if len(_PREFETCH_CACHE) % 50 == 0 or len(_PREFETCH_CACHE) > 500:
         for k in list(_PREFETCH_CACHE.keys()):
             if _PREFETCH_CACHE[k]["exp"] < now:
                 del _PREFETCH_CACHE[k]
-    _PREFETCH_CACHE[_prefetch_key(message, session_id)] = {"data": data, "exp": time.time() + _PREFETCH_TTL}
+    # Hard cap: evict oldest entries if still over limit after expiry cleanup
+    if len(_PREFETCH_CACHE) >= 1000:
+        oldest = sorted(_PREFETCH_CACHE.items(), key=lambda x: x[1]["exp"])
+        for k, _ in oldest[:200]:
+            del _PREFETCH_CACHE[k]
+    _PREFETCH_CACHE[_prefetch_key(message, session_id)] = {"data": data, "exp": now + _PREFETCH_TTL}
 
 
 def _get_cached_ec2(session_id: str) -> list[dict]:
@@ -323,7 +381,7 @@ def _prefetch_infra(message: str, session_id: str) -> str:
     if cached is not None:
         return cached
 
-    if not _AWS_OK and not _K8S_OK and not _GITHUB_OK:
+    if not _AWS_OK and not _K8S_OK and not _github_ok():
         return ""
 
     msg = message.lower()
@@ -442,9 +500,17 @@ def _prefetch_infra(message: str, session_id: str) -> str:
         return None
 
     def _fetch_github():
-        if not (_GITHUB_OK and (fetch_all or any(k in msg for k in gh_kw))):
+        # Only trigger on GitHub-related keywords
+        is_github_query = fetch_all or any(k in msg for k in gh_kw)
+        if not is_github_query:
             return None
+
+        # Token not configured — return explicit signal so LLM doesn't hallucinate
+        if not _github_ok():
+            return "[GitHub: GITHUB_TOKEN not configured — cannot fetch real commit or repo data. Tell the user to set GITHUB_TOKEN in .env.]"
+
         parts = []
+        fetch_errors = []
         try:
             r = _github_ops.list_repos()
             repos = r.get("repos", []) if isinstance(r, dict) else []
@@ -457,8 +523,9 @@ def _prefetch_infra(message: str, session_id: str) -> str:
                     private = "🔒" if repo.get("private") else "🌐"
                     lines.append(f"  • {private} {name}" + (f" [{lang}]" if lang else "") + (f" ⭐{stars}" if stars else ""))
                 parts.append("\n".join(lines))
-        except Exception:
-            pass
+        except Exception as e:
+            fetch_errors.append(f"repos: {e}")
+
         try:
             r = _github_ops.get_recent_commits(hours=48)
             commits = r if isinstance(r, list) else r.get("commits", [])
@@ -467,9 +534,15 @@ def _prefetch_infra(message: str, session_id: str) -> str:
                 for c in commits[:4]:
                     lines.append(f"  • {c.get('sha','')[:7]} — {c.get('message','')[:70]} ({c.get('author','?')})")
                 parts.append("\n".join(lines))
-        except Exception:
-            pass
-        return "\n\n".join(parts) if parts else None
+            else:
+                fetch_errors.append("commits: API returned no commits")
+        except Exception as e:
+            fetch_errors.append(f"commits: {e}")
+
+        if parts:
+            return "\n\n".join(parts)
+        # API reachable but returned no data — tell LLM explicitly so it doesn't fabricate
+        return f"[GitHub: token present but API returned no data — {'; '.join(fetch_errors) if fetch_errors else 'empty response'}. Do NOT invent commit IDs or commit messages.]"
 
     incident_kw = {"incident", "past incident", "memory", "similar", "trend", "pattern",
                    "recurring", "improvement", "post-mortem", "mttr", "root cause history",
@@ -588,13 +661,13 @@ _SYSTEM_PROMPT = """You are **NexusOps AI** — the senior SRE assistant embedde
 
 ## How to answer:
 
-**Infrastructure questions** → use the live data injected below. Be specific: real instance IDs, real states, real counts. Never say "I don't have access" when data is already in context.
+**Infrastructure questions** → use the live data injected below. Be specific: real instance IDs, real states, real counts. Never say "I don't have access" when data is already in context. If live data is absent for a source (e.g. `[GitHub: token not configured]`), say exactly that — do NOT fabricate data.
 
-**Action requests** (restart, scale, stop, start, run pipeline) → execute directly through the platform. Do NOT give AWS CLI commands — the platform can perform the action right now. Say "I'll start it now" and trigger the action. Only show a CLI command if the user explicitly asks "how do I do this manually".
+**Action requests** (restart, scale, stop, start, run pipeline) → ALWAYS ask for confirmation before executing. Never execute an action autonomously. Say "Should I stop instance `<id>` now?" and wait for the user to confirm. Only trigger the action after explicit user approval. Do NOT give AWS CLI commands unless the user asks "how do I do this manually".
 
 **Incident questions** → structure as: what broke → why → impact → fix → prevention. Use real IDs and metrics from context.
 
-**Instance stopped / no logs available** → never just say "stopped, no events" and never give a CLI command. Instead: ask the user "Should I start instance `<id>` now?" or say "I can start it — want me to?" and wait for confirmation. If they say yes, trigger `start_ec2` directly.
+**Instance stopped / no logs available** → never just say "stopped, no events" and never give a CLI command. Instead: ask the user "Should I start instance `<id>` now?" or say "I can start it — want me to?" and wait for confirmation. Only trigger `start_ec2` after the user explicitly says yes.
 
 **"check infra" / "health report" / "status"** → return a FULL report covering every section: 🖥 EC2, 🔔 CloudWatch Alarms, 🐳 ECS, 🗄 RDS, λ Lambda, ☸ Kubernetes, 🐙 GitHub — even if empty. End with a health verdict and top 3 recommended actions.
 
@@ -607,10 +680,15 @@ _SYSTEM_PROMPT = """You are **NexusOps AI** — the senior SRE assistant embedde
 2. **Specific.** Use real IDs, names, metrics from context — never placeholders like `<instance_id>`.
 3. **No unnecessary confirms.** If you already have the info, act or answer — don't ask again.
 4. **Honest.** If data is missing, say exactly what is missing and how to get it.
-8. **NEVER fabricate metrics.** If CloudWatch data, CPU percentages, response times, error rates, or any numeric metric is not present in the injected live data, say "I don't have that metric available right now" and offer to fetch it via the platform. Never invent percentages, timestamps, or trends. Fabricated data is worse than no data.
+8. **NEVER fabricate data.** This applies to ALL sources — not just metrics:
+   - **GitHub**: never invent commit SHAs, commit messages, PR titles, or repo names. If the live data says `[GitHub: token not configured]` or `[GitHub: API returned no data]`, say exactly that to the user and tell them what to configure. Do NOT generate fake commit IDs like `abc123`.
+   - **AWS/K8s**: never invent instance IDs, pod names, alarm names, or resource counts.
+   - **Metrics**: never invent CPU percentages, latency numbers, error rates, or timestamps.
+   - Fabricated data is far worse than saying "I don't have this data right now".
 5. **Format.** Markdown always. Code blocks for commands. Bold the critical thing in each section.
 6. **Memory-aware.** Reference conversation history. If the user asked about an instance 2 messages ago, remember it.
 7. **Audit-aware.** When actions are executed, they are logged with action_id, duration_ms, and outcome. Mention this when relevant (e.g. "this will be audited").
+8. **NEVER fabricate action execution.** You CANNOT directly execute AWS, K8s, or any infrastructure actions. Never say "I'll stop it now", "Instance stopped successfully", or any phrase that implies you executed something. You can only suggest actions and ask for confirmation. The platform executes actions separately through its tool system — you are the conversational layer only.
 
 ## Incident Memory Analysis format:
 When the user asks to analyse past incidents, search memory, or identify improvement areas, **always** respond using this exact structure:

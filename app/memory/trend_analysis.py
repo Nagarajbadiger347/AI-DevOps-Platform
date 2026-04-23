@@ -206,10 +206,13 @@ def format_trend_report(trends: dict) -> str:
     score = trends.get("reliability_score", 0)
     score_emoji = "🟢" if score >= 80 else "🟡" if score >= 50 else "🔴"
 
+    confidence = "⚠️ low confidence (< 5 incidents)" if total < 5 else ("moderate confidence" if total < 20 else "")
+    score_display = f"{score_emoji} **{score}/100**" + (f" _{confidence}_" if confidence else "")
+
     lines = [
         f"## 📊 Incident Trend Analysis",
         f"",
-        f"**{total} incidents analysed** · Reliability Score: {score_emoji} **{score}/100**",
+        f"**{total} incident{'s' if total != 1 else ''} analysed** · Reliability Score: {score_display}",
         "",
     ]
 

@@ -40,6 +40,7 @@ def create_quick_action_approval(req: QuickActionRequest, auth: AuthContext = De
             risk_score=req.risk_score,
             cost_report=None,
             requested_by=auth.username,
+            tenant_id=auth.tenant_id,
         )
         _PENDING_PIPELINE_STATES[approval.correlation_id] = {
             "incident_id":    req.incident_id,
@@ -65,9 +66,9 @@ def create_quick_action_approval(req: QuickActionRequest, auth: AuthContext = De
 @router.get("/pending")
 def list_pending_approvals_endpoint(auth: AuthContext = Depends(require_viewer)):
     try:
-        from app.incident.approval import _pending_approvals, STATUS_PENDING, STATUS_APPROVED, cleanup_expired
-        cleanup_expired()
-        approvals = [a for a in _pending_approvals.values() if a.status in (STATUS_PENDING, STATUS_APPROVED)]
+        from app.incident.approval import list_pending_approvals, cleanup_expired
+        cleanup_expired(auth.tenant_id)
+        approvals = list_pending_approvals(auth.tenant_id)
         return {"approvals": [vars(a) for a in approvals]}
     except Exception as e:
         return {"approvals": [], "error": str(e)}
@@ -76,20 +77,26 @@ def list_pending_approvals_endpoint(auth: AuthContext = Depends(require_viewer))
 @router.get("/history")
 def list_approval_history_endpoint(auth: AuthContext = Depends(require_viewer)):
     try:
-        from app.incident.approval import _pending_approvals
-        return {"approvals": [vars(a) for a in _pending_approvals.values()]}
+        from app.core.database import execute
+        rows = execute(
+            "SELECT * FROM approvals WHERE tenant_id = %s ORDER BY created_at DESC LIMIT 100",
+            (auth.tenant_id,)
+        )
+        return {"approvals": rows}
     except Exception as e:
         return {"approvals": [], "error": str(e)}
 
 
 @router.delete("/{correlation_id}")
 def delete_approval_endpoint(correlation_id: str, auth: AuthContext = Depends(require_developer)):
-    from app.incident.approval import _pending_approvals, _save_approvals
-    if correlation_id not in _pending_approvals:
+    from app.core.database import execute
+    rows = execute(
+        "DELETE FROM approvals WHERE approval_id = %s AND tenant_id = %s RETURNING approval_id",
+        (correlation_id, auth.tenant_id)
+    )
+    if not rows:
         raise HTTPException(status_code=404, detail="Approval not found")
-    del _pending_approvals[correlation_id]
     _PENDING_PIPELINE_STATES.pop(correlation_id, None)
-    _save_approvals()
     return {"ok": True, "deleted": correlation_id}
 
 
@@ -97,7 +104,7 @@ def delete_approval_endpoint(correlation_id: str, auth: AuthContext = Depends(re
 def approve_actions_endpoint(correlation_id: str, req: ApprovalDecision, auth: AuthContext = Depends(require_developer)):
     try:
         from app.incident.approval import approve_actions
-        result = approve_actions(correlation_id, req.approved_action_indices, auth.username)
+        result = approve_actions(correlation_id, req.approved_action_indices, auth.username, auth.tenant_id)
         from app.core.audit import audit_log as _al
         _al(user=auth.username, action="approval_approved",
             params={"correlation_id": correlation_id,
@@ -113,7 +120,7 @@ def approve_actions_endpoint(correlation_id: str, req: ApprovalDecision, auth: A
 def reject_approval_endpoint(correlation_id: str, req: ApprovalDecision, auth: AuthContext = Depends(require_developer)):
     try:
         from app.incident.approval import reject_approval
-        result = reject_approval(correlation_id, req.reason or "Rejected by user", auth.username)
+        result = reject_approval(correlation_id, req.reason or "Rejected by user", auth.username, auth.tenant_id)
 
         # Update the incident result cache so the UI reflects the rejection immediately
         saved_state = _PENDING_PIPELINE_STATES.pop(correlation_id, None)
@@ -197,6 +204,11 @@ def resume_approved_pipeline(
         resume_state["completed_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
         resume_state["resumed_by"]   = auth.username
         resume_state["approved_by"]  = auth.username
+        # Mark approval as executed so it no longer appears in /approvals/pending
+        from app.incident.approval import STATUS_EXECUTED
+        from app.core.database import execute as _exec
+        _exec("UPDATE approvals SET status = %s, resolved_at = NOW() WHERE approval_id = %s",
+              (STATUS_EXECUTED, correlation_id))
     except Exception as exc:
         resume_state["status"] = "failed"
         resume_state["errors"] = resume_state.get("errors", []) + [str(exc)]

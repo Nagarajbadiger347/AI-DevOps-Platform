@@ -2,6 +2,56 @@ version: '3.8'
 
 services:
 
+  # ── PostgreSQL database ───────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_DB: nexusops
+      POSTGRES_USER: nexusops
+      POSTGRES_PASSWORD: nexusops123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    restart: unless-stopped
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexusops -d nexusops"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Prometheus monitoring ─────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   # ── Nginx reverse proxy ───────────────────────────────────────
   nginx:
     image: nginx:1.25-alpine
@@ -26,17 +76,20 @@ services:
     build:
       context: .
       target: final
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
     volumes:
       - chroma_data:/app/chroma_db
       - app_logs:/app/logs
     environment:
       - PYTHONPATH=/app
       - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://nexusops:nexusops123@postgres:5432/nexusops
     env_file:
       - .env
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -55,7 +108,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 40s
     logging:
       driver: json-file
       options: { max-size: "50m", max-file: "5" }
@@ -63,7 +116,7 @@ services:
   # ── Redis (rate limiting, session cache) ──────────────────────
   redis:
     image: redis:7-alpine
-    command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     expose:
@@ -89,6 +142,8 @@ volumes:
   chroma_data:
   redis_data:
   app_logs:
+  postgres_data:
+  prometheus_data:
 
 networks:
   internal:

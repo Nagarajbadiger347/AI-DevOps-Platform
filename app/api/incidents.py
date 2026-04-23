@@ -16,11 +16,13 @@ Canonical endpoints:
 
 """
 import re
+import json
+import asyncio
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, AsyncIterator
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import (
@@ -215,6 +217,28 @@ def _run_pipeline_from_request(req: IncidentRunRequest, auth: Optional[AuthConte
         result = _handle_approval_flow(result, slack_channel)
     else:
         _send_completion_notification(result)
+        try:
+            import datetime as _dt
+            plan = result.get("plan") or {}
+            now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+            store_incident({
+                "id": result.get("incident_id", "unknown"), "type": "pipeline_v2",
+                "source": "langgraph_orchestrator", "created_at": now,
+                "description": result.get("description", ""), "status": result.get("status", "completed"),
+                "confidence": float(plan.get("confidence", 0.5)),
+                "payload": {
+                    "description": result.get("description", ""),
+                    "root_cause": plan.get("root_cause", ""),
+                    "summary": plan.get("summary", ""),
+                    "risk": plan.get("risk", ""),
+                    "confidence": float(plan.get("confidence", 0.5)),
+                    "status": result.get("status", "completed"),
+                    "created_at": now,
+                },
+            })
+        except Exception as exc:
+            logger.warning("incident_memory_store_failed incident=%s error=%s",
+                           result.get("incident_id"), exc)
 
     _cache_result(result.get("incident_id", ""), result)
     return result
@@ -286,9 +310,9 @@ def incident_github_pr(
 # ── Memory endpoints ──────────────────────────────────────────────────────────
 
 @router.get("/memory/incidents")
-def memory_incidents_list(limit: int = 10, _: AuthContext = Depends(require_viewer)):
+def memory_incidents_list(limit: int = 10, auth: AuthContext = Depends(require_viewer)):
     try:
-        results = search_similar_incidents("incident", n_results=limit)
+        results = search_similar_incidents("incident", n_results=limit, tenant_id=auth.tenant_id)
         if results and isinstance(results[0], list):
             results = results[0]
         return {"incidents": results or []}
@@ -298,10 +322,11 @@ def memory_incidents_list(limit: int = 10, _: AuthContext = Depends(require_view
 
 
 @router.get("/memory/incidents/trends")
-def memory_incidents_trends(_: AuthContext = Depends(require_viewer)):
+def memory_incidents_trends(auth: AuthContext = Depends(require_viewer)):
     """Trend analysis across all stored incidents — MTTR, recurring causes, frequency."""
     try:
-        return {"trends": get_trends(), "report": get_trend_report()}
+        from app.memory.long_term import get_trends as _get_trends, get_trend_report as _get_trend_report
+        return {"trends": _get_trends(auth.tenant_id), "report": _get_trend_report(auth.tenant_id)}
     except Exception as exc:
         logger.error("memory_trends_failed error=%s", exc)
         return {"trends": {}, "report": "", "error": str(exc)}
@@ -311,11 +336,11 @@ def memory_incidents_trends(_: AuthContext = Depends(require_viewer)):
 def memory_incidents_search(
     q: str = "",
     n: int = 10,
-    _: AuthContext = Depends(require_viewer),
+    auth: AuthContext = Depends(require_viewer),
 ):
     """Semantic search over stored incidents with similarity scores."""
     try:
-        results = search_similar_incidents(q or "incident", n_results=min(n, 50))
+        results = search_similar_incidents(q or "incident", n_results=min(n, 50), tenant_id=auth.tenant_id)
         if results and isinstance(results[0], list):
             results = results[0]
         return {"incidents": results or [], "query": q, "count": len(results or [])}
@@ -325,8 +350,8 @@ def memory_incidents_search(
 
 
 @router.post("/memory/incidents")
-def memory_incident_store(incident: Event, _: AuthContext = Depends(require_developer)):
-    return {"stored": store_incident(incident.model_dump())}
+def memory_incident_store(incident: Event, auth: AuthContext = Depends(require_developer)):
+    return {"stored": store_incident(incident.model_dump(), tenant_id=auth.tenant_id)}
 
 
 # ── Incident result & management ──────────────────────────────────────────────
@@ -448,6 +473,39 @@ def generate_post_mortem_endpoint(
             logger.warning("post_mortem_save_failed incident=%s error=%s", incident_id, exc)
 
     return result
+
+
+@router.get("/incidents/{incident_id}/stream")
+async def stream_incident_events(
+    incident_id: str,
+    _: AuthContext = Depends(require_viewer),
+):
+    """SSE stream of real-time pipeline progress for an incident.
+
+    Clients connect with `EventSource('/incidents/{id}/stream')`.
+    Each event is a JSON-encoded pipeline stage update.
+    The stream ends with a terminal `status=done` event.
+    """
+    from app.core.pipeline_events import bus
+
+    async def _event_generator() -> AsyncIterator[str]:
+        try:
+            async for event in bus.subscribe(incident_id):
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("status") == "done":
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.post("/incidents/{incident_id}/postmortem-slack")
