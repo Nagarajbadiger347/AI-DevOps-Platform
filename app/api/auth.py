@@ -80,7 +80,7 @@ class SmtpConfigRequest(BaseModel):
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_from: str = ""
-    app_url: str = "http://localhost:8000"
+    app_url: str = os.getenv("APP_URL", "http://localhost:8000")
 
 
 # ── /auth/me ──────────────────────────────────────────────────
@@ -237,7 +237,7 @@ h2{{color:#f87171;margin-top:0}}a{{color:#60a5fa;text-decoration:none}}</style><
         return _error_page("Missing authorization code.")
 
     from app.core.auth import exchange_sso_code, create_token, SSO_DEFAULT_ROLE
-    from app.security.users import user_exists, create_user as _create_user, find_user_by_email, _users
+    from app.security.users import user_exists, create_user as _create_user, find_user_by_email, get_user_info
     from app.security.rbac import get_user_role, assign_role
     from app.security.invite import get_invite_by_email
 
@@ -250,15 +250,8 @@ h2{{color:#f87171;margin-top:0}}a{{color:#60a5fa;text-decoration:none}}</style><
     username = user_info["username"]
 
     if os.getenv("SSO_REQUIRE_INVITE", "false").lower() == "true":
-        import json as _json
-        from pathlib import Path as _Path
-        _inv_path = _Path(__file__).resolve().parents[1] / "security" / "invites.json"
-        try:
-            inv_data = _json.loads(_inv_path.read_text())
-        except Exception:
-            inv_data = {}
-        invited_emails = {v.get("email", "").lower() for v in inv_data.values() if isinstance(v, dict)}
-        if email not in invited_emails:
+        invite_check = get_invite_by_email(email)
+        if not invite_check:
             return _error_page(
                 f"<b>{email}</b> has not been invited to this platform.<br>"
                 "Ask an admin to send you an invite first."
@@ -266,21 +259,18 @@ h2{{color:#f87171;margin-top:0}}a{{color:#60a5fa;text-decoration:none}}</style><
 
     existing_by_email = find_user_by_email(email)
     if existing_by_email:
+        # Account already exists for this email — use it
         username = existing_by_email
-        if not _users[username].get("email"):
-            _users[username]["email"] = email
-            from app.security.users import _save as _users_save
-            _users_save()
     elif user_exists(username):
-        existing_info = _users.get(username, {})
-        existing_email = existing_info.get("email", "")
-        if existing_info.get("sso_only"):
-            pass
-        else:
+        info = get_user_info(username)
+        existing_email = (info or {}).get("email", "")
+        # Only allow SSO login for accounts with no password (SSO_ONLY or INVITE_PENDING)
+        pw = (info or {}).get("password_hash", "")
+        if pw not in ("SSO_ONLY", "INVITE_PENDING", None, ""):
             return _error_page(
-                f"The username <b>{username}</b> is already taken by a different account "
-                f"({'linked to ' + existing_email if existing_email else 'password-based'}).<br>"
-                "Contact an admin to link your Google account to your existing account."
+                f"The username <b>{username}</b> is already taken by a password-based account "
+                f"({'linked to ' + existing_email if existing_email else 'no email on file'}).<br>"
+                "Contact an admin to link your SSO account."
             )
     else:
         invite = get_invite_by_email(email)
@@ -321,12 +311,12 @@ def logout(credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBea
     return {"success": True, "message": "Logged out and token revoked"}
 
 
-@router.post("/auth/revoke-all", tags=["auth"])
+@router.post("/auth/sessions/revoke", tags=["auth"])
 def revoke_all_tokens(auth: AuthContext = Depends(require_admin)):
     raise HTTPException(status_code=422, detail="Use POST /auth/revoke-all/{username}")
 
 
-@router.post("/auth/revoke-all/{username}", tags=["auth"])
+@router.post("/auth/sessions/{username}/revoke", tags=["auth"])
 def revoke_all_user(username: str, auth: AuthContext = Depends(require_admin)):
     """Admin: invalidate all existing tokens for a user (forces re-login)."""
     from app.core.auth import revoke_all_user_tokens
@@ -339,62 +329,120 @@ def revoke_all_user(username: str, auth: AuthContext = Depends(require_admin)):
 
 # ── Database backup endpoints ──────────────────────────────────
 
-@router.post("/admin/backup/database", tags=["admin"])
+@router.post("/admin/backups/database", tags=["admin"])
 def trigger_backup(auth: AuthContext = Depends(require_admin)):
-    """PostgreSQL is backed up via pg_dump or managed service. Returns status."""
-    return {"success": True, "message": "PostgreSQL backup is handled by your database host or pg_dump."}
+    """Run pg_dump and store the backup in the configured backup directory."""
+    import subprocess
+    import datetime
+
+    db_url  = os.getenv("DATABASE_URL", "")
+    backup_dir = Path(os.getenv("BACKUP_DIR", "/tmp/nexusops_backups"))
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    ts       = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out_file = backup_dir / f"nexusops_{ts}.dump"
+
+    if not db_url:
+        return {"success": False, "error": "DATABASE_URL not configured"}
+
+    try:
+        result = subprocess.run(
+            ["pg_dump", "--format=custom", "--no-password", f"--file={out_file}", db_url],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            return {"success": False, "error": result.stderr.strip() or "pg_dump failed"}
+
+        size_bytes = out_file.stat().st_size
+        return {
+            "success": True,
+            "file":    str(out_file),
+            "size_bytes": size_bytes,
+            "timestamp":  ts,
+        }
+    except FileNotFoundError:
+        return {"success": False, "error": "pg_dump not found — install postgresql-client in the container"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "pg_dump timed out after 300s"}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
-@router.get("/admin/backup/list", tags=["admin"])
+@router.get("/admin/backups", tags=["admin"])
 def list_backups(auth: AuthContext = Depends(require_admin)):
-    """List available backups."""
-    return {"backups": []}
+    """List pg_dump backup files in the backup directory."""
+    backup_dir = Path(os.getenv("BACKUP_DIR", "/tmp/nexusops_backups"))
+    if not backup_dir.exists():
+        return {"backups": []}
+    files = sorted(backup_dir.glob("nexusops_*.dump"), key=lambda f: f.stat().st_mtime, reverse=True)
+    return {
+        "backups": [
+            {"file": f.name, "size_bytes": f.stat().st_size, "path": str(f)}
+            for f in files[:20]
+        ]
+    }
 
 
 # ── User invite endpoints ──────────────────────────────────────
 
 @router.post("/users/invite", tags=["users"])
 def invite_user_endpoint(req: UserCreateRequest, auth: AuthContext = Depends(require_admin)):
-    from app.security.invite import create_invite, send_invite_email, has_pending_invite, cancel_invite, get_invite_by_email
-    from app.security.users import create_user as _create
+    from app.security.invite import create_invite, send_invite_email, cancel_invite, get_invite_by_email
+    from app.security.users import create_user as _create, find_user_by_email, user_exists, get_user_info
     from app.security.rbac import assign_role, PROTECTED_ROLES
+
     if req.role in PROTECTED_ROLES and auth.role != "super_admin":
         raise HTTPException(status_code=403, detail=f"Only a super_admin can invite users with role '{req.role}'")
-    email = (req.email or "").strip().lower() or req.username + "@company.com"
-    from app.security.users import find_user_by_email, user_exists, _users
+
+    email = (req.email or "").strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email address is required to send an invite")
+
+    # Check if email is already tied to an active account
     existing_user = find_user_by_email(email)
     if existing_user:
-        existing_info = _users.get(existing_user, {})
-        pw = existing_info.get("password_hash", "")
-        is_active = pw != "INVITE_PENDING" and pw
-        if is_active:
+        info = get_user_info(existing_user)
+        if info and not info.get("invite_pending") and info.get("password_hash") not in ("INVITE_PENDING", "SSO_ONLY", None, ""):
             raise HTTPException(
                 status_code=409,
                 detail=f"Email '{email}' is already linked to the active account '{existing_user}'. No invite needed."
             )
+
+    # Check if username already has an active (non-pending) account
     if user_exists(req.username):
-        existing_info = _users.get(req.username.strip().lower(), {})
-        pw = existing_info.get("password_hash", "")
-        if pw and pw != "INVITE_PENDING":
+        info = get_user_info(req.username)
+        if info and not info.get("invite_pending") and info.get("password_hash") not in ("INVITE_PENDING", "SSO_ONLY", None, ""):
             raise HTTPException(
                 status_code=409,
                 detail=f"User '{req.username}' already has an active account."
             )
+
+    # Cancel any prior pending invite for this email so there's only one active token
     existing_inv = get_invite_by_email(email)
     if existing_inv:
         cancel_invite(existing_inv["full_token"])
-    result = _create(req.username, "INVITE_PENDING", created_by=auth.username)
-    if not result["success"] and "already" not in result.get("error", "").lower():
+
+    # Create the user record with INVITE_PENDING password
+    result = _create(req.username, "INVITE_PENDING", created_by=auth.username, email=email)
+    if not result["success"]:
         raise HTTPException(status_code=400, detail=result["error"])
+
     assign_role(req.username, req.role, changed_by=auth.username)
     invite = create_invite(req.username, email, role=req.role)
     email_result = send_invite_email(email, req.username, invite["otp"], invite["token"])
     email_sent = isinstance(email_result, dict) and email_result.get("success") is True
-    app_url = os.getenv("APP_URL", "http://localhost:8000")
-    return {"success": True, "username": req.username,
-            "email_sent": email_sent,
-            "expires_in_hours": 48,
-            "setup_link": f"{app_url}/auth/setup-password?token={invite['token']}"}
+
+    from app.core.config import settings as _s
+    app_url = _s.APP_URL.rstrip("/")
+    return {
+        "success":        True,
+        "username":       req.username,
+        "email":          email,
+        "email_sent":     email_sent,
+        "email_error":    email_result.get("error") if not email_sent else None,
+        "expires_in_hours": 48,
+        "setup_link":     f"{app_url}/v1/auth/setup-password?token={invite['token']}",
+    }
 
 
 @router.get("/users/invites", tags=["users"])
@@ -508,7 +556,7 @@ def setup_password_page(token: str = ""):
       if (pw1.length < 8) {{ err.textContent = 'Password must be at least 8 characters'; err.style.display='block'; return; }}
       if (pw1 !== pw2) {{ err.textContent = 'Passwords do not match'; err.style.display='block'; return; }}
       btn.disabled = true; btn.textContent = 'Activating...';
-      fetch('/auth/setup-password', {{
+      fetch('/v1/auth/setup-password', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
         body: JSON.stringify({{token: TOKEN, otp: otp, new_password: pw1}})
@@ -549,7 +597,7 @@ def setup_password(req: SetupPasswordRequest):
     return {"success": True, "username": username, "message": "Password set. You can now sign in."}
 
 
-@router.post("/auth/configure-smtp", tags=["auth"])
+@router.post("/admin/smtp", tags=["auth"])
 def configure_smtp(req: SmtpConfigRequest, auth: AuthContext = Depends(require_admin)):
     """Save SMTP settings to .env and test the connection. Admin only."""
     import smtplib
@@ -564,15 +612,20 @@ def configure_smtp(req: SmtpConfigRequest, auth: AuthContext = Depends(require_a
     _write_env(updates)
     if req.smtp_host and req.smtp_user and req.smtp_password:
         try:
-            with smtplib.SMTP(req.smtp_host, req.smtp_port, timeout=8) as s:
-                s.ehlo(); s.starttls(); s.login(req.smtp_user, req.smtp_password)
+            if req.smtp_port == 465:
+                with smtplib.SMTP_SSL(req.smtp_host, req.smtp_port, timeout=8) as s:
+                    s.ehlo()
+                    s.login(req.smtp_user, req.smtp_password)
+            else:
+                with smtplib.SMTP(req.smtp_host, req.smtp_port, timeout=8) as s:
+                    s.ehlo(); s.starttls(); s.ehlo(); s.login(req.smtp_user, req.smtp_password)
             return {"success": True, "message": "SMTP configured and connection verified"}
         except Exception as e:
             return {"success": False, "message": f"Settings saved but SMTP test failed: {e}"}
     return {"success": True, "message": "SMTP settings saved (no test — fill all fields to verify)"}
 
 
-@router.post("/auth/test-email", tags=["auth"])
+@router.post("/admin/smtp/test", tags=["auth"])
 def test_email(auth: AuthContext = Depends(require_admin)):
     """Send a test email to the configured SMTP_USER address."""
     from app.security.invite import send_invite_email

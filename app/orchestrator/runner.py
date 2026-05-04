@@ -224,6 +224,35 @@ def run_pipeline(
     Returns:
         Final PipelineState as a plain dict.
     """
+    # Guard: refuse to run if core dependencies are unavailable
+    try:
+        from app.core.degraded import require_pipeline, DegradedError
+        require_pipeline()
+    except Exception as _deg_exc:
+        from app.core.degraded import DegradedError
+        if isinstance(_deg_exc, DegradedError):
+            logger.warning(
+                "pipeline_skipped_degraded",
+                extra={"incident_id": incident_id, "reason": str(_deg_exc)},
+            )
+            # Try to notify Slack so the on-call engineer knows AI is offline
+            try:
+                from app.integrations.slack import post_message
+                from app.core.config import settings
+                post_message(
+                    settings.SLACK_CHANNEL,
+                    f":warning: *NexusOps degraded mode* — AI pipeline skipped for `{incident_id}`.\n"
+                    f"Reason: {_deg_exc.component} unavailable. Manual review required.",
+                )
+            except Exception:
+                pass
+            return {
+                "status":      "degraded",
+                "incident_id": incident_id,
+                "error":       str(_deg_exc),
+                "mode":        "telemetry-only",
+            }
+
     cid      = new_correlation_id()
     trace_id = new_trace_id()
 

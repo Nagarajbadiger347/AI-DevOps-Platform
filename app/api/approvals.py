@@ -12,7 +12,7 @@ from app.api.deps import (
     _PENDING_PIPELINE_STATES, _cache_result,
 )
 
-router = APIRouter(prefix="/approvals", tags=["approvals"])
+router = APIRouter(tags=["approvals"])
 
 
 class QuickActionRequest(BaseModel):

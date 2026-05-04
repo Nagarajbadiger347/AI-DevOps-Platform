@@ -237,6 +237,21 @@ def health_cache(_: AuthContext = Depends(require_viewer)):
         return {"cache": {}, "error": str(exc)}
 
 
+@router.get("/health/degraded")
+def health_degraded():
+    """Current platform mode — full | no-ai | no-persistence | telemetry-only.
+
+    Returns 200 in all modes so load balancers stay happy.
+    Clients should inspect 'mode' and 'pipeline_available' fields.
+    """
+    try:
+        from app.core.degraded import system_health
+        h = system_health(force_refresh=True)
+        return h.to_dict()
+    except Exception as exc:
+        return {"mode": "unknown", "pipeline_available": False, "error": str(exc)}
+
+
 @router.post("/health/cache/clear")
 def health_cache_clear(_: AuthContext = Depends(require_viewer)):
     """Clear the LLM response cache."""

@@ -1,4 +1,5 @@
 fastapi>=0.128.8
+stripe>=8.0.0
 uvicorn>=0.39.0
 anthropic>=0.86.0
 slack_sdk>=3.41.0
@@ -23,3 +24,4 @@ pgvector>=0.3.0
 tenacity>=8.2.0
 pybreaker>=1.0.1
 prometheus_client>=0.20.0
+click>=8.1.0

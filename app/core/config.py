@@ -30,9 +30,16 @@ class Settings(BaseSettings):
     AUTO_EXECUTE_RISK_LEVELS: list[str] = ["low"]
 
     # ── Continuous monitoring loop ─────────────────────────────────────────
-    ENABLE_MONITOR_LOOP: bool = False          # disabled by default — enable in prod
+    ENABLE_MONITOR_LOOP: bool = True           # on by default — set False to disable
     MONITOR_INTERVAL_SECONDS: int = 60
-    AUTO_REMEDIATE_ON_MONITOR: bool = False    # alert-only by default
+    AUTO_REMEDIATE_ON_MONITOR: bool = False    # alert-only by default; set True for auto-fix
+
+    # ── LLM safety ─────────────────────────────────────────────────────────
+    LLM_TIMEOUT_SECONDS: int = 10              # per-attempt hard ceiling for LLM calls
+
+    # ── Inbound webhook secrets ─────────────────────────────────────────────
+    PAGERDUTY_WEBHOOK_SECRET: str = ""         # HMAC-SHA256 secret from PagerDuty console
+    OPSGENIE_WEBHOOK_TOKEN:   str = ""         # bearer token set in OpsGenie integration
 
     # ── Integrations ───────────────────────────────────────────────────────
     GITHUB_TOKEN: str = ""
@@ -62,16 +69,27 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY_OLD: str = ""   # previous key — kept during rotation grace period
 
     # ── PostgreSQL ──────────────────────────────────────────────────────────
-    DATABASE_URL: str = "postgresql://nexusops:nexusops@localhost:5432/nexusops"
+    DATABASE_URL: str = "postgresql://nexusops:nexusops123@localhost:5432/nexusops"
+
+    # ── Redis ───────────────────────────────────────────────────────────
+    REDIS_URL: str = "redis://localhost:6379/0"
 
     # ── Redis HA ────────────────────────────────────────────────────────────
     REDIS_SENTINEL_HOSTS:  str = ""   # host1:26379,host2:26379
     REDIS_SENTINEL_MASTER: str = "mymaster"
 
     # ── Server ─────────────────────────────────────────────────────────────
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8000"
+    APP_URL:          str = "http://localhost:8000"
+    CORS_ORIGINS:     str = "http://localhost:3000,http://localhost:8000"
     RBAC_CONFIG_PATH: str = ""
 
+    # ── AWS extended ──────────────────────────────────────────────────
+    AWS_SESSION_TOKEN: str = ""   # optional — for assumed roles / temporary credentials
+
+
+    # ── Stripe ───────────────────────────────────────────────────
+    STRIPE_SECRET_KEY:     str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
     model_config = {"env_file": str(Path(__file__).resolve().parents[2] / ".env"),
                     "extra": "ignore"}
 

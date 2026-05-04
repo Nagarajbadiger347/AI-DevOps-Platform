@@ -29,6 +29,7 @@ from app.api import (
     incidents, approvals, warroom, chat, github,
     cost, health, vscode, misc, websocket_routes, tenants, agentic,
 )
+from app.api import saas
 
 logger = logging.getLogger("nsops")
 
@@ -39,6 +40,13 @@ async def lifespan(app: FastAPI):
     # Track active requests (SRE: for graceful shutdown)
     app.state.active_requests = 0
     app.state.shutting_down = False
+
+    # Run DB migrations on startup (idempotent)
+    try:
+        from app.core.schema import apply_migrations as _apply_migrations
+        _apply_migrations()
+    except Exception as exc:
+        logger.warning("db_migrations_failed error=%s", exc)
     
     # Start background cleanup loop for expired approvals
     async def _approval_cleanup():
@@ -50,14 +58,23 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning("approval_cleanup_error", extra={"error": str(exc)})
 
-    # Start monitor loop if enabled
+    # Start monitor loop if enabled (reads from settings, not raw env)
     _monitor_task = None
-    if os.getenv("ENABLE_MONITOR_LOOP", "").lower() in ("1", "true", "yes"):
-        async def _monitor_loop():
-            from app.orchestrator.monitor import run_monitor_loop
-            await asyncio.get_event_loop().run_in_executor(None, run_monitor_loop)
+    if settings.ENABLE_MONITOR_LOOP:
+        from app.monitoring.loop import monitoring_loop as _monitoring_loop
 
-        _monitor_task = asyncio.create_task(_monitor_loop())
+        async def _run_monitor():
+            try:
+                await _monitoring_loop()
+            except Exception as exc:
+                logger.error("monitor_loop_crashed error=%s", exc, exc_info=True)
+
+        _monitor_task = asyncio.create_task(_run_monitor())
+        logger.info(
+            "monitor_loop_enabled interval=%ds auto_remediate=%s",
+            settings.MONITOR_INTERVAL_SECONDS,
+            settings.AUTO_REMEDIATE_ON_MONITOR,
+        )
 
     _cleanup_task = asyncio.create_task(_approval_cleanup())
 
@@ -134,18 +151,42 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 
 class ActiveRequestTracker(BaseHTTPMiddleware):
-    """Track active requests for graceful shutdown."""
+    """Track active requests and emit SLO metrics (latency + status)."""
 
     async def dispatch(self, request: Request, call_next):
+        import time
+        from app.core.metrics import http_requests_total, http_request_duration_seconds
+
         if not hasattr(app.state, 'active_requests'):
             app.state.active_requests = 0
-        
+
+        # Normalise endpoint label: strip path params to avoid high cardinality
+        path = request.url.path
+        # collapse UUIDs and numeric IDs to placeholders
+        import re
+        path_label = re.sub(r"/[0-9a-f]{8}-[0-9a-f-]{27}", "/{id}", path)
+        path_label = re.sub(r"/\d+", "/{id}", path_label)
+
         app.state.active_requests += 1
+        start = time.perf_counter()
         try:
             response = await call_next(request)
+            status = str(response.status_code)
             return response
+        except Exception:
+            status = "500"
+            raise
         finally:
+            duration = time.perf_counter() - start
             app.state.active_requests -= 1
+            # Skip metrics / health noise
+            if path not in ("/metrics", "/health", "/favicon.ico"):
+                http_requests_total.labels(
+                    method=request.method, endpoint=path_label, status=status
+                ).inc()
+                http_request_duration_seconds.labels(
+                    method=request.method, endpoint=path_label
+                ).observe(duration)
 
 
 app.add_middleware(ActiveRequestTracker)
@@ -295,21 +336,40 @@ async def dashboard(request: Request = None):
 
 
 # ── Register all routers ──────────────────────────────────────────────────────
+# Unversioned — health/metrics/webhooks must stay at root (external callers, k8s probes)
 app.include_router(health.router)
-app.include_router(auth.router)
-app.include_router(aws.router)
-app.include_router(k8s.router)
-app.include_router(security.router)
-app.include_router(webhooks.router)
-app.include_router(deploy.router)
-app.include_router(incidents.router)
-app.include_router(approvals.router)
-app.include_router(warroom.router)
-app.include_router(chat.router)
-app.include_router(github.router)
-app.include_router(cost.router)
-app.include_router(vscode.router)
-app.include_router(misc.router)
 app.include_router(websocket_routes.router)
-app.include_router(tenants.router)
-app.include_router(agentic.router)
+
+# ── /v1 — all product API routes ─────────────────────────────────────────────
+V1 = "/v1"
+
+# Auth + users
+app.include_router(auth.router,      prefix=V1)
+
+# Infra actions
+app.include_router(aws.router,       prefix=V1)
+app.include_router(k8s.router,       prefix=V1)
+app.include_router(github.router,    prefix=V1)
+app.include_router(deploy.router,    prefix=V1)
+app.include_router(cost.router,      prefix=V1)
+app.include_router(vscode.router,    prefix=V1)
+app.include_router(agentic.router,   prefix=V1)
+
+# Incidents + approvals + war room
+app.include_router(incidents.router, prefix=V1)
+app.include_router(approvals.router, prefix=V1 + "/approvals")
+app.include_router(warroom.router,   prefix=V1)
+
+# Chat / AI
+app.include_router(chat.router,      prefix=V1)
+
+# Platform admin
+app.include_router(security.router,  prefix=V1)
+app.include_router(tenants.router,   prefix=V1)
+app.include_router(misc.router,      prefix=V1)
+
+# SaaS — org, billing, usage, training
+app.include_router(saas.router,      prefix=V1)
+
+# Webhooks — external callers (Stripe, Jira, GitHub) hit /v1/webhooks/*
+app.include_router(webhooks.router,  prefix=V1)

@@ -1,5 +1,10 @@
 """
 Prometheus metrics for SRE observability.
+
+Includes SLO-ready metrics:
+  - http_requests_total / http_request_duration_seconds  — for error-rate and latency SLOs
+  - chat_pipeline_*                                      — chat action success/failure tracking
+  - integration_call_duration_seconds                    — per-integration p95 latency
 """
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 
@@ -63,4 +68,40 @@ integration_failures_total = Counter(
     "integration_failures_total",
     "Integration API failures",
     ["service", "error_type"],
+)
+
+# ── SLO metrics ────────────────────────────────────────────────────────────
+
+# HTTP SLO — error rate and latency (populated by middleware in orchestrator/main.py)
+http_requests_total = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"],
+)
+
+http_request_duration_seconds = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request latency",
+    ["method", "endpoint"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
+)
+
+# Chat pipeline SLO — action success rate
+chat_pipeline_actions_total = Counter(
+    "chat_pipeline_actions_total",
+    "Chat pipeline actions executed",
+    ["action", "status"],   # status: success | error | dry_run | cancelled
+)
+
+chat_pipeline_errors_total = Counter(
+    "chat_pipeline_errors_total",
+    "Chat pipeline internal errors (unhandled exceptions)",
+)
+
+# Integration call latency — per service p95
+integration_call_duration_seconds = Histogram(
+    "integration_call_duration_seconds",
+    "External integration call latency",
+    ["service"],
+    buckets=(0.1, 0.25, 0.5, 1, 2, 5, 15, 30),
 )

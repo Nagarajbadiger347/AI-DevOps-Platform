@@ -1,14 +1,12 @@
-version: '3.8'
-
 services:
 
   # ── PostgreSQL database ───────────────────────────────────────
   postgres:
     image: pgvector/pgvector:pg15
     environment:
-      POSTGRES_DB: nexusops
-      POSTGRES_USER: nexusops
-      POSTGRES_PASSWORD: nexusops123
+      POSTGRES_DB:       ${POSTGRES_DB:-nexusops}
+      POSTGRES_USER:     ${POSTGRES_USER:-nexusops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     expose:
@@ -17,7 +15,7 @@ services:
     networks:
       - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nexusops -d nexusops"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexusops} -d ${POSTGRES_DB:-nexusops}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -30,11 +28,29 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  # ── PostgreSQL metrics exporter ───────────────────────────────
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-nexusops}:${POSTGRES_PASSWORD:-nexusops123}@postgres:5432/${POSTGRES_DB:-nexusops}?sslmode=disable"
+    expose:
+      - "9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
+
   # ── Prometheus monitoring ─────────────────────────────────────
   prometheus:
     image: prom/prometheus:latest
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -48,6 +64,9 @@ services:
     restart: unless-stopped
     networks:
       - internal
+    depends_on:
+      - redis-exporter
+      - postgres-exporter
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
@@ -79,12 +98,11 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - chroma_data:/app/chroma_db
       - app_logs:/app/logs
     environment:
       - PYTHONPATH=/app
-      - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://nexusops:nexusops123@postgres:5432/nexusops
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-nexusops}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexusops}
     env_file:
       - .env
     depends_on:
@@ -113,10 +131,35 @@ services:
       driver: json-file
       options: { max-size: "50m", max-file: "5" }
 
+  # ── Grafana dashboards ────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+    networks:
+      - internal
+    depends_on:
+      - prometheus
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   # ── Redis (rate limiting, session cache) ──────────────────────
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-}
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     expose:
@@ -138,12 +181,30 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  # ── Redis metrics exporter ────────────────────────────────────
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    expose:
+      - "9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
+
 volumes:
-  chroma_data:
   redis_data:
   app_logs:
   postgres_data:
   prometheus_data:
+  grafana_data:
 
 networks:
   internal:

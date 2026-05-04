@@ -6,7 +6,10 @@ OPSGENIE_API_KEY  = os.getenv("OPSGENIE_API_KEY")
 OPSGENIE_TEAM     = os.getenv("OPSGENIE_TEAM", "oncall")
 
 
-def notify_on_call(message: str = "Automated incident alert", alias: str = "ai-devops-incident"):
+_PRIORITY_MAP = {"P1": "P1", "P2": "P2", "P3": "P3", "P4": "P4", "P5": "P5"}
+
+
+def notify_on_call(message: str = "Automated incident alert", priority: str = "P2", alias: str = "ai-devops-incident"):
     if not OPSGENIE_API_KEY:
         return {"error": "OPSGENIE_API_KEY not configured"}
 
@@ -18,6 +21,7 @@ def notify_on_call(message: str = "Automated incident alert", alias: str = "ai-d
         alias=alias,
         description="Triggered from AI DevOps orchestrator",
         responders=[{"name": OPSGENIE_TEAM, "type": "team"}],
+        priority=_PRIORITY_MAP.get(priority.upper(), "P2"),
     )
 
     try:

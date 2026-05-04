@@ -47,11 +47,20 @@ def _send(subject: str, html_body: str, to_addrs: list[str]) -> dict:
     msg.attach(MIMEText(html_body, "html"))
 
     try:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as s:
-            s.ehlo()
-            s.starttls()
-            s.login(smtp_user, smtp_pass)
-            s.sendmail(smtp_from, to_addrs, msg.as_string())
+        if smtp_port == 465:
+            # Port 465 = implicit TLS (SMTPS)
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as s:
+                s.ehlo()
+                s.login(smtp_user, smtp_pass)
+                s.sendmail(smtp_from, to_addrs, msg.as_string())
+        else:
+            # Port 587 = STARTTLS upgrade
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as s:
+                s.ehlo()
+                s.starttls()
+                s.ehlo()
+                s.login(smtp_user, smtp_pass)
+                s.sendmail(smtp_from, to_addrs, msg.as_string())
         return {"success": True, "recipients": to_addrs}
     except Exception as exc:
         return {"success": False, "error": str(exc)}

@@ -103,11 +103,12 @@ def create_user(username: str, password: str | None, created_by: str = "system",
     password_hash = hash_password(password) if password and password != "INVITE_PENDING" else (password or "SSO_ONLY")
     invite_pending = password == "INVITE_PENDING"
 
-    execute(
+    rows = execute(
         """
         INSERT INTO users (user_id, tenant_id, username, email, password_hash, invite_pending, created_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (tenant_id, username) DO NOTHING
+        RETURNING username
         """,
         (
             secrets.token_urlsafe(16),
@@ -119,6 +120,8 @@ def create_user(username: str, password: str | None, created_by: str = "system",
             datetime.datetime.utcnow().isoformat(),
         )
     )
+    if not rows:
+        return {"success": False, "error": f"User '{username}' already exists"}
     return {"success": True, "username": username}
 
 
@@ -128,7 +131,10 @@ def change_password(username: str, new_password: str, tenant_id: str = "default"
     if len(new_password) < 8:
         return {"success": False, "error": "Password must be at least 8 characters"}
     rows = execute(
-        "UPDATE users SET password_hash = %s, updated_at = NOW() WHERE username = %s AND tenant_id = %s RETURNING username",
+        """UPDATE users
+           SET password_hash = %s, invite_pending = FALSE, updated_at = NOW()
+           WHERE username = %s AND tenant_id = %s
+           RETURNING username""",
         (hash_password(new_password), username, tenant_id)
     )
     if not rows:
@@ -175,6 +181,18 @@ def user_exists(username: str, tenant_id: str = "default") -> bool:
         (username, tenant_id)
     )
     return row is not None
+
+
+def get_user_info(username: str, tenant_id: str = "default") -> dict | None:
+    """Return a user row dict (username, email, password_hash, role, invite_pending, active)
+    or None if not found. Safe replacement for the old _users dict lookups."""
+    _, execute_one = _db()
+    row = execute_one(
+        "SELECT username, email, password_hash, role, invite_pending, active "
+        "FROM users WHERE username = %s AND tenant_id = %s",
+        (username.strip().lower(), tenant_id)
+    )
+    return dict(row) if row else None
 
 
 def list_users(tenant_id: str = "default") -> list[dict]:

@@ -203,13 +203,38 @@ def delete_incident(incident_id: str, tenant_id: str = "default") -> dict:
         return {"deleted": False, "error": str(e)}
 
 
+def backup_incidents(backup_dir: str = "") -> dict:
+    """Export all incidents to a JSON file for offline backup / migration."""
+    import datetime
+    from pathlib import Path
+
+    dest = Path(backup_dir or os.getenv("BACKUP_DIR", "/tmp/nexusops_backups"))
+    dest.mkdir(parents=True, exist_ok=True)
+
+    ts       = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out_file = dest / f"incidents_{ts}.json"
+
+    try:
+        rows = get_all_incidents(limit=100_000)
+        out_file.write_text(json.dumps(rows, default=str, indent=2))
+        return {"success": True, "file": str(out_file), "count": len(rows), "timestamp": ts}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# Keep old name as alias for backwards compatibility
 def backup_chromadb() -> dict:
-    """No-op — PostgreSQL handles backups via pg_dump or managed service."""
-    return {"success": True, "message": "PostgreSQL does not require manual backups"}
+    return backup_incidents()
 
 
-def get_backup_list() -> list[dict]:
-    return []
+def get_backup_list(backup_dir: str = "") -> list[dict]:
+    """List JSON incident backup files."""
+    from pathlib import Path
+    dest = Path(backup_dir or os.getenv("BACKUP_DIR", "/tmp/nexusops_backups"))
+    if not dest.exists():
+        return []
+    files = sorted(dest.glob("incidents_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    return [{"file": f.name, "size_bytes": f.stat().st_size, "path": str(f)} for f in files[:20]]
 
 
 # ---------------------------------------------------------------------------

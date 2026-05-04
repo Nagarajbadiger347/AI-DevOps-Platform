@@ -105,10 +105,40 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class AuthContext:
-    def __init__(self, username: str, role: str, tenant_id: str = "default"):
-        self.username = username
-        self.role = role
-        self.tenant_id = tenant_id
+    def __init__(self, username: str, role: str, tenant_id: str = "default",
+                 workspace_id: str = "", plan_name: str = "starter"):
+        self.username     = username
+        self.role         = role
+        self.tenant_id    = tenant_id
+        self.workspace_id = workspace_id
+        self.plan_name    = plan_name
+
+    def can(self, feature: str) -> bool:
+        """Check if the current tenant's plan allows a feature."""
+        try:
+            from app.tenants.store import get_plan
+            plan = get_plan(self.plan_name)
+            return plan.allows(feature) if plan else True
+        except Exception:
+            return True
+
+    def check_usage_limit(self, resource: str) -> None:
+        """Raise 402 if tenant has exceeded their plan limit for resource."""
+        try:
+            from app.tenants.store import check_limit
+            result = check_limit(self.tenant_id, resource)
+            if not result["allowed"]:
+                raise HTTPException(
+                    status_code=402,
+                    detail=(
+                        f"Plan limit reached: {result['current']}/{result['limit']} {resource} "
+                        f"this month. Upgrade your plan at /settings/billing."
+                    )
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # never block on metering errors
 
 
 def _resolve_auth(
@@ -120,14 +150,18 @@ def _resolve_auth(
     username = None
     jwt_role = None
     jwt_tenant = None
+    jwt_workspace = None
+    jwt_plan = None
     token_provided = bool(credentials and credentials.credentials)
     if token_provided:
         try:
             from app.core.auth import decode_token
             payload = decode_token(credentials.credentials)
-            username = payload.get("sub")
-            jwt_role = payload.get("role")
-            jwt_tenant = payload.get("tenant_id")
+            username      = payload.get("sub")
+            jwt_role      = payload.get("role")
+            jwt_tenant    = payload.get("tenant_id")
+            jwt_workspace = payload.get("workspace_id", "")
+            jwt_plan      = payload.get("plan_name", "starter")
         except HTTPException:
             username = None
             jwt_role = None
@@ -138,7 +172,18 @@ def _resolve_auth(
     role = get_user_role(username) if username != "anonymous" else (jwt_role or "viewer")
     # Tenant resolution: JWT claim > X-Tenant-ID header > "default"
     tenant_id = jwt_tenant or x_tenant_id or "default"
-    ctx = AuthContext(username=username, role=role, tenant_id=tenant_id)
+    # Resolve plan from tenant if not in JWT
+    plan_name = jwt_plan or "starter"
+    if not jwt_plan:
+        try:
+            from app.tenants.store import get_tenant
+            t = get_tenant(tenant_id)
+            if t:
+                plan_name = t.plan_name
+        except Exception:
+            pass
+    ctx = AuthContext(username=username, role=role, tenant_id=tenant_id,
+                      workspace_id=jwt_workspace or "", plan_name=plan_name)
     ctx._bad_token = token_provided and username == "anonymous" and not jwt_role
     return ctx
 
@@ -226,8 +271,8 @@ class IncidentRunRequest(BaseModel):
     incident_id:    str
     description:    str
     severity:       str  = "high"
-    aws:            AWSConfig = None
-    k8s:            K8sConfig = None
+    aws:            Optional[AWSConfig] = None
+    k8s:            Optional[K8sConfig] = None
     auto_remediate: bool = False
     hours:          int  = 2
     aws_cfg:        Optional[Dict[str, Any]] = None

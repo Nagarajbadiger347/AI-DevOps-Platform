@@ -278,7 +278,7 @@ async def incidents_run_async(
 
 # ── Integration shim endpoints ────────────────────────────────────────────────
 
-@router.post("/incident/jira")
+@router.post("/incidents/integrations/jira")
 def incident_jira(
     summary: str = "AI DevOps Incident",
     description: str = "Created via NexusOps",
@@ -289,13 +289,13 @@ def incident_jira(
     return {"jira_incident": result, "ok": "error" not in result}
 
 
-@router.post("/incident/opsgenie")
+@router.post("/incidents/integrations/opsgenie")
 def incident_opsgenie(_: AuthContext = Depends(require_developer)):
     from app.integrations.opsgenie import notify_on_call
     return {"opsgenie_notify": notify_on_call()}
 
 
-@router.post("/incident/github/pr")
+@router.post("/incidents/integrations/github/pr")
 def incident_github_pr(
     head: str,
     base: str = "main",
@@ -309,7 +309,7 @@ def incident_github_pr(
 
 # ── Memory endpoints ──────────────────────────────────────────────────────────
 
-@router.get("/memory/incidents")
+@router.get("/incidents/memory")
 def memory_incidents_list(limit: int = 10, auth: AuthContext = Depends(require_viewer)):
     try:
         results = search_similar_incidents("incident", n_results=limit, tenant_id=auth.tenant_id)
@@ -321,7 +321,7 @@ def memory_incidents_list(limit: int = 10, auth: AuthContext = Depends(require_v
         return {"incidents": [], "error": str(exc)}
 
 
-@router.get("/memory/incidents/trends")
+@router.get("/incidents/memory/trends")
 def memory_incidents_trends(auth: AuthContext = Depends(require_viewer)):
     """Trend analysis across all stored incidents — MTTR, recurring causes, frequency."""
     try:
@@ -332,7 +332,7 @@ def memory_incidents_trends(auth: AuthContext = Depends(require_viewer)):
         return {"trends": {}, "report": "", "error": str(exc)}
 
 
-@router.get("/memory/incidents/search")
+@router.get("/incidents/memory/search")
 def memory_incidents_search(
     q: str = "",
     n: int = 10,
@@ -349,7 +349,7 @@ def memory_incidents_search(
         return {"incidents": [], "error": str(exc)}
 
 
-@router.post("/memory/incidents")
+@router.post("/incidents/memory")
 def memory_incident_store(incident: Event, auth: AuthContext = Depends(require_developer)):
     return {"stored": store_incident(incident.model_dump(), tenant_id=auth.tenant_id)}
 

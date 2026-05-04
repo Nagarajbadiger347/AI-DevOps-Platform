@@ -9,17 +9,42 @@ GITHUB_REPO can be:
 
 import base64
 import datetime
+import logging
 import os
+import time
 
 from dotenv import load_dotenv
 from pathlib import Path
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from github import Github
-from github.GithubException import GithubException
+from github.GithubException import GithubException, RateLimitExceededException, UnknownObjectException
+
+logger = logging.getLogger(__name__)
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPO  = os.getenv("GITHUB_REPO", "").strip()
+
+_RETRY_ATTEMPTS = 3
+
+
+def _gh_call(fn, *args, **kwargs):
+    """Execute a PyGithub call with exponential-backoff retry on rate-limit or transient errors."""
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            return fn(*args, **kwargs)
+        except RateLimitExceededException:
+            wait = 60 * (attempt + 1)
+            logger.warning("github_rate_limited waiting=%ss attempt=%s", wait, attempt + 1)
+            time.sleep(wait)
+        except GithubException as e:
+            if e.status in (500, 502, 503, 504) and attempt < _RETRY_ATTEMPTS - 1:
+                delay = 2 ** attempt
+                logger.warning("github_transient_error status=%s attempt=%s retry_in=%ss", e.status, attempt + 1, delay)
+                time.sleep(delay)
+            else:
+                raise
+    raise GithubException(429, {"message": "GitHub rate limit — max retries exceeded"}, {})
 
 
 # ── URL / slug parsing ────────────────────────────────────────

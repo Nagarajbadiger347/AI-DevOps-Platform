@@ -4,6 +4,66 @@ from __future__ import annotations
 from app.agents.base import BaseAgent
 from app.core.config import settings
 
+
+def _estimate_blast_radius(actions: list[dict], state: dict) -> dict:
+    """Estimate how many downstream services are affected by the planned actions.
+
+    Strategy (fast, no LLM):
+    1. Extract target resource names from action parameters.
+    2. Cross-reference against K8s services and ECS services already in state context.
+    3. Return a count and list of likely-affected service names.
+
+    The result is advisory — it informs the approval message, not the approval decision.
+    """
+    target_resources: set[str] = set()
+    for a in actions:
+        params = a.get("params") or a.get("parameters") or {}
+        for key in ("deployment", "service", "function_name", "instance_id",
+                    "cluster", "namespace", "target"):
+            val = params.get(key) or a.get(key) or ""
+            if val:
+                target_resources.add(str(val).lower())
+
+    if not target_resources:
+        return {"affected_count": 0, "affected_services": [], "note": "no target resources identified"}
+
+    # Pull known service names from context already in state
+    known_services: list[str] = []
+
+    k8s_ctx = state.get("k8s_context") or {}
+    for dep in (k8s_ctx.get("deployments", {}).get("deployments", []) or []):
+        name = dep.get("name") or dep.get("deployment_name") or ""
+        if name:
+            known_services.append(name.lower())
+
+    aws_ctx = state.get("aws_context") or {}
+    for svc in (aws_ctx.get("ecs", {}).get("services", []) or []):
+        name = svc.get("service_name") or svc.get("name") or ""
+        if name:
+            known_services.append(name.lower())
+
+    # Simple heuristic: any known service that SHARES a namespace/cluster prefix
+    # with a target resource is likely downstream
+    affected: list[str] = []
+    for svc in known_services:
+        if svc in target_resources:
+            continue   # this IS the target, not downstream
+        for target in target_resources:
+            # Services sharing a name prefix (e.g. "payments-*") are likely related
+            prefix = target.split("-")[0] if "-" in target else target[:6]
+            if prefix and svc.startswith(prefix):
+                affected.append(svc)
+                break
+
+    # Deduplicate, cap list
+    affected = list(dict.fromkeys(affected))[:20]
+
+    return {
+        "affected_count":    len(affected),
+        "affected_services": affected,
+        "target_resources":  list(target_resources),
+    }
+
 _RISK_SCORES: dict[str, float] = {
     "low":      0.2,
     "medium":   0.5,
@@ -80,6 +140,16 @@ class DecisionAgent(BaseAgent):
                 cost_report_obj = state.get("cost_report")
                 if cost_report_obj is not None and not getattr(cost_report_obj, "approved", False):
                     reasons.append("Cost impact exceeds threshold")
+
+                # Blast radius — estimate downstream services affected
+                blast = _estimate_blast_radius(actions, state)
+                state["blast_radius"] = blast
+                if blast.get("affected_services"):
+                    reasons.append(
+                        f"blast_radius={blast['affected_count']} downstream services "
+                        f"({', '.join(blast['affected_services'][:5])})"
+                    )
+
                 state["approval_reason"] = "; ".join(reasons)
 
         self._log(

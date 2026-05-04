@@ -7,6 +7,8 @@ Requires env vars:
 
 import os
 import re
+import time
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -14,12 +16,38 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+logger = logging.getLogger(__name__)
+
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_CHANNEL   = os.getenv("SLACK_CHANNEL", "#general")
+
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF  = [1, 2, 4]   # seconds between retries
 
 
 def _client() -> WebClient:
     return WebClient(token=SLACK_BOT_TOKEN)
+
+
+def _slack_call(fn, *args, **kwargs):
+    """Execute a Slack SDK call with exponential-backoff retry on rate-limit or transient errors."""
+    last_exc = None
+    for attempt, delay in enumerate(_RETRY_BACKOFF):
+        try:
+            return fn(*args, **kwargs)
+        except SlackApiError as e:
+            err = e.response.get("error", "")
+            if err == "ratelimited":
+                retry_after = int(e.response.headers.get("Retry-After", delay))
+                logger.warning("slack_rate_limited retry_after=%s attempt=%s", retry_after, attempt + 1)
+                time.sleep(retry_after)
+            elif attempt < _RETRY_ATTEMPTS - 1:
+                logger.warning("slack_transient_error error=%s attempt=%s", err, attempt + 1)
+                time.sleep(delay)
+            else:
+                raise
+            last_exc = e
+    raise last_exc
 
 
 def _safe_channel_name(raw: str) -> str:
@@ -37,7 +65,7 @@ def post_message(channel: str, text: str, blocks=None) -> dict:
     if not SLACK_BOT_TOKEN:
         return {"success": False, "error": "SLACK_BOT_TOKEN not configured"}
     try:
-        resp = _client().chat_postMessage(channel=channel, text=text, blocks=blocks)
+        resp = _slack_call(_client().chat_postMessage, channel=channel, text=text, blocks=blocks)
         return {"success": True, "ts": resp["ts"], "channel": resp["channel"]}
     except SlackApiError as e:
         return {"success": False, "error": str(e), "detail": e.response.get("error")}
@@ -48,7 +76,7 @@ def post_thread_reply(channel: str, thread_ts: str, text: str) -> dict:
     if not SLACK_BOT_TOKEN:
         return {"success": False, "error": "SLACK_BOT_TOKEN not configured"}
     try:
-        resp = _client().chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
+        resp = _slack_call(_client().chat_postMessage, channel=channel, thread_ts=thread_ts, text=text)
         return {"success": True, "ts": resp["ts"]}
     except SlackApiError as e:
         return {"success": False, "error": str(e)}

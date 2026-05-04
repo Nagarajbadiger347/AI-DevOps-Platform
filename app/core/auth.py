@@ -118,21 +118,40 @@ def _is_user_revoked(username: str, issued_at: int) -> bool:
 # Token creation / decoding
 # ---------------------------------------------------------------------------
 
-def create_token(username: str, role: str) -> str:
-    """Create a signed JWT for the given user."""
+def create_token(username: str, role: str, tenant_id: str = "default",
+                 workspace_id: str = "", plan_name: str = "starter") -> str:
+    """Create a signed JWT with SaaS claims (tenant, workspace, plan)."""
     if not _JOSE_AVAILABLE:
         import base64, hmac
         exp = int(time.time()) + EXPIRE_MINS * 60
         iat = int(time.time())
-        payload = f"{username}:{role}:{exp}:{iat}"
-        sig = hmac.new(SECRET_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
-        return base64.b64encode(f"{payload}:{sig}".encode()).decode()
+        payload_str = f"{username}:{role}:{exp}:{iat}"
+        sig = hmac.new(SECRET_KEY.encode(), payload_str.encode(), hashlib.sha256).hexdigest()[:16]
+        return base64.b64encode(f"{payload_str}:{sig}".encode()).decode()
+
+    # Resolve tenant/workspace if not explicitly provided
+    _tenant_id    = tenant_id
+    _workspace_id = workspace_id
+    _plan_name    = plan_name
+    if _tenant_id == "default" or not _workspace_id:
+        try:
+            from app.tenants.store import get_tenant
+            t = get_tenant(username)   # slug == username for self-serve signups
+            if t:
+                _tenant_id    = t.tenant_id
+                _workspace_id = t.workspace_id or ""
+                _plan_name    = t.plan_name
+        except Exception:
+            pass
 
     payload = {
-        "sub": username,
-        "role": role,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + EXPIRE_MINS * 60,
+        "sub":          username,
+        "role":         role,
+        "tenant_id":    _tenant_id,
+        "workspace_id": _workspace_id,
+        "plan_name":    _plan_name,
+        "iat":          int(time.time()),
+        "exp":          int(time.time()) + EXPIRE_MINS * 60,
     }
     return _jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -152,7 +171,9 @@ def decode_token(token: str) -> dict:
             parts = decoded.split(":")
             if len(parts) < 4:
                 raise HTTPException(status_code=401, detail="Invalid token")
-            username, role, exp_str, iat_str, sig = parts[0], parts[1], parts[2], parts[3] if len(parts) > 3 else "0", parts[4] if len(parts) > 4 else parts[3]
+            username, role, exp_str = parts[0], parts[1], parts[2]
+            iat_str = parts[3] if len(parts) > 3 else "0"
+            sig = parts[4] if len(parts) > 4 else ""
             if int(exp_str) < time.time():
                 raise HTTPException(status_code=401, detail="Token has expired")
             expected_payload = f"{username}:{role}:{exp_str}:{iat_str}"

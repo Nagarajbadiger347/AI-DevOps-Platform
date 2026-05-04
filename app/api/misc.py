@@ -75,7 +75,7 @@ def correlate_events_endpoint(events: list, _: AuthContext = Depends(require_vie
     return {"correlation": correlate_events(events)}
 
 
-@router.get("/metrics", response_class=None)
+@router.get("/metrics", include_in_schema=False)
 def prometheus_metrics():
     """Expose Prometheus-compatible text metrics."""
     import time

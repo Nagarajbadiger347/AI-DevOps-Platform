@@ -218,11 +218,20 @@ def send_invite_email(email: str, username: str, otp: str, token: str) -> dict:
     msg.attach(MIMEText(html_body, "html"))
 
     try:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as s:
-            s.ehlo()
-            s.starttls()
-            s.login(smtp_user, smtp_pass)
-            s.sendmail(smtp_from, [email], msg.as_string())
+        if smtp_port == 465:
+            # Port 465 = implicit TLS (SMTPS) — must use SMTP_SSL
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as s:
+                s.ehlo()
+                s.login(smtp_user, smtp_pass)
+                s.sendmail(smtp_from, [email], msg.as_string())
+        else:
+            # Port 587 (or any other) = STARTTLS upgrade
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as s:
+                s.ehlo()
+                s.starttls()
+                s.ehlo()
+                s.login(smtp_user, smtp_pass)
+                s.sendmail(smtp_from, [email], msg.as_string())
         return {"success": True, "email": email}
     except Exception as e:
         return {"success": False, "error": str(e)}

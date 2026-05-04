@@ -40,7 +40,20 @@ class SlackSendRequest(BaseModel):
     sent_by:  str = "user"
 
 
-@router.post("/warroom/create")
+@router.get("/war-rooms")
+def list_all_war_rooms(auth: AuthContext = Depends(require_viewer)):
+    """List all war rooms (active and resolved)."""
+    return {"war_rooms": [
+        {"war_room_id": wr.war_room_id, "incident_id": wr.incident_id,
+         "description": wr.incident_description, "slack_channel": wr.slack_channel,
+         "created_at": wr.created_at, "participants": len(wr.participants),
+         "severity": wr.pipeline_state.get("severity", "SEV2"),
+         "status": wr.pipeline_state.get("status", "active")}
+        for wr in _WAR_ROOMS.values()
+    ]}
+
+
+@router.post("/war-rooms")
 def warroom_create(req: WarRoomRequest, auth: AuthContext = Depends(require_developer)):
     """Create a war room: collect universal context, run AI analysis, create Slack channel, post findings."""
     context: dict = {}
@@ -123,7 +136,7 @@ def warroom_create(req: WarRoomRequest, auth: AuthContext = Depends(require_deve
     }
 
 
-@router.post("/warroom/{war_room_id}/ask")
+@router.post("/war-rooms/{war_room_id}/ask")
 async def ask_war_room_ai(war_room_id: str, req: WarRoomQuestion, auth: AuthContext = Depends(require_viewer)):
     if war_room_id not in _WAR_ROOMS:
         raise HTTPException(status_code=404, detail=f"War room {war_room_id} not found")
@@ -134,7 +147,7 @@ async def ask_war_room_ai(war_room_id: str, req: WarRoomQuestion, auth: AuthCont
         return {"answer": f"War room AI unavailable: {e}", "war_room_id": war_room_id}
 
 
-@router.get("/warroom/{war_room_id}/history")
+@router.get("/war-rooms/{war_room_id}/history")
 def get_war_room_history(war_room_id: str, auth: AuthContext = Depends(require_viewer)):
     """Return full chat history for a war room, including messages mirrored from Slack."""
     if war_room_id not in _WAR_ROOMS:
@@ -152,7 +165,7 @@ def get_war_room_history(war_room_id: str, auth: AuthContext = Depends(require_v
         return {"war_room_id": war_room_id, "history": [], "error": str(exc)}
 
 
-@router.get("/warroom/active")
+@router.get("/war-rooms/active")
 def list_active_war_rooms(auth: AuthContext = Depends(require_viewer)):
     return {"war_rooms": [
         {"war_room_id": wr.war_room_id, "incident_id": wr.incident_id,
@@ -164,7 +177,7 @@ def list_active_war_rooms(auth: AuthContext = Depends(require_viewer)):
     ]}
 
 
-@router.get("/warroom/resolved")
+@router.get("/war-rooms/resolved")
 def list_resolved_war_rooms(auth: AuthContext = Depends(require_viewer)):
     return {"war_rooms": [
         {"war_room_id": wr.war_room_id, "incident_id": wr.incident_id,
@@ -176,13 +189,13 @@ def list_resolved_war_rooms(auth: AuthContext = Depends(require_viewer)):
     ]}
 
 
-@router.get("/warroom/{war_room_id}/timeline")
+@router.get("/war-rooms/{war_room_id}/timeline")
 def get_war_room_timeline(war_room_id: str, auth: AuthContext = Depends(require_viewer)):
     events = _wr_timeline(war_room_id)
     return {"timeline": events, "count": len(events)}
 
 
-@router.get("/warroom/{war_room_id}/slack-history")
+@router.get("/war-rooms/{war_room_id}/slack-history")
 def get_war_room_slack_history(war_room_id: str, limit: int = 30, auth: AuthContext = Depends(require_viewer)):
     """Fetch recent messages from the Slack channel linked to this war room."""
     try:
@@ -214,7 +227,7 @@ def get_war_room_slack_history(war_room_id: str, limit: int = 30, auth: AuthCont
         return {"messages": [], "channel": "", "error": str(e)}
 
 
-@router.post("/warroom/{war_room_id}/slack-send")
+@router.post("/war-rooms/{war_room_id}/slack-send")
 def send_war_room_slack_message(war_room_id: str, req: SlackSendRequest, auth: AuthContext = Depends(require_viewer)):
     try:
         wr = _WAR_ROOMS.get(war_room_id)
@@ -230,7 +243,7 @@ def send_war_room_slack_message(war_room_id: str, req: SlackSendRequest, auth: A
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/warroom/{war_room_id}/resolve")
+@router.post("/war-rooms/{war_room_id}/resolve")
 def resolve_war_room(war_room_id: str, auth: AuthContext = Depends(require_developer)):
     wr = _WAR_ROOMS.get(war_room_id)
     if not wr:
@@ -245,7 +258,7 @@ def resolve_war_room(war_room_id: str, auth: AuthContext = Depends(require_devel
     return {"success": True, "war_room_id": war_room_id, "resolved_by": auth.username}
 
 
-@router.delete("/warroom/{war_room_id}")
+@router.delete("/war-rooms/{war_room_id}")
 def delete_war_room(war_room_id: str, auth: AuthContext = Depends(require_developer)):
     """Permanently delete a war room."""
     if war_room_id not in _WAR_ROOMS:

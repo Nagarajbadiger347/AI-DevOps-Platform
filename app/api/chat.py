@@ -207,6 +207,16 @@ def _build_catalogue():
             "params": ["cluster", "service"],
             "handler": lambda p: force_new_ecs_deployment(p.get("cluster", "default"), p["service"]),
         },
+        "start_ecs_service": {
+            "desc": "Start (scale up to 1) a stopped ECS service",
+            "params": ["cluster", "service"],
+            "handler": lambda p: scale_ecs_service(p.get("cluster", "default"), p["service"], int(p.get("count", 1))),
+        },
+        "stop_ecs_service": {
+            "desc": "Stop an ECS service by scaling it to 0 tasks",
+            "params": ["cluster", "service"],
+            "handler": lambda p: scale_ecs_service(p.get("cluster", "default"), p["service"], 0),
+        },
         "get_stopped_ecs_tasks": {
             "desc": "List recently stopped ECS tasks and their stop reasons",
             "params": ["cluster"],
@@ -426,7 +436,9 @@ EC2:
 ECS:
 - list_ecs_services: cluster (optional)
 - get_ecs_service: cluster, service
-- scale_ecs_service: cluster, service, desired_count (int)
+- start_ecs_service: cluster (optional), service — use when user says "start service X" or "bring up service X"
+- stop_ecs_service: cluster (optional), service — use when user says "stop service X" or "bring down service X"
+- scale_ecs_service: cluster, service, desired_count (int) — use when user specifies an explicit count
 - redeploy_ecs_service: cluster, service
 - get_stopped_ecs_tasks: cluster (optional)
 
@@ -475,6 +487,8 @@ Rules:
 - Extract params literally from the message
 - REGION: if the user mentions a region, always include "region": "<value>" in params
 - COST QUERIES: If the user asks "how much does X cost", always use estimate_cost action
+- ECS SERVICE START/STOP: "start service X", "stop service X", "bring up X service", "bring down X service" → use start_ecs_service / stop_ecs_service. Never use start_ec2 / stop_ec2 for services.
+- EC2 START/STOP: only use start_ec2 / stop_ec2 when user explicitly mentions an EC2 instance or instance ID (i-xxxx).
 - If a required param is missing and cannot be inferred, output {"intent": "question"} instead
 - GENERAL QUERIES: Phrases like "check my infra", "check infrastructure", "show my setup", "what's running", "how is my infra", "infrastructure status", "check health" are QUESTIONS not actions — output {"intent": "question"}
 - EXPLORATORY / INFORMATIONAL: Phrases like "explore", "understand", "explain", "how does X work", "tell me about", "learn about", "walk me through", "overview of" are always QUESTIONS — never map to an action even if the topic is a pipeline or runnable operation
@@ -535,6 +549,39 @@ def _rule_based_intent(message: str, conv_context: str = "") -> dict | None:
             hours = max(1, int(h_match.group(1)))  # guard against 0
         return {"intent": "action", "action": "get_recent_commits", "params": {"hours": hours}}
 
+    # EC2 start / stop / reboot — rule-based to prevent LLM from hallucinating execution
+    ec2_action_kw = {"start", "stop", "reboot", "restart", "boot", "power"}
+    ec2_ctx_kw    = {"ec2", "instance", "server", "vm", "machine", "compute"}
+    if any(k in msg for k in ec2_action_kw) and (iid or any(k in msg for k in ec2_ctx_kw)):
+        # Disambiguate: "start" vs "stop" vs "reboot"
+        is_stop   = any(k in msg for k in ("stop", "shutdown", "shut down", "power off", "terminate"))
+        is_reboot = any(k in msg for k in ("reboot", "restart", "bounce"))
+        is_start  = any(k in msg for k in ("start", "boot", "power on", "bring up"))
+        if is_stop and not is_start:
+            return {"intent": "action", "action": "stop_ec2",   "params": {"instance_id": iid}}
+        if is_reboot:
+            return {"intent": "action", "action": "reboot_ec2", "params": {"instance_id": iid}}
+        if is_start:
+            return {"intent": "action", "action": "start_ec2",  "params": {"instance_id": iid}}
+
+    # ECS service start/stop — must check before EC2 start/stop so "start service" isn't misrouted
+    ecs_svc_kw = {"service", "ecs", "container", "task"}
+    if any(k in msg for k in ecs_svc_kw):
+        import re as _re
+        # Extract service name: "start/stop/bring up/bring down <service>"
+        _start_pat = _re.search(r'(?:start|bring up|launch|run)\s+(?:the\s+)?(?:ecs\s+)?(?:service\s+)?(\S+)', msg)
+        _stop_pat  = _re.search(r'(?:stop|bring down|shutdown|shut down|kill)\s+(?:the\s+)?(?:ecs\s+)?(?:service\s+)?(\S+)', msg)
+        if _start_pat and any(k in msg for k in ("start", "bring up", "launch")):
+            svc = _start_pat.group(1).rstrip(".,!")
+            if svc not in ("the", "my", "a", "an", "ecs", "service"):
+                return {"intent": "action", "action": "start_ecs_service",
+                        "params": {"service": svc, "cluster": "default"}}
+        if _stop_pat and any(k in msg for k in ("stop", "bring down", "shutdown", "shut down", "kill")):
+            svc = _stop_pat.group(1).rstrip(".,!")
+            if svc not in ("the", "my", "a", "an", "ecs", "service"):
+                return {"intent": "action", "action": "stop_ecs_service",
+                        "params": {"service": svc, "cluster": "default"}}
+
     # GitHub PR queries — always fetch real PRs
     pr_kw = ["recent pr", "recent pull request", "list pr", "show pr", "merged pr",
              "open pr", "pull request review", "review pr"]
@@ -576,7 +623,7 @@ _CONFIRM_REQUIRED = {
     "restart_deployment", "scale_deployment", "delete_pod",
     "cordon_node", "uncordon_node",
     "start_ec2", "stop_ec2", "reboot_ec2",
-    "scale_ecs_service", "redeploy_ecs_service",
+    "scale_ecs_service", "redeploy_ecs_service", "start_ecs_service", "stop_ecs_service",
     "invoke_lambda",
     "reboot_rds",
     "set_alarm_state",
@@ -598,6 +645,8 @@ def _confirmation_message(action_name: str, params: dict) -> str:
         "reboot_ec2":           f"reboot EC2 instance **{p.get('instance_id','?')}**",
         "scale_ecs_service":    f"scale ECS service **{p.get('service','?')}** in cluster **{p.get('cluster','?')}** to **{p.get('desired_count','?')}** tasks",
         "redeploy_ecs_service": f"force a new deployment of ECS service **{p.get('service','?')}** in cluster **{p.get('cluster','?')}**",
+        "start_ecs_service":    f"start ECS service **{p.get('service','?')}** in cluster **{p.get('cluster','?')}** (scale to {p.get('count',1)} task)",
+        "stop_ecs_service":     f"stop ECS service **{p.get('service','?')}** in cluster **{p.get('cluster','?')}** (scale to 0 tasks)",
         "invoke_lambda":        f"invoke Lambda function **{p.get('function_name','?')}**",
         "reboot_rds":           f"reboot RDS instance **{p.get('db_instance_id','?')}** (brief downtime expected)",
         "set_alarm_state":      f"set CloudWatch alarm **{p.get('alarm_name','?')}** to state **{p.get('state','?')}**",
@@ -698,6 +747,8 @@ def _chat_inner(payload: ChatPayload, x_user: str):
             if payload.dry_run:
                 reply = f"**Dry-run:** Would execute `{action_name}` with params `{_j.dumps(params)}`.\nNo changes made."
             else:
+                import time as _time_chat
+                _t0 = _time_chat.monotonic()
                 try:
                     action_result = action_def["handler"](params)
                     action_taken  = action_name
@@ -705,8 +756,28 @@ def _chat_inner(payload: ChatPayload, x_user: str):
                 except Exception as exc:
                     action_result = {"success": False, "error": str(exc)}
                     action_taken  = action_name
+                _duration_ms = int((_time_chat.monotonic() - _t0) * 1000)
                 audit_log(user=x_user, action=action_name, params=params,
                           result=action_result or {}, source="chat")
+                # Meter usage + record outcome for training data
+                try:
+                    from app.core.context import get_current_tenant, get_current_workspace
+                    from app.core.usage import meter_action
+                    from app.tenants.store import record_action_outcome
+                    _tid = get_current_tenant()
+                    meter_action(_tid, action=action_name, workspace_id=get_current_workspace())
+                    record_action_outcome(
+                        tenant_id=_tid,
+                        action=action_name,
+                        params=params,
+                        success=bool((action_result or {}).get("success", True)),
+                        error_msg=(action_result or {}).get("error", ""),
+                        duration_ms=_duration_ms,
+                        session_id=getattr(payload, "session_id", ""),
+                        workspace_id=get_current_workspace(),
+                    )
+                except Exception:
+                    pass
                 try:
                     reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
                 except Exception as exc:
@@ -1011,7 +1082,7 @@ async def chat_stream(payload: ChatPayload, auth: AuthContext = Depends(require_
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@router.get("/chat/action_count")
+@router.get("/chat/stats")
 def chat_action_count():
     return {"count": _chat_action_count}
 
@@ -1025,7 +1096,7 @@ def list_chat_sessions(auth: AuthContext = Depends(require_viewer)):
         return {"sessions": [], "error": str(e)}
 
 
-@router.get("/chat/history/{session_id}")
+@router.get("/chat/sessions/{session_id}/history")
 def get_chat_history(session_id: str, auth: AuthContext = Depends(require_viewer)):
     """Return stored conversation history for a session."""
     try:

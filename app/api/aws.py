@@ -455,7 +455,3 @@ def aws_cost_summary(months: int = 1):
         return {"total_cost_usd": 0, "note": str(e)}
 
 
-@router.post("/aws/assess-deployment")
-def aws_assess_deployment_alias(req: dict):
-    """Alias — use POST /deploy/assess instead."""
-    raise HTTPException(status_code=301, detail="Use POST /deploy/assess")

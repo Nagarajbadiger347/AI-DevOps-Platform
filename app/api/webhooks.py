@@ -73,22 +73,162 @@ async def webhook_github(
 
 
 @router.post("/pagerduty", tags=["Webhooks"])
-async def webhook_pagerduty(payload: PagerDutyWebhookPayload):
-    """Receive PagerDuty incident trigger webhooks."""
-    for msg in payload.messages:
-        inc = msg.get("incident", {})
-        inc_id = inc.get("id", "pd-unknown")
-        title = inc.get("title", "PagerDuty incident")
-        urgency = inc.get("urgency", "high")
-        from app.orchestrator.runner import run_pipeline
-        result = run_pipeline(
-            incident_id=f"pd-{inc_id}",
-            description=title,
-            severity=urgency,
-            auto_remediate=False,
-        )
-        return {"status": "triggered", "incident_id": f"pd-{inc_id}", "pipeline": result.get("status")}
-    return {"status": "no_messages"}
+async def webhook_pagerduty(
+    request: Request,
+    x_pagerduty_signature: str = Header("", alias="X-PagerDuty-Signature"),
+):
+    """Receive PagerDuty v2/v3 incident webhooks and auto-triage.
+
+    Supports both legacy messages[] format and v3 event.data format.
+    Verifies HMAC-SHA256 signature when PAGERDUTY_WEBHOOK_SECRET is set.
+    On trigger: creates Slack war room, collects context, posts enriched brief,
+    then fires the AI pipeline asynchronously.
+    """
+    raw_body = await request.body()
+
+    # Signature verification
+    pd_secret = os.getenv("PAGERDUTY_WEBHOOK_SECRET", "").strip()
+    if pd_secret and x_pagerduty_signature:
+        import hmac, hashlib
+        sig_body = f"v1:{raw_body.decode()}"
+        expected = "v1=" + hmac.new(pd_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+        sigs = x_pagerduty_signature.split(",")
+        if not any(hmac.compare_digest(expected, s.strip()) for s in sigs):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "Invalid PagerDuty signature"})
+
+    try:
+        body = await request.json() if not raw_body else __import__("json").loads(raw_body)
+    except Exception:
+        body = {}
+
+    # Normalise payload — support both v2 (messages[]) and v3 (event.data)
+    incidents_to_triage: list[dict] = []
+
+    # v3 format: {"event": {"event_type": "incident.triggered", "data": {...}}}
+    if "event" in body:
+        ev = body["event"]
+        if ev.get("event_type", "").startswith("incident.trigger"):
+            data = ev.get("data", {})
+            incidents_to_triage.append({
+                "id":      data.get("id", "pd-unknown"),
+                "title":   data.get("title", "PagerDuty incident"),
+                "urgency": data.get("urgency", "high"),
+                "service": data.get("service", {}).get("summary", ""),
+                "url":     data.get("html_url", ""),
+                "details": data.get("body", {}).get("details", ""),
+            })
+
+    # v2 format: {"messages": [{"event": "incident.trigger", "incident": {...}}]}
+    for msg in body.get("messages", []):
+        if msg.get("event", msg.get("type", "")).startswith("incident.trigger"):
+            inc = msg.get("incident", {})
+            incidents_to_triage.append({
+                "id":      inc.get("id", "pd-unknown"),
+                "title":   inc.get("title", "PagerDuty incident"),
+                "urgency": inc.get("urgency", "high"),
+                "service": inc.get("service", {}).get("name", ""),
+                "url":     inc.get("html_url", ""),
+                "details": inc.get("body", {}).get("details", ""),
+            })
+
+    if not incidents_to_triage:
+        return {"status": "ignored", "reason": "no trigger events found"}
+
+    triggered = []
+    for inc in incidents_to_triage:
+        incident_id = f"pd-{inc['id']}"
+        service     = inc["service"]
+        urgency     = inc["urgency"]
+        title       = inc["title"]
+
+        severity_map = {"high": "high", "low": "medium", "critical": "critical"}
+        severity = severity_map.get(urgency, "high")
+
+        description = f"[PagerDuty] {title}"
+        if service:
+            description += f" | service={service}"
+        if inc.get("details"):
+            description += f" | {inc['details'][:200]}"
+
+        # 1. Create Slack war room immediately — on-call engineer sees it before AI finishes
+        war_room_channel = None
+        try:
+            from app.integrations.slack import create_incident_channel, post_message
+            channel_name = f"inc-pd-{inc['id'][:8].lower()}"
+            ch = create_incident_channel(channel_name)
+            war_room_channel = ch.get("channel") or ch.get("channel_id")
+            if war_room_channel:
+                post_message(
+                    war_room_channel,
+                    f":rotating_light: *PagerDuty Alert Auto-Triaged*\n"
+                    f"*Incident:* {title}\n"
+                    f"*Service:* {service or 'unknown'}\n"
+                    f"*Urgency:* {urgency}\n"
+                    f"*PagerDuty URL:* {inc.get('url', 'n/a')}\n\n"
+                    f"_AI pipeline started — context enrichment in progress..._"
+                )
+        except Exception:
+            pass
+
+        # 2. Collect change timeline context synchronously (fast, 2h window)
+        change_summary = ""
+        try:
+            from app.integrations.universal_collector import collect_all_context
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as exe:
+                ctx_future = exe.submit(collect_all_context, 2)
+                try:
+                    ctx = ctx_future.result(timeout=8)
+                    commits = ctx.get("github", {}).get("commits", {}).get("commits", [])
+                    ct_events = ctx.get("aws", {}).get("cloudtrail", {}).get("events", [])
+                    recent_changes = []
+                    for c in commits[:5]:
+                        recent_changes.append(f"  • commit: {c.get('message','')[:80]} ({c.get('author','')})")
+                    for e in ct_events[:5]:
+                        recent_changes.append(f"  • aws: {e.get('event_name','')} by {e.get('user','')}")
+                    if recent_changes:
+                        change_summary = "Recent changes (last 2h):\n" + "\n".join(recent_changes)
+                except concurrent.futures.TimeoutError:
+                    change_summary = "(context collection timed out)"
+        except Exception:
+            pass
+
+        # 3. Post enriched brief to war room
+        if war_room_channel and change_summary:
+            try:
+                from app.integrations.slack import post_message
+                post_message(war_room_channel, f":mag: *Change Timeline*\n{change_summary}")
+            except Exception:
+                pass
+
+        # 4. Fire AI pipeline (background — don't block webhook response)
+        try:
+            import threading
+            from app.orchestrator.runner import run_pipeline
+            threading.Thread(
+                target=run_pipeline,
+                kwargs={
+                    "incident_id":    incident_id,
+                    "description":    description,
+                    "severity":       severity,
+                    "auto_remediate": False,
+                    "metadata": {
+                        "source":          "pagerduty",
+                        "pagerduty_id":    inc["id"],
+                        "service":         service,
+                        "war_room_channel": war_room_channel or "",
+                        "pd_url":          inc.get("url", ""),
+                    },
+                },
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            return {"status": "error", "detail": str(exc)}
+
+        triggered.append({"incident_id": incident_id, "war_room": war_room_channel})
+
+    return {"status": "triggered", "count": len(triggered), "incidents": triggered}
 
 
 @router.post("/grafana", tags=["webhooks"])
@@ -135,23 +275,119 @@ async def webhook_cloudwatch(request: Request):
 
 
 @router.post("/opsgenie", tags=["webhooks"])
-async def webhook_opsgenie(request: Request):
-    """Receive OpsGenie alert webhooks."""
+async def webhook_opsgenie(
+    request: Request,
+    x_og_token: str = Header("", alias="X-OG-Token"),
+):
+    """Receive OpsGenie v2 alert webhooks and auto-triage.
+
+    Verifies X-OG-Token bearer token when OPSGENIE_WEBHOOK_TOKEN is set.
+    On Create/Acknowledge: creates Slack war room, collects change timeline,
+    posts enriched brief, fires AI pipeline in background thread.
+    """
+    og_token = os.getenv("OPSGENIE_WEBHOOK_TOKEN", "").strip()
+    if og_token and x_og_token and not __import__("hmac").compare_digest(og_token, x_og_token):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"detail": "Invalid OpsGenie token"})
+
     try:
         body = await request.json()
     except Exception:
         body = {}
-    alert = body.get("alert", {})
+
+    action  = body.get("action", "")
+    alert   = body.get("alert", {})
     alert_id = alert.get("alertId", "unknown")
-    message = alert.get("message", "OpsGenie alert")
-    action = body.get("action", "")
-    if action in ("Create", "Acknowledge"):
+    message  = alert.get("message", "OpsGenie alert")
+    source   = alert.get("source", "")
+    tags     = alert.get("tags", [])
+    priority = alert.get("priority", "P3")
+
+    # Only triage on alert creation or first acknowledgement
+    if action not in ("Create", "Acknowledge"):
+        return {"status": "ignored", "action": action}
+
+    incident_id = f"opsgenie-{alert_id}"
+    description = f"[OpsGenie] {message}"
+    if source:
+        description += f" | source={source}"
+    if tags:
+        description += f" | tags={','.join(tags[:5])}"
+
+    priority_severity = {"P1": "critical", "P2": "high", "P3": "high", "P4": "medium", "P5": "low"}
+    severity = priority_severity.get(priority, "high")
+
+    # Create Slack war room
+    war_room_channel = None
+    try:
+        from app.integrations.slack import create_incident_channel, post_message
+        channel_name = f"inc-og-{alert_id[:8].lower()}"
+        ch = create_incident_channel(channel_name)
+        war_room_channel = ch.get("channel") or ch.get("channel_id")
+        if war_room_channel:
+            post_message(
+                war_room_channel,
+                f":rotating_light: *OpsGenie Alert Auto-Triaged*\n"
+                f"*Alert:* {message}\n"
+                f"*Priority:* {priority}\n"
+                f"*Source:* {source or 'unknown'}\n"
+                f"*Tags:* {', '.join(tags) if tags else 'none'}\n\n"
+                f"_AI pipeline started — context enrichment in progress..._"
+            )
+    except Exception:
+        pass
+
+    # Collect change timeline
+    change_summary = ""
+    try:
+        from app.integrations.universal_collector import collect_all_context
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as exe:
+            ctx_future = exe.submit(collect_all_context, 2)
+            try:
+                ctx = ctx_future.result(timeout=8)
+                commits = ctx.get("github", {}).get("commits", {}).get("commits", [])
+                ct_events = ctx.get("aws", {}).get("cloudtrail", {}).get("events", [])
+                recent_changes = []
+                for c in commits[:5]:
+                    recent_changes.append(f"  • commit: {c.get('message','')[:80]} ({c.get('author','')})")
+                for e in ct_events[:5]:
+                    recent_changes.append(f"  • aws: {e.get('event_name','')} by {e.get('user','')}")
+                if recent_changes:
+                    change_summary = "Recent changes (last 2h):\n" + "\n".join(recent_changes)
+            except concurrent.futures.TimeoutError:
+                change_summary = "(context collection timed out)"
+    except Exception:
+        pass
+
+    if war_room_channel and change_summary:
+        try:
+            from app.integrations.slack import post_message
+            post_message(war_room_channel, f":mag: *Change Timeline*\n{change_summary}")
+        except Exception:
+            pass
+
+    # Fire AI pipeline in background
+    try:
+        import threading
         from app.orchestrator.runner import run_pipeline
-        result = run_pipeline(
-            incident_id=f"opsgenie-{alert_id}",
-            description=f"OpsGenie: {message}",
-            severity="high",
-            auto_remediate=False,
-        )
-        return {"status": "triggered", "alert_id": alert_id}
-    return {"status": "ignored", "action": action}
+        threading.Thread(
+            target=run_pipeline,
+            kwargs={
+                "incident_id":    incident_id,
+                "description":    description,
+                "severity":       severity,
+                "auto_remediate": False,
+                "metadata": {
+                    "source":           "opsgenie",
+                    "opsgenie_id":      alert_id,
+                    "priority":         priority,
+                    "war_room_channel": war_room_channel or "",
+                },
+            },
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+    return {"status": "triggered", "incident_id": incident_id, "war_room": war_room_channel}

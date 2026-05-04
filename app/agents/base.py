@@ -17,6 +17,7 @@ Provides:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 import time
@@ -105,21 +106,45 @@ class BaseAgent(ABC):
 
         last_exc: Optional[Exception] = None
 
+        from app.core.config import settings as _settings
+        _llm_timeout = _settings.LLM_TIMEOUT_SECONDS
+
         for attempt in range(retries):
             try:
                 from app.llm.factory import LLMFactory
-                llm      = LLMFactory.get()
-                response = llm.complete(
-                    prompt,
-                    system=system_prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                )
+                llm = LLMFactory.get()
+
+                # Hard ceiling per attempt — prevents hung LLM calls from blocking pipeline
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _exe:
+                    _fut = _exe.submit(
+                        llm.complete, prompt,
+                        system=system_prompt, max_tokens=max_tokens, temperature=temperature,
+                    )
+                    try:
+                        response = _fut.result(timeout=_llm_timeout)
+                    except concurrent.futures.TimeoutError:
+                        raise TimeoutError(
+                            f"LLM call exceeded {_llm_timeout}s timeout — "
+                            "provider may be slow or unreachable"
+                        )
                 content = response.content
 
                 # Store in cache on success
                 if use_cache and cache_key and content:
                     llm_cache.set(cache_key, content)
+
+                # Meter token usage per tenant
+                try:
+                    tokens = getattr(response, "total_tokens", 0) or len(content) // 4
+                    from app.core.usage import meter_llm_tokens, meter_agent_run
+                    from app.core.context import get_current_tenant
+                    tid = get_current_tenant()
+                    if tid:
+                        meter_llm_tokens(tid, tokens, agent_name=agent_name)
+                        if attempt == 0:
+                            meter_agent_run(tid, agent_name=agent_name)
+                except Exception:
+                    pass
 
                 if attempt > 0:
                     logger.info("llm_retry_succeeded", extra={

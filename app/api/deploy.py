@@ -41,33 +41,62 @@ def deploy_assess(req: DeployAssessRequest, x_user: Optional[str] = Header(defau
     _rbac_guard(x_user, "deploy")
 
     from app.integrations.github import get_recent_commits as _get_recent_commits
-    k8s_state = {
-        "cluster":     check_k8s_cluster(),
-        "pods":        check_k8s_pods(req.namespace),
-        "deployments": check_k8s_deployments(req.namespace),
-    }
-    aws_alarms     = list_cloudwatch_alarms(state="ALARM")
-    recent_commits = _get_recent_commits(hours=req.hours)
-    past_incidents = search_similar_incidents(
-        f"{req.deployment} {req.description}", n_results=3
-    )
 
-    assessment = assess_deployment({
-        "deployment":       req.deployment,
-        "namespace":        req.namespace,
-        "new_image":        req.new_image,
-        "description":      req.description,
-        "k8s_state":        k8s_state,
-        "recent_incidents": past_incidents,
-        "aws_alarms":       aws_alarms,
-        "recent_commits":   recent_commits,
-    })
+    k8s_state: dict = {}
+    try:
+        k8s_state = {
+            "cluster":     check_k8s_cluster(),
+            "pods":        check_k8s_pods(req.namespace),
+            "deployments": check_k8s_deployments(req.namespace),
+        }
+    except Exception as exc:
+        k8s_state = {"error": str(exc), "available": False}
+
+    aws_alarms: list = []
+    try:
+        aws_alarms = list_cloudwatch_alarms(state="ALARM")
+    except Exception as exc:
+        aws_alarms = [{"error": str(exc)}]
+
+    recent_commits: list = []
+    try:
+        recent_commits = _get_recent_commits(hours=req.hours)
+    except Exception as exc:
+        recent_commits = [{"error": str(exc)}]
+
+    past_incidents: list = []
+    try:
+        past_incidents = search_similar_incidents(
+            f"{req.deployment} {req.description}", n_results=3
+        )
+    except Exception as exc:
+        past_incidents = [{"error": str(exc)}]
+
+    try:
+        assessment = assess_deployment({
+            "deployment":       req.deployment,
+            "namespace":        req.namespace,
+            "new_image":        req.new_image,
+            "description":      req.description,
+            "k8s_state":        k8s_state,
+            "recent_incidents": past_incidents,
+            "aws_alarms":       aws_alarms,
+            "recent_commits":   recent_commits,
+        })
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM assessment failed: {exc}")
 
     return {
         "deployment": req.deployment,
         "namespace":  req.namespace,
         "new_image":  req.new_image,
         "assessment": assessment,
+        "data_sources": {
+            "k8s":     "ok" if "error" not in k8s_state else "unavailable",
+            "aws":     "ok" if not any("error" in a for a in aws_alarms) else "unavailable",
+            "github":  "ok" if not any("error" in c for c in recent_commits) else "unavailable",
+            "memory":  "ok" if not any("error" in i for i in past_incidents) else "unavailable",
+        },
     }
 
 

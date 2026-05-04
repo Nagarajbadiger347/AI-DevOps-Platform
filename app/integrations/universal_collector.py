@@ -111,7 +111,108 @@ def collect_all_context(hours: int = 2) -> dict:
         if grp:
             context[source] = grp
 
+    # Build unified change timeline — ordered newest-first, cross-source
+    context["change_timeline"] = _build_change_timeline(results, hours)
+
     return context
+
+
+def _build_change_timeline(results: dict, hours: int) -> dict:
+    """Merge GitHub commits, CloudTrail events, and K8s deployment changes into
+    a single ordered timeline for AI root-cause correlation.
+
+    Returns:
+        {
+          "window_hours": 2,
+          "total_changes": 12,
+          "events": [
+            {"ts": "2026-05-04T10:30:00Z", "source": "github", "type": "commit",
+             "summary": "fix: increase memory limit", "actor": "alice", "ref": "main"},
+            {"ts": "2026-05-04T10:25:00Z", "source": "aws_cloudtrail", "type": "UpdateService",
+             "summary": "ECS UpdateService payments-api", "actor": "ci-deploy"},
+            ...
+          ]
+        }
+    """
+    import datetime
+    events: list[dict] = []
+
+    # GitHub commits
+    gh_commits = results.get("github_commits", {})
+    for c in (gh_commits.get("commits", []) if isinstance(gh_commits, dict) else []):
+        ts = c.get("timestamp") or c.get("date") or c.get("authored_at") or ""
+        events.append({
+            "ts":      ts,
+            "source":  "github",
+            "type":    "commit",
+            "summary": (c.get("message") or "")[:120],
+            "actor":   c.get("author") or c.get("committer") or "",
+            "ref":     c.get("branch") or c.get("ref") or "",
+            "sha":     (c.get("sha") or c.get("id") or "")[:8],
+        })
+
+    # GitHub PRs merged in window
+    gh_prs = results.get("github_prs", {})
+    for pr in (gh_prs.get("prs", []) if isinstance(gh_prs, dict) else []):
+        if pr.get("state") == "closed" and pr.get("merged"):
+            ts = pr.get("merged_at") or pr.get("closed_at") or ""
+            events.append({
+                "ts":      ts,
+                "source":  "github",
+                "type":    "pr_merged",
+                "summary": f"PR #{pr.get('number')}: {(pr.get('title') or '')[:100]}",
+                "actor":   pr.get("user") or pr.get("author") or "",
+                "ref":     pr.get("base") or "",
+            })
+
+    # AWS CloudTrail — filter to deployment/mutation events (skip reads)
+    _CT_WRITE_PREFIXES = (
+        "Update", "Create", "Delete", "Put", "Set", "Modify",
+        "Register", "Deregister", "Deploy", "Run", "Start", "Stop", "Terminate",
+    )
+    ct_events = results.get("aws_cloudtrail", {})
+    for e in (ct_events.get("events", []) if isinstance(ct_events, dict) else []):
+        event_name = e.get("event_name") or e.get("eventName") or ""
+        if not any(event_name.startswith(p) for p in _CT_WRITE_PREFIXES):
+            continue
+        ts = e.get("event_time") or e.get("eventTime") or ""
+        resource = ""
+        for r in e.get("resources", []):
+            if isinstance(r, dict):
+                resource = r.get("resource_name") or r.get("ARN") or ""
+                break
+        events.append({
+            "ts":      str(ts),
+            "source":  "aws_cloudtrail",
+            "type":    event_name,
+            "summary": f"{event_name} {resource}".strip(),
+            "actor":   e.get("user") or e.get("username") or e.get("userIdentity", {}).get("arn", "") if isinstance(e.get("userIdentity"), dict) else e.get("user", ""),
+            "region":  e.get("aws_region") or e.get("awsRegion") or "",
+        })
+
+    # K8s deployments with recent changes (rollout events)
+    k8s_events = results.get("k8s_events", {})
+    for ev in (k8s_events.get("events", []) if isinstance(k8s_events, dict) else []):
+        if ev.get("kind") in ("Deployment", "ReplicaSet") and ev.get("reason") in (
+            "ScalingReplicaSet", "Killing", "Pulled", "Started",
+        ):
+            events.append({
+                "ts":      ev.get("last_seen") or ev.get("first_seen") or "",
+                "source":  "kubernetes",
+                "type":    ev.get("reason", ""),
+                "summary": f"{ev.get('kind','')}/{ev.get('name','')} — {ev.get('message','')[:100]}",
+                "actor":   "k8s-controller",
+                "namespace": ev.get("namespace", ""),
+            })
+
+    # Sort newest-first (ISO timestamps sort lexicographically)
+    events.sort(key=lambda e: e.get("ts") or "", reverse=True)
+
+    return {
+        "window_hours":  hours,
+        "total_changes": len(events),
+        "events":        events[:50],   # cap at 50 to keep AI context compact
+    }
 
 
 def summarize_health(context: dict) -> dict:
