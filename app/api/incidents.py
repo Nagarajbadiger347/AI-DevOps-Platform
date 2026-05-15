@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import (
     require_developer, require_viewer, optional_auth, AuthContext,
-    _PENDING_PIPELINE_STATES, _RECENT_RESULTS, _cache_result,
+    _RECENT_RESULTS, _cache_result,
     IncidentRunRequest, Event,
 )
 from app.orchestrator.runner import run_pipeline
@@ -91,7 +91,8 @@ def _handle_approval_flow(result: dict, slack_channel: str) -> dict:
     if not cid:
         return result
 
-    _PENDING_PIPELINE_STATES[cid] = result
+    from app.incident import pending_state as _ps
+    _ps.save(cid, result)
 
     try:
         from app.incident.approval import create_approval_request, post_approval_to_slack
@@ -104,8 +105,8 @@ def _handle_approval_flow(result: dict, slack_channel: str) -> dict:
             cost_report  = result.get("cost_report"),
             requested_by = (result.get("metadata") or {}).get("user", "pipeline"),
         )
-        _PENDING_PIPELINE_STATES[approval.correlation_id] = result
-        _PENDING_PIPELINE_STATES.pop(cid, None)
+        _ps.save(approval.correlation_id, result)
+        _ps.delete(cid)
         result["correlation_id"] = approval.correlation_id
 
         try:
@@ -255,27 +256,6 @@ def incidents_run(
     return _run_pipeline_from_request(req, auth)
 
 
-@router.post("/incidents/run/async")
-async def incidents_run_async(
-    req: IncidentRunRequest,
-    background_tasks: BackgroundTasks,
-    auth: Optional[AuthContext] = Depends(optional_auth),
-):
-    """Fire-and-forget — returns immediately, runs pipeline in background.
-    Poll GET /incidents/{incident_id}/result for the outcome.
-    """
-    def _run():
-        try:
-            _run_pipeline_from_request(req, auth)
-        except Exception as exc:
-            logger.error("async_pipeline_failed incident=%s error=%s",
-                         req.incident_id, exc)
-
-    background_tasks.add_task(_run)
-    return {"status": "accepted", "incident_id": req.incident_id,
-            "poll": f"/incidents/{req.incident_id}/result"}
-
-
 # ── Integration shim endpoints ────────────────────────────────────────────────
 
 @router.post("/incidents/integrations/jira")
@@ -315,10 +295,11 @@ def memory_incidents_list(limit: int = 10, auth: AuthContext = Depends(require_v
         results = search_similar_incidents("incident", n_results=limit, tenant_id=auth.tenant_id)
         if results and isinstance(results[0], list):
             results = results[0]
-        return {"incidents": results or []}
+        results = results or []
+        return {"incidents": results, "total": len(results), "count": len(results)}
     except Exception as exc:
         logger.error("memory_list_failed error=%s", exc)
-        return {"incidents": [], "error": str(exc)}
+        return {"incidents": [], "total": 0, "count": 0, "error": str(exc)}
 
 
 @router.get("/incidents/memory/trends")
@@ -473,39 +454,6 @@ def generate_post_mortem_endpoint(
             logger.warning("post_mortem_save_failed incident=%s error=%s", incident_id, exc)
 
     return result
-
-
-@router.get("/incidents/{incident_id}/stream")
-async def stream_incident_events(
-    incident_id: str,
-    _: AuthContext = Depends(require_viewer),
-):
-    """SSE stream of real-time pipeline progress for an incident.
-
-    Clients connect with `EventSource('/incidents/{id}/stream')`.
-    Each event is a JSON-encoded pipeline stage update.
-    The stream ends with a terminal `status=done` event.
-    """
-    from app.core.pipeline_events import bus
-
-    async def _event_generator() -> AsyncIterator[str]:
-        try:
-            async for event in bus.subscribe(incident_id):
-                yield f"data: {json.dumps(event)}\n\n"
-                if event.get("status") == "done":
-                    break
-        except asyncio.CancelledError:
-            pass
-
-    return StreamingResponse(
-        _event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
 
 
 @router.post("/incidents/{incident_id}/postmortem-slack")

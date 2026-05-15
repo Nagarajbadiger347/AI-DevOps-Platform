@@ -59,15 +59,22 @@ class PolicyEngine:
         if action_type in self._rules.get("blocked_actions", []):
             return False, f"action '{action_type}' is globally blocked by policy"
 
-        # 2. Role permission
-        required_perm = self._rules.get("action_permissions", {}).get(action_type)
-        if required_perm:
-            allowed_roles = self._rules.get("role_permissions", {}).get(required_perm, [])
-            if role not in allowed_roles:
-                return False, (
-                    f"role '{role}' lacks '{required_perm}' permission "
-                    f"required for '{action_type}'"
-                )
+        # 2. Role permission — DEFAULT DENY.
+        # Any action that doesn't have an explicit permission entry is treated
+        # as requiring the most-restrictive 'deploy' permission. The previous
+        # behaviour was to wave through unknown actions, which let ec2_start /
+        # ec2_stop / ecs_redeploy / lambda_invoke / rds_reboot bypass RBAC
+        # entirely. New action types must be registered in policies/rules.json
+        # to be callable.
+        required_perm = self._rules.get(
+            "action_permissions", {}
+        ).get(action_type, "deploy")
+        allowed_roles = self._rules.get("role_permissions", {}).get(required_perm, [])
+        if role not in allowed_roles:
+            return False, (
+                f"role '{role}' lacks '{required_perm}' permission "
+                f"required for '{action_type}'"
+            )
 
         # 3. Parameter guardrails
         guardrails = self._rules.get("guardrails", {})

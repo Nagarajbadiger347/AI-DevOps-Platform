@@ -63,29 +63,6 @@ async def vscode_terminal(req: Request, u=Depends(require_developer)):
     )
 
 
-@router.post("/diff")
-async def vscode_diff(req: Request, u=Depends(require_developer)):
-    body = await req.json()
-    vs = _vscode()
-    return vs.show_diff(
-        title=body.get("title", "NsOps Diff"),
-        original_path=body.get("original_path"),
-        original_content=body.get("original_content"),
-        modified_path=body.get("modified_path"),
-        modified_content=body.get("modified_content"),
-    )
-
-
-@router.post("/problems")
-async def vscode_problems(req: Request, u=Depends(require_developer)):
-    body = await req.json()
-    vs = _vscode()
-    return vs.inject_problems(
-        problems=body.get("problems", []),
-        source=body.get("source", "NsOps"),
-    )
-
-
 @router.post("/clear-highlights")
 async def vscode_clear_highlights(u=Depends(require_developer)):
     vs = _vscode()
@@ -99,16 +76,4 @@ async def vscode_output(req: Request, u=Depends(require_viewer)):
     return vs.write_output(
         message=body.get("message", ""),
         show=body.get("show", False),
-    )
-
-
-@router.post("/incident/{incident_id}")
-async def vscode_open_incident(incident_id: str, req: Request, u=Depends(require_developer)):
-    body = await req.json()
-    vs = _vscode()
-    return vs.open_incident_context(
-        incident_id=incident_id,
-        root_cause=body.get("root_cause", ""),
-        file_path=body.get("file_path"),
-        problem_line=body.get("problem_line"),
     )

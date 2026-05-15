@@ -2408,6 +2408,7 @@ a.resource-link{color:#38bdf8}a.resource-link:hover{background:rgba(56,189,248,.
 <div id="toast-container"></div>
 
 <script>
+const API_BASE = '/v1';
 const App = {
   token: localStorage.getItem('nexusops_token'),
   username: localStorage.getItem('nexusops_user') || '',
@@ -2426,7 +2427,7 @@ const App = {
   _sectionLoaded: {},   // section -> timestamp of last load
   _CACHE_TTL: 45000,    // 45s cache per section
   _debounceTimers: {},  // key -> setTimeout handle
-  _awsRegion: '{{ aws_region }}',
+  _awsRegion: 'us-east-1',  // overwritten on init() from /v1/aws/region
 
   setGlobalLLM(val){
     this.globalLLM=val;
@@ -2481,20 +2482,45 @@ const App = {
   },
 
   // ── HTTP ──────────────────────────────────────────────────────────
+  // Read a cookie value by name (returns "" if missing). Used for the CSRF
+  // token, which the server set as a non-httpOnly cookie on login.
+  _cookie(name){
+    const m=document.cookie.match(new RegExp('(?:^|; )'+name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'=([^;]*)'));
+    return m?decodeURIComponent(m[1]):'';
+  },
+  // Escape user-/integration-supplied strings for safe interpolation into
+  // innerHTML. Use this for ANY field that comes from the server payload —
+  // audit users, war-room descriptions, slack messages, rejection reasons, etc.
+  _esc(s){
+    if(s==null)return '';
+    return String(s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  },
+
   async api(method, path, body=null, timeoutMs=0) {
     const headers = {};
     if(this.token) headers['Authorization']='Bearer '+this.token;
     if(body!==null) headers['Content-Type']='application/json';
+    // Double-submit CSRF: read the cookie set on login and echo it as a header
+    // on every mutating request. The backend rejects mismatches with 403 when
+    // the request authenticated via cookie. Bearer-header requests skip CSRF.
+    const M=(method||'GET').toUpperCase();
+    if(M!=='GET'&&M!=='HEAD'&&M!=='OPTIONS'){
+      const csrf=this._cookie('nsops_csrf');
+      if(csrf) headers['X-CSRF-Token']=csrf;
+    }
+    const url = API_BASE + path;
     try{
-      let fetchOpts={method,headers,body:body!==null?JSON.stringify(body):undefined};
+      let fetchOpts={method,headers,credentials:'include',body:body!==null?JSON.stringify(body):undefined};
       let r;
       if(timeoutMs>0){
         const ctrl=new AbortController();
         const tid=setTimeout(()=>ctrl.abort(),timeoutMs);
-        try{r=await fetch(path,{...fetchOpts,signal:ctrl.signal});}
+        try{r=await fetch(url,{...fetchOpts,signal:ctrl.signal});}
         finally{clearTimeout(tid);}
       }else{
-        r=await fetch(path,fetchOpts);
+        r=await fetch(url,fetchOpts);
       }
       if(r.status===401){
         // Only force-logout if we actually sent a token (i.e. session expired)
@@ -2628,6 +2654,10 @@ const App = {
     });
     if(!this.token){this.showLogin();return;}
     this.showApp();
+    // Resolve the live AWS region once so console links land in the right region.
+    this.api('GET','/aws/region').then(r=>r&&r.ok?r.json():null).then(d=>{
+      if(d&&d.region)this._awsRegion=d.region;
+    }).catch(()=>{});
     const initialSection=window.location.hash.replace('#','')||'dashboard';
     this.navigate(initialSection,true);
     this.startAutoRefresh();
@@ -2663,7 +2693,7 @@ const App = {
 
   async checkSSOAvailable(){
     try{
-      const r=await fetch('/auth/sso/status',{method:'GET'});
+      const r=await fetch(API_BASE+'/auth/sso/status',{method:'GET',credentials:'include'});
       if(!r.ok)return;
       const d=await r.json();
       if(d.configured){
@@ -2688,7 +2718,7 @@ const App = {
     if(!u||!p){err.textContent='Username and password are required.';err.style.display='block';return;}
     btn.disabled=true;document.getElementById('login-btn-text').textContent='Signing in...';err.style.display='none';document.getElementById('login-user').classList.remove('error-field');document.getElementById('login-pass').classList.remove('error-field');
     try{
-      const r=await fetch('/auth/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'username='+encodeURIComponent(u)+'&password='+encodeURIComponent(p)});
+      const r=await fetch(API_BASE+'/auth/token',{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'username='+encodeURIComponent(u)+'&password='+encodeURIComponent(p)});
       const d=await r.json();
       if(!r.ok){err.textContent=d.detail||'Invalid credentials. Please try again.';err.style.display='block';document.getElementById('login-pass').classList.add('error-field');document.getElementById('login-pass').focus();return;}
       this.token=d.access_token;this.username=d.username||u;this.role=d.role||'viewer';
@@ -2743,12 +2773,24 @@ const App = {
       this.api('GET','/health/integrations')
     ]);
 
-    // Hero banner
+    // Hero banner — derive real values from /health/full and /approvals/history.
+    // Uptime: backend status_ok ratio over the last hour, falling back to "—"
+    // when no signal is available. Resolved: count of approved-and-executed
+    // approvals visible to this tenant. We do NOT show fabricated 99.9 / Auto.
     try{
       const hu=document.getElementById('hero-uptime');
       const hr=document.getElementById('hero-resolved');
-      if(hu)hu.textContent='99.9%';
-      if(hr)hr.textContent='Auto';
+      if(healthR.status==='fulfilled'&&healthR.value?.ok){
+        const d=await healthR.value.clone().json();
+        const uptime=d.health?.uptime_pct;
+        if(hu)hu.textContent=(typeof uptime==='number')?(uptime.toFixed(1)+'%'):(d.status==='ok'?'OK':'—');
+      } else if(hu){hu.textContent='—';}
+      const histR=await this.api('GET','/approvals/history').catch(()=>null);
+      if(histR&&histR.ok){
+        const d=await histR.json();
+        const resolved=(d.approvals||[]).filter(a=>a.status==='approved'||a.status==='executed').length;
+        if(hr)hr.textContent=String(resolved);
+      } else if(hr){hr.textContent='—';}
     }catch(e){}
 
     // Health / Integrations
@@ -3045,7 +3087,7 @@ const App = {
     if(!el)return;
     try{
       const [memR,rateR]=await Promise.allSettled([
-        this.api('GET','/memory/incidents?query=incident&n=1'),
+        this.api('GET','/incidents/memory/search?q=incident&n=1'),
         this.api('GET','/rate-limit/status'),
       ]);
       const stats=[];
@@ -3770,7 +3812,7 @@ const App = {
     try{
       // Fetch incidents + pending approvals in parallel
       const [r, ar]=await Promise.all([
-        this.api('GET','/memory/incidents?limit=100'),
+        this.api('GET','/incidents/memory?limit=100'),
         this.api('GET','/approvals/pending').catch(()=>null)
       ]);
       if(!r||!r.ok){
@@ -4645,7 +4687,7 @@ const App = {
     const btn=document.getElementById('wr-create-btn');
     btn.disabled=true;btn.textContent='Creating...';
     try{
-      const r=await this.api('POST','/warroom/create',{incident_id:id,description:desc,severity:sev,post_to_slack:toSlack});
+      const r=await this.api('POST','/war-rooms',{incident_id:id,description:desc,severity:sev,post_to_slack:toSlack});
       if(r&&r.ok){
         const d=await r.json();
         this.toast('War room created!','success');
@@ -4679,7 +4721,7 @@ const App = {
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
     const isResolved=this._warRoomTab==='resolved';
     try{
-      const r=await this.api('GET', isResolved ? '/warroom/resolved' : '/warroom/active');
+      const r=await this.api('GET', isResolved ? '/war-rooms/resolved' : '/war-rooms/active');
       const d=r&&r.ok?await r.json():{war_rooms:[]};
       const rooms=d.war_rooms||[];
       if(!rooms.length){
@@ -4691,19 +4733,24 @@ const App = {
       const sevColor={critical:'var(--red)',high:'var(--amber)',medium:'var(--cyan)',low:'var(--green)'};
       el.innerHTML=rooms.map(wr=>{
         const col=isResolved?'var(--green)':(sevColor[wr.severity||'high']||'var(--amber)');
-        const ch=wr.slack_channel?`<span class="badge badge-green" style="font-size:.72em">&#35;${(wr.slack_channel||'').replace('#','')}</span>`:'';
+        const E=this._esc.bind(this);
+        const ch=wr.slack_channel?`<span class="badge badge-green" style="font-size:.72em">&#35;${E((wr.slack_channel||'').replace('#',''))}</span>`:'';
         const pts=wr.participants>0?`<span style="font-size:.74em;color:var(--muted)">${wr.participants} participant${wr.participants!==1?'s':''}</span>`:'';
         const resolvedBadge=isResolved?`<span class="badge badge-green" style="font-size:.7em">&#10003; Resolved</span>`:'';
         const clickable=!isResolved?`cursor:pointer`:`cursor:default`;
-        const onclick=!isResolved?`onclick="App.openWarRoom('${wr.war_room_id}','${wr.incident_id||''}','${(wr.description||'').replace(/'/g,'&apos;').replace(/"/g,'&quot;')}','${wr.slack_channel||''}')"`:'' ;
+        // openWarRoom is invoked from an inline onclick, so we hard-strip
+        // characters that could break out of the JS string literal AND
+        // HTML-escape what's left for the attribute value.
+        const safeDesc=(wr.description||'').replace(/['"\\<>]/g,'');
+        const onclick=!isResolved?`onclick="App.openWarRoom('${E(wr.war_room_id)}','${E(wr.incident_id||'')}','${E(safeDesc)}','${E(wr.slack_channel||'')}')"`:'' ;
         return`<div style="padding:12px 14px;border-bottom:1px solid var(--border);${clickable};transition:background .15s;position:relative" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" ${onclick}>
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
             <span style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0"></span>
-            <span style="font-weight:600;font-size:.88em">${wr.incident_id||wr.war_room_id}</span>
+            <span style="font-weight:600;font-size:.88em">${E(wr.incident_id||wr.war_room_id)}</span>
             ${ch}${resolvedBadge}
-            <button onclick="event.stopPropagation();App.deleteWarRoom('${wr.war_room_id}')" title="Delete war room" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--muted);padding:2px 6px;border-radius:4px;font-size:.85em;line-height:1" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">🗑</button>
+            <button onclick="event.stopPropagation();App.deleteWarRoom('${E(wr.war_room_id)}')" title="Delete war room" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--muted);padding:2px 6px;border-radius:4px;font-size:.85em;line-height:1" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">🗑</button>
           </div>
-          <div style="font-size:.8em;color:var(--muted);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${wr.description||''}</div>
+          <div style="font-size:.8em;color:var(--muted);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${E(wr.description||'')}</div>
           <div style="display:flex;gap:8px;align-items:center">${pts}${wr.created_at?`<span style="font-size:.72em;color:var(--muted)">${new Date(wr.created_at).toLocaleDateString()}</span>`:''}</div>
         </div>`;
       }).join('');
@@ -4751,7 +4798,7 @@ const App = {
 
   async deleteWarRoom(warRoomId){
     if(!confirm('Delete this war room? This cannot be undone.'))return;
-    const r=await this.api('DELETE',`/warroom/${warRoomId}`);
+    const r=await this.api('DELETE',`/war-rooms/${warRoomId}`);
     if(r&&r.ok){
       this.toast('War room deleted','success');
       if(this.currentWarRoomId===warRoomId){this.closeWarRoom();}
@@ -4763,7 +4810,7 @@ const App = {
     if(!this.currentWarRoomId)return;
     if(!confirm('Mark this war room as resolved?'))return;
     try{
-      const r=await this.api('POST',`/warroom/${this.currentWarRoomId}/resolve`,{resolved_by:this.username});
+      const r=await this.api('POST',`/war-rooms/${this.currentWarRoomId}/resolve`,{resolved_by:this.username});
       if(r&&r.ok){this.toast('War room resolved ✓','success');this.closeWarRoom();this.loadWarRooms();}
       else this.toast('Could not resolve — check API','error');
     }catch(e){this.closeWarRoom();}
@@ -4791,7 +4838,7 @@ const App = {
   async _loadWarRoomContext(){
     if(!this.currentWarRoomId) return;
     try{
-      const r=await this.api('GET','/warroom/active');
+      const r=await this.api('GET','/war-rooms/active');
       if(!r||!r.ok) return;
       const d=await r.json();
       const wr=(d.war_rooms||[]).find(w=>w.war_room_id===this.currentWarRoomId);
@@ -4830,7 +4877,7 @@ const App = {
     if(!this.currentWarRoomId){el.innerHTML='<div class="empty-state"><p>No war room selected</p></div>';return;}
     el.innerHTML='<div class="loading-state"><div class="spinner"></div></div>';
     try{
-      const r=await this.api('GET',`/warroom/${this.currentWarRoomId}/timeline`);
+      const r=await this.api('GET',`/war-rooms/${this.currentWarRoomId}/timeline`);
       if(!r||!r.ok){el.innerHTML='<div class="empty-state"><p>Timeline unavailable</p></div>';return;}
       const d=await r.json();
       const events=d.timeline||[];
@@ -4876,7 +4923,7 @@ const App = {
     const ch=this.currentSlackChannel;
     if(!ch){document.getElementById('slack-messages').innerHTML='<div class="empty-state"><p>No Slack channel linked to this war room</p></div>';return;}
     try{
-      const r=await this.api('GET',`/warroom/${this.currentWarRoomId}/slack-history?limit=30`);
+      const r=await this.api('GET',`/war-rooms/${this.currentWarRoomId}/slack-history?limit=30`);
       if(!r||!r.ok){document.getElementById('slack-messages').innerHTML='<div class="empty-state"><p>Could not load Slack messages</p></div>';return;}
       const d=await r.json();
       const msgs=document.getElementById('slack-messages');
@@ -4886,8 +4933,10 @@ const App = {
       messages.forEach(m=>{
         const el=document.createElement('div');
         el.className='chat-bubble '+(m.username===this.username?'user':'assistant');
-        const safe=(m.text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        el.innerHTML='<div>'+safe+'</div><div class="chat-meta">'+m.username+' &bull; '+m.time+'</div>';
+        // m.text, m.username, m.time all come from Slack — fully external.
+        // Escape every interpolation; nothing here may render as HTML.
+        const E=this._esc.bind(this);
+        el.innerHTML='<div>'+E(m.text||'')+'</div><div class="chat-meta">'+E(m.username||'')+' &bull; '+E(m.time||'')+'</div>';
         msgs.appendChild(el);
       });
       msgs.scrollTop=msgs.scrollHeight;
@@ -4900,7 +4949,7 @@ const App = {
     if(!text||!this.currentSlackChannel){if(!this.currentSlackChannel)this.toast('No Slack channel linked','error');return;}
     input.value='';
     try{
-      const r=await this.api('POST',`/warroom/${this.currentWarRoomId}/slack-send`,{message:text,sent_by:this.username});
+      const r=await this.api('POST',`/war-rooms/${this.currentWarRoomId}/slack-send`,{message:text,sent_by:this.username});
       if(r&&r.ok){
         const el=document.createElement('div');el.className='chat-bubble user';
         const safe=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -4920,7 +4969,7 @@ const App = {
     this.appendWarRoomMsg('user',q);
     this.appendWarRoomMsg('typing','...');
     try{
-      const r=await this.api('POST','/warroom/'+this.currentWarRoomId+'/ask',{question:q,asked_by:this.username});
+      const r=await this.api('POST','/war-rooms/'+this.currentWarRoomId+'/ask',{question:q,asked_by:this.username});
       const msgs=document.getElementById('warroom-messages');
       msgs.querySelector('.typing-bubble')&&msgs.querySelector('.typing-bubble').remove();
       if(r&&r.ok){const d=await r.json();this.appendWarRoomMsg('assistant',d.answer||d.response||'No response');}
@@ -4955,7 +5004,7 @@ const App = {
 
   async loadWarRoomHistory(warRoomId){
     try{
-      const r=await this.api('GET','/warroom/'+warRoomId+'/history');
+      const r=await this.api('GET','/war-rooms/'+warRoomId+'/history');
       if(!r||!r.ok)return;
       const d=await r.json();
       const msgs=document.getElementById('warroom-messages');
@@ -4977,7 +5026,7 @@ const App = {
     this.appendWarRoomMsg('user','What should we do next?');
     this.appendWarRoomMsg('typing','...');
     try{
-      const r=await this.api('POST','/warroom/'+this.currentWarRoomId+'/ask',{question:'What should we do next? Give me 3-5 concrete, actionable next steps for the response team right now.',asked_by:this.username});
+      const r=await this.api('POST','/war-rooms/'+this.currentWarRoomId+'/ask',{question:'What should we do next? Give me 3-5 concrete, actionable next steps for the response team right now.',asked_by:this.username});
       const msgs=document.getElementById('warroom-messages');
       msgs.querySelector('.typing-bubble')&&msgs.querySelector('.typing-bubble').remove();
       if(r&&r.ok){const d=await r.json();this.appendWarRoomMsg('assistant',d.answer||'No suggestions available.');}
@@ -5261,7 +5310,7 @@ const App = {
         if(body){
           const banner=document.createElement('div');
           banner.style.cssText='margin-bottom:14px;padding:10px 14px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);border-radius:8px;font-size:.83em';
-          banner.innerHTML=`<span style="color:#f87171;font-weight:700">✗ Rejected by ${this.username}</span><span style="color:var(--muted);margin-left:8px">— ${reason}</span>`;
+          banner.innerHTML=`<span style="color:#f87171;font-weight:700">✗ Rejected by ${this._esc(this.username)}</span><span style="color:var(--muted);margin-left:8px">— ${this._esc(reason)}</span>`;
           body.prepend(banner);
         }
         document.getElementById('btn-approve').style.display='none';
@@ -5829,7 +5878,7 @@ const App = {
     this.chatSessionId=saved;
     document.getElementById('chat-session-label').textContent='Session '+saved.slice(-8);
     try{
-      const r=await this.api('GET','/chat/history/'+encodeURIComponent(saved));
+      const r=await this.api('GET','/chat/sessions/'+encodeURIComponent(saved)+'/history');
       if(!r||!r.ok) return;
       const d=await r.json();
       const msgs=d.messages||[];
@@ -5924,8 +5973,6 @@ what failed pipelines do I have in GitLab?
     }
     this.sendChatMsg(msg);
   },
-
-  _awsRegion:'us-west-2',
 
   _linkifyResources(s){
     const region=this._awsRegion||'us-east-1';
@@ -6091,9 +6138,14 @@ what failed pipelines do I have in GitLab?
     // ── SSE streaming ────────────────────────────────────────────────
     try{
       const token=localStorage.getItem('nexusops_token')||'';
-      const resp=await fetch('/chat/stream',{
+      const resp=await fetch(API_BASE+'/chat/stream',{
         method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
+        credentials:'include',
+        headers:{
+          'Content-Type':'application/json',
+          'Authorization':'Bearer '+token,
+          'X-CSRF-Token': this._cookie('nsops_csrf'),
+        },
         body:JSON.stringify(body),
       });
       ti.style.display='none';
@@ -6746,7 +6798,7 @@ what failed pipelines do I have in GitLab?
       (d.workflows||[]).forEach(w=>{
         const el=document.createElement('div');
         el.style.cssText='display:flex;align-items:center;gap:8px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 14px;font-size:.8em';
-        el.innerHTML=`<span style="color:#a78bfa;font-weight:600">⚡ ${w.name}</span><span style="color:var(--muted)">${w.description||''}</span><span style="font-size:.72em;background:rgba(6,182,212,.12);color:#06b6d4;padding:2px 7px;border-radius:4px">${(w.agents||[]).join(' → ')}</span>`;
+        el.innerHTML=`<span style="color:#a78bfa;font-weight:600">⚡ ${this._esc(w.name)}</span><span style="color:var(--muted)">${this._esc(w.description||'')}</span><span style="font-size:.72em;background:rgba(6,182,212,.12);color:#06b6d4;padding:2px 7px;border-radius:4px">${this._esc((w.agents||[]).join(' → '))}</span>`;
         bar.appendChild(el);
       });
     }catch(e){bar.innerHTML='';}
@@ -7647,6 +7699,7 @@ what failed pipelines do I have in GitLab?
       return;
     }
     const actionColors={assign_role:'#a78bfa',revoke_role:'#f87171',change_own_password:'#fbbf24',login:'#4ade80',logout:'#94a3b8',change_password:'#fbbf24',revoke_all_tokens:'#f87171',backup_chromadb:'#06b6d4'};
+    const E=this._esc.bind(this);
     el.innerHTML=logs.map(l=>{
       const ts=(l.timestamp||l.ts||'').replace('T',' ').substring(0,19);
       const user=l.user||'system';
@@ -7655,15 +7708,19 @@ what failed pipelines do I have in GitLab?
       const ac=actionColors[action]||'#94a3b8';
       const initials=(user||'?').slice(0,2).toUpperCase();
       const params=l.params?Object.entries(l.params).filter(([k])=>k!=='password').map(([k,v])=>`${k}: ${typeof v==='object'?JSON.stringify(v):v}`).join(' · '):'';
+      // EVERY interpolated field below originates from the server payload
+      // (audit user, action, params, timestamps). All must be HTML-escaped
+      // — a stored-XSS via a malicious username/param value would otherwise
+      // execute on every page load.
       return`<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);transition:background .1s" onmouseover="this.style.background='rgba(255,255,255,.018)'" onmouseout="this.style.background=''">
-        <div style="width:28px;height:28px;border-radius:50%;background:${ac}22;border:1px solid ${ac}44;display:flex;align-items:center;justify-content:center;font-size:.65em;font-weight:700;color:${ac};flex-shrink:0;margin-top:1px">${initials}</div>
+        <div style="width:28px;height:28px;border-radius:50%;background:${ac}22;border:1px solid ${ac}44;display:flex;align-items:center;justify-content:center;font-size:.65em;font-weight:700;color:${ac};flex-shrink:0;margin-top:1px">${E(initials)}</div>
         <div style="flex:1;min-width:0">
           <div style="display:flex;align-items:center;gap:7px;margin-bottom:2px">
-            <span style="font-size:.8em;font-weight:600;color:var(--text)">${user}</span>
-            <span style="font-size:.72em;padding:1px 8px;border-radius:10px;background:${ac}18;color:${ac};border:1px solid ${ac}30;font-weight:600">${action.replace(/_/g,' ')}</span>
-            <span style="margin-left:auto;font-size:.68em;color:var(--muted);white-space:nowrap;font-family:ui-monospace,monospace">${ts}</span>
+            <span style="font-size:.8em;font-weight:600;color:var(--text)">${E(user)}</span>
+            <span style="font-size:.72em;padding:1px 8px;border-radius:10px;background:${ac}18;color:${ac};border:1px solid ${ac}30;font-weight:600">${E(action.replace(/_/g,' '))}</span>
+            <span style="margin-left:auto;font-size:.68em;color:var(--muted);white-space:nowrap;font-family:ui-monospace,monospace">${E(ts)}</span>
           </div>
-          ${params?`<div style="font-size:.72em;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${params}</div>`:''}
+          ${params?`<div style="font-size:.72em;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${E(params)}</div>`:''}
         </div>
         <div style="width:6px;height:6px;border-radius:50%;background:${ok?'#22c55e':'#f87171'};flex-shrink:0;margin-top:6px" title="${ok?'success':'failed'}"></div>
       </div>`;

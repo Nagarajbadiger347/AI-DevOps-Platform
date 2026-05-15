@@ -14,12 +14,49 @@
 
 const vscode = require('vscode');
 const http   = require('http');
+const fs     = require('fs');
+const os     = require('os');
+const path   = require('path');
+const crypto = require('crypto');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let server       = null;
 let statusBar    = null;
 let outputCh     = null;
 let decorType    = null;  // reused decoration type for highlights
+let bridgeToken  = null;  // shared secret with the platform; generated on first start
+
+// ── Auth helpers ──────────────────────────────────────────────────────────────
+const TOKEN_FILE = path.join(os.homedir(), '.nsops', 'vscode-bridge.token');
+
+function loadOrCreateToken() {
+  try {
+    const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+    if (t && t.length >= 32) return t;
+  } catch (_) { /* fall through to create */ }
+  const t = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(TOKEN_FILE, t, { mode: 0o600 });
+  } catch (e) {
+    log('WARNING — could not persist bridge token to ' + TOKEN_FILE + ': ' + e.message);
+  }
+  return t;
+}
+
+function timingSafeEqualStr(a, b) {
+  const ab = Buffer.from(a || '', 'utf8');
+  const bb = Buffer.from(b || '', 'utf8');
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
+function authorized(req) {
+  const hdr = req.headers['authorization'] || '';
+  const m = /^Bearer\s+(.+)$/i.exec(hdr);
+  if (!m) return false;
+  return timingSafeEqualStr(m[1], bridgeToken);
+}
 
 // ── Activation ────────────────────────────────────────────────────────────────
 function activate(context) {
@@ -59,14 +96,36 @@ function deactivate() {
 function startServer(context) {
   if (server) { vscode.window.showInformationMessage('NsOps server already running.'); return; }
 
-  const port = vscode.workspace.getConfiguration('nsops').get('serverPort', 6789);
+  const cfg  = vscode.workspace.getConfiguration('nsops');
+  const port = cfg.get('serverPort', 6789);
+  // CORS allowlist. Default = the platform's localhost origin. Multiple origins
+  // can be configured as a comma-separated list. "*" is *not* honoured even if
+  // the user types it — the bridge has terminal access, so a wildcard origin
+  // means any malicious page can drive it.
+  const allowedOriginsRaw = String(cfg.get('platformOrigin', 'http://localhost:8000') || '');
+  const allowedOrigins = allowedOriginsRaw.split(',').map(s => s.trim()).filter(s => s && s !== '*');
+
+  bridgeToken = loadOrCreateToken();
+  log('Bridge token at: ' + TOKEN_FILE + '  (length=' + bridgeToken.length + ')');
+  log('Platform must send  Authorization: Bearer <token>  on every POST.');
+  log('Allowed CORS origins: ' + (allowedOrigins.join(', ') || '(none)'));
 
   server = http.createServer((req, res) => {
-    // CORS headers so the platform dashboard can call from browser
-    res.setHeader('Access-Control-Allow-Origin',  '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // CORS — only echo origin back if it's on the allowlist.
+    const origin = req.headers.origin || '';
+    if (origin && allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin',  origin);
+      res.setHeader('Vary',                          'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    }
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+    // Health check is the one un-authenticated path so the platform can probe.
+    const isStatusProbe = (req.method === 'GET' && req.url.split('?')[0] === '/status');
+    if (!isStatusProbe && !authorized(req)) {
+      return json(res, 401, { error: 'unauthorized — missing or invalid Bearer token' });
+    }
 
     let body = '';
     req.on('data', chunk => body += chunk);

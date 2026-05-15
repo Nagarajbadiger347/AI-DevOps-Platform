@@ -28,13 +28,6 @@ class PriceEstimateRequest(BaseModel):
     region: Optional[str] = None
 
 
-@router.get("/cost/explorer")
-def cost_explorer(days: int = 30, auth: AuthContext = Depends(require_viewer)):
-    """Real AWS spend breakdown by service from Cost Explorer."""
-    from app.cost.pricing import get_cost_explorer_summary
-    return get_cost_explorer_summary(days=days)
-
-
 @router.post("/cost/analyze")
 async def analyze_costs_endpoint(req: CostAnalysisRequest, auth: AuthContext = Depends(require_viewer)):
     try:

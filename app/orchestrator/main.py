@@ -20,16 +20,21 @@ from starlette.requests import Request
 
 from app.tenants.middleware import TenantMiddleware
 from app.core.logging import TraceMiddleware
-from app.core.config import settings
+from app.core.config import settings, validate_security
 from app.core.ratelimit import rate_limit_check
 
+# Production refuses to boot when webhook secrets / JWT_SECRET_KEY are missing.
+validate_security()
+
 # ── Import all routers ────────────────────────────────────────────────────────
+# `deploy` and `saas` modules are intentionally NOT imported — every endpoint
+# they exposed was orphaned (no UI caller, no external integration). Re-add
+# them here if/when a UI flow needs them.
 from app.api import (
-    auth, aws, k8s, security, webhooks, deploy,
+    auth, aws, k8s, security, webhooks,
     incidents, approvals, warroom, chat, github,
     cost, health, vscode, misc, websocket_routes, tenants, agentic,
 )
-from app.api import saas
 
 logger = logging.getLogger("nsops")
 
@@ -336,12 +341,16 @@ async def dashboard(request: Request = None):
 
 
 # ── Register all routers ──────────────────────────────────────────────────────
-# Unversioned — health/metrics/webhooks must stay at root (external callers, k8s probes)
+# Unversioned root routes — kept for Docker/k8s probes and websocket clients.
 app.include_router(health.router)
 app.include_router(websocket_routes.router)
 
 # ── /v1 — all product API routes ─────────────────────────────────────────────
 V1 = "/v1"
+
+# Health is also exposed under /v1 so the dashboard can call it through the
+# same versioned base URL as every other product endpoint.
+app.include_router(health.router,    prefix=V1)
 
 # Auth + users
 app.include_router(auth.router,      prefix=V1)
@@ -350,7 +359,6 @@ app.include_router(auth.router,      prefix=V1)
 app.include_router(aws.router,       prefix=V1)
 app.include_router(k8s.router,       prefix=V1)
 app.include_router(github.router,    prefix=V1)
-app.include_router(deploy.router,    prefix=V1)
 app.include_router(cost.router,      prefix=V1)
 app.include_router(vscode.router,    prefix=V1)
 app.include_router(agentic.router,   prefix=V1)
@@ -368,8 +376,5 @@ app.include_router(security.router,  prefix=V1)
 app.include_router(tenants.router,   prefix=V1)
 app.include_router(misc.router,      prefix=V1)
 
-# SaaS — org, billing, usage, training
-app.include_router(saas.router,      prefix=V1)
-
-# Webhooks — external callers (Stripe, Jira, GitHub) hit /v1/webhooks/*
+# Webhooks — external callers (PagerDuty, GitHub, Grafana, etc.) hit /v1/webhooks/*
 app.include_router(webhooks.router,  prefix=V1)

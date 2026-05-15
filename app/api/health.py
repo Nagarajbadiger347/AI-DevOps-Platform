@@ -222,6 +222,10 @@ def health_integrations():
         "k8s":      {"configured": bool(os.getenv("KUBECONFIG")) or os.getenv("K8S_IN_CLUSTER", "").lower() == "true"},
         "grafana":  {"configured": _env_set("GRAFANA_URL") and _env_set("GRAFANA_TOKEN")},
         "gitlab":   {"configured": _env_set("GITLAB_TOKEN")},
+        # GitHub lives alongside the other integrations so the dashboard can
+        # iterate `integrations` uniformly. `configured` mirrors `repo_valid`
+        # for the standard shape; the full detail is preserved on the same key.
+        "github":   {"configured": github["repo_valid"], **github},
     }
 
     return {"llm": llm, "github": github, "integrations": integrations}

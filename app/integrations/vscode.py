@@ -36,6 +36,30 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 _BASE_URL = os.getenv("VSCODE_BRIDGE_URL", "http://127.0.0.1:6789").rstrip("/")
 _TIMEOUT  = int(os.getenv("VSCODE_BRIDGE_TIMEOUT", "5"))
+_TOKEN_FILE = Path.home() / ".nsops" / "vscode-bridge.token"
+
+
+def _bridge_token() -> str:
+    """Read the shared bridge token. Order of resolution:
+    1. VSCODE_BRIDGE_TOKEN env var (explicit override)
+    2. ~/.nsops/vscode-bridge.token (written by the extension on first start)
+    Returns "" if neither is available — callers must treat that as
+    "extension not yet running" and surface the error to the user."""
+    env = os.getenv("VSCODE_BRIDGE_TOKEN", "").strip()
+    if env:
+        return env
+    try:
+        return _TOKEN_FILE.read_text().strip()
+    except Exception:
+        return ""
+
+
+def _auth_headers() -> dict:
+    headers = {"Content-Type": "application/json"}
+    tok = _bridge_token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    return headers
 
 
 # ── Low-level helpers ─────────────────────────────────────────────────────────
@@ -44,15 +68,14 @@ def _post(endpoint: str, payload: dict) -> dict:
     """POST JSON payload to the VS Code extension server."""
     url  = f"{_BASE_URL}{endpoint}"
     data = json.dumps(payload).encode()
-    req  = urllib.request.Request(
-        url,
-        data=data,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
+    req  = urllib.request.Request(url, data=data, method="POST", headers=_auth_headers())
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
             return json.loads(r.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return {"success": False, "error": "VS Code bridge rejected token — start the NsOps extension and check ~/.nsops/vscode-bridge.token"}
+        return {"success": False, "error": f"VS Code bridge HTTP {exc.code}: {exc.reason}"}
     except urllib.error.URLError as exc:
         return {"success": False, "error": f"VS Code extension unreachable: {exc.reason}"}
     except Exception as exc:
@@ -62,10 +85,14 @@ def _post(endpoint: str, payload: dict) -> dict:
 def _get(endpoint: str) -> dict:
     """GET request to the VS Code extension server."""
     url = f"{_BASE_URL}{endpoint}"
-    req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(url, headers=_auth_headers())
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
             return json.loads(r.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return {"success": False, "error": "VS Code bridge rejected token — start the NsOps extension and check ~/.nsops/vscode-bridge.token"}
+        return {"success": False, "error": f"VS Code bridge HTTP {exc.code}: {exc.reason}"}
     except urllib.error.URLError as exc:
         return {"success": False, "error": f"VS Code extension unreachable: {exc.reason}"}
     except Exception as exc:

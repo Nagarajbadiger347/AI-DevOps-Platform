@@ -6,7 +6,7 @@ import time as _time
 from collections import defaultdict as _defaultdict
 from typing import Any, Optional, Dict
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
@@ -141,22 +141,55 @@ class AuthContext:
             pass  # never block on metering errors
 
 
+SESSION_COOKIE = "nsops_session"
+CSRF_COOKIE    = "nsops_csrf"
+CSRF_HEADER    = "X-CSRF-Token"
+
+
 def _resolve_auth(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
     x_user: Optional[str] = Header(default=None),
     x_tenant_id: Optional[str] = Header(default=None),
 ) -> "AuthContext":
+    """Resolve auth from EITHER `Authorization: Bearer <jwt>` OR the
+    httpOnly `nsops_session` cookie. Cookie path additionally requires a
+    matching X-CSRF-Token header on mutating requests.
+    Bearer header path is unchanged for API/CLI consumers."""
     from app.security.rbac import get_user_role
     username = None
     jwt_role = None
     jwt_tenant = None
     jwt_workspace = None
     jwt_plan = None
-    token_provided = bool(credentials and credentials.credentials)
-    if token_provided:
+
+    # ── 1. Bearer header (existing — for API clients, CLI, scripts) ──
+    token_str = ""
+    used_cookie = False
+    if credentials and credentials.credentials:
+        token_str = credentials.credentials
+    else:
+        # ── 2. Cookie (browser session) — must also carry CSRF token on
+        #     mutating requests. GET/HEAD/OPTIONS are safe; we only enforce
+        #     CSRF on writes.
+        cookie_token = request.cookies.get(SESSION_COOKIE, "")
+        if cookie_token:
+            method = (request.method or "").upper()
+            if method not in ("GET", "HEAD", "OPTIONS"):
+                hdr = request.headers.get(CSRF_HEADER, "")
+                cookie_csrf = request.cookies.get(CSRF_COOKIE, "")
+                if not hdr or not cookie_csrf:
+                    raise HTTPException(status_code=403, detail="CSRF token missing")
+                import hmac as _hmac
+                if not _hmac.compare_digest(hdr, cookie_csrf):
+                    raise HTTPException(status_code=403, detail="CSRF token mismatch")
+            token_str = cookie_token
+            used_cookie = True
+
+    if token_str:
         try:
             from app.core.auth import decode_token
-            payload = decode_token(credentials.credentials)
+            payload = decode_token(token_str)
             username      = payload.get("sub")
             jwt_role      = payload.get("role")
             jwt_tenant    = payload.get("tenant_id")
@@ -184,7 +217,7 @@ def _resolve_auth(
             pass
     ctx = AuthContext(username=username, role=role, tenant_id=tenant_id,
                       workspace_id=jwt_workspace or "", plan_name=plan_name)
-    ctx._bad_token = token_provided and username == "anonymous" and not jwt_role
+    ctx._bad_token = bool(token_str) and username == "anonymous" and not jwt_role
     return ctx
 
 

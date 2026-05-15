@@ -363,6 +363,77 @@ def _estimate_generic(action: dict) -> ActionCost:
     )
 
 
+def _resolve_ec2_instance_type(action: dict) -> tuple[str, str, str]:
+    """Best-effort resolution of (instance_type, region, source).
+
+    Order of resolution:
+      1. action params: instance_type + region (free, no boto3 call)
+      2. boto3 describe_instances(InstanceIds=[id])  — costs one API call
+      3. fallback: "t3.medium" with note  — never $0
+
+    Never raises; on failure returns the fallback.
+    """
+    inst_type = (action.get("instance_type") or "").strip()
+    region    = (action.get("region") or os.getenv("AWS_REGION") or "us-east-1").strip()
+    if inst_type:
+        return inst_type, region, "action_params"
+
+    inst_id = (action.get("instance_id") or action.get("resource_id") or "").strip()
+    if inst_id:
+        try:
+            import boto3 as _b3
+            ec2 = _b3.client("ec2", region_name=region)
+            resp = ec2.describe_instances(InstanceIds=[inst_id])
+            for r in resp.get("Reservations", []):
+                for i in r.get("Instances", []):
+                    t = i.get("InstanceType", "").strip()
+                    if t:
+                        return t, region, "describe_instances"
+        except Exception:
+            pass
+    return "t3.medium", region, "fallback_default"
+
+
+def _estimate_ec2_start(action: dict) -> ActionCost:
+    """Starting an EC2 instance adds its hourly rate × 730h to the monthly bill."""
+    from app.cost.pricing import get_ec2_price_per_hour
+    inst_type, region, source = _resolve_ec2_instance_type(action)
+    price = get_ec2_price_per_hour(inst_type, region) or {}
+    hourly = float(price.get("price_per_hour") or 0.0)
+    monthly = hourly * 730.0
+    note = f"{inst_type} in {region} @ ${hourly:.4f}/h ≈ ${monthly:.2f}/mo"
+    if source == "fallback_default":
+        note += " (instance type not provided — using t3.medium estimate)"
+    return ActionCost(
+        action_type="ec2_start",
+        description=f"Start EC2 {action.get('instance_id', action.get('resource_id', 'instance'))}",
+        monthly_delta_usd=monthly,
+        notes=note,
+    )
+
+
+def _estimate_ec2_stop(action: dict) -> ActionCost:
+    """Stopping an EC2 instance refunds its compute hourly rate × 730h.
+    Storage costs continue but are not modelled here."""
+    from app.cost.pricing import get_ec2_price_per_hour
+    inst_type, region, source = _resolve_ec2_instance_type(action)
+    price = get_ec2_price_per_hour(inst_type, region) or {}
+    hourly = float(price.get("price_per_hour") or 0.0)
+    monthly = -(hourly * 730.0)
+    note = (
+        f"{inst_type} in {region} @ ${hourly:.4f}/h saved ≈ ${abs(monthly):.2f}/mo "
+        f"(EBS storage cost continues)"
+    )
+    if source == "fallback_default":
+        note += " — instance type not provided, using t3.medium estimate"
+    return ActionCost(
+        action_type="ec2_stop",
+        description=f"Stop EC2 {action.get('instance_id', action.get('resource_id', 'instance'))}",
+        monthly_delta_usd=monthly,
+        notes=note,
+    )
+
+
 _ESTIMATORS = {
     "k8s_scale":    _estimate_k8s_scale,
     "aws_scale":    _estimate_aws_scale,
@@ -372,9 +443,14 @@ _ESTIMATORS = {
     "create_pr":    _estimate_generic,
     "slack_notify": _estimate_generic,
     "investigate":  _estimate_generic,
-    "start_ec2":    _estimate_generic,
-    "stop_ec2":     _estimate_generic,
+    # Real estimators — the previous behaviour (returning $0) let destructive
+    # AWS actions bypass the cost-based approval gate.
+    "start_ec2":    _estimate_ec2_start,
+    "ec2_start":    _estimate_ec2_start,
+    "stop_ec2":     _estimate_ec2_stop,
+    "ec2_stop":     _estimate_ec2_stop,
     "reboot_ec2":   _estimate_aws_reboot,
+    "ec2_reboot":   _estimate_aws_reboot,
 }
 
 

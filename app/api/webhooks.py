@@ -231,9 +231,32 @@ async def webhook_pagerduty(
     return {"status": "triggered", "count": len(triggered), "incidents": triggered}
 
 
+def _require_webhook_token(header_value: str, env_var: str, source: str) -> None:
+    """Reject the request unless X-Webhook-Token matches the secret in `env_var`.
+
+    Same contract as the GitHub/OpsGenie path: when the env var is set, every
+    request must carry it; when unset, the endpoint is OPEN (matching the
+    historical behaviour) — but the platform refuses to start in production
+    when these env vars are missing (see app.core.config.validate_security).
+    """
+    import os as _os
+    expected = _os.getenv(env_var, "").strip()
+    if not expected:
+        return  # dev-mode: no secret configured
+    import hmac
+    if not hmac.compare_digest(header_value or "", expected):
+        from fastapi import HTTPException as _HTTPE
+        raise _HTTPE(status_code=401, detail=f"{source} webhook: invalid X-Webhook-Token")
+
+
 @router.post("/grafana", tags=["webhooks"])
-async def webhook_grafana(request: Request):
-    """Receive Grafana alert webhooks."""
+async def webhook_grafana(
+    request: Request,
+    x_webhook_token: str = Header("", alias="X-Webhook-Token"),
+):
+    """Receive Grafana alert webhooks. Requires X-Webhook-Token matching
+    GRAFANA_WEBHOOK_TOKEN when that env var is set."""
+    _require_webhook_token(x_webhook_token, "GRAFANA_WEBHOOK_TOKEN", "grafana")
     try:
         body = await request.json()
     except Exception:
@@ -254,8 +277,13 @@ async def webhook_grafana(request: Request):
 
 
 @router.post("/cloudwatch", tags=["webhooks"])
-async def webhook_cloudwatch(request: Request):
-    """Receive CloudWatch alarm SNS notifications."""
+async def webhook_cloudwatch(
+    request: Request,
+    x_webhook_token: str = Header("", alias="X-Webhook-Token"),
+):
+    """Receive CloudWatch alarm SNS notifications. Requires X-Webhook-Token
+    matching CLOUDWATCH_WEBHOOK_TOKEN when that env var is set."""
+    _require_webhook_token(x_webhook_token, "CLOUDWATCH_WEBHOOK_TOKEN", "cloudwatch")
     try:
         body = await request.json()
     except Exception:

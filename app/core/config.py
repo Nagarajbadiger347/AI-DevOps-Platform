@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     # ── Inbound webhook secrets ─────────────────────────────────────────────
     PAGERDUTY_WEBHOOK_SECRET: str = ""         # HMAC-SHA256 secret from PagerDuty console
     OPSGENIE_WEBHOOK_TOKEN:   str = ""         # bearer token set in OpsGenie integration
+    GITHUB_WEBHOOK_SECRET:    str = ""         # HMAC-SHA256 secret on the GitHub side
+    GRAFANA_WEBHOOK_TOKEN:    str = ""         # X-Webhook-Token sent by Grafana
+    CLOUDWATCH_WEBHOOK_TOKEN: str = ""         # X-Webhook-Token sent by your SNS→HTTP shim
+
+    # ── Deployment mode ─────────────────────────────────────────────────────
+    # When ENVIRONMENT=production the platform refuses to start unless every
+    # webhook secret above is set. Anything else (dev/staging/test) is open.
+    ENVIRONMENT: str = "development"
 
     # ── Integrations ───────────────────────────────────────────────────────
     GITHUB_TOKEN: str = ""
@@ -95,3 +103,33 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def validate_security() -> None:
+    """In production mode, refuse to import (and therefore boot) unless every
+    inbound-webhook secret is set. In dev mode, log warnings only.
+
+    Called once at module import time from app.orchestrator.main."""
+    import logging as _logging
+    _log = _logging.getLogger("nsops.security")
+    required = {
+        "PAGERDUTY_WEBHOOK_SECRET": settings.PAGERDUTY_WEBHOOK_SECRET,
+        "OPSGENIE_WEBHOOK_TOKEN":   settings.OPSGENIE_WEBHOOK_TOKEN,
+        "GITHUB_WEBHOOK_SECRET":    settings.GITHUB_WEBHOOK_SECRET,
+        "GRAFANA_WEBHOOK_TOKEN":    settings.GRAFANA_WEBHOOK_TOKEN,
+        "CLOUDWATCH_WEBHOOK_TOKEN": settings.CLOUDWATCH_WEBHOOK_TOKEN,
+        "JWT_SECRET_KEY":           __import__("os").getenv("JWT_SECRET_KEY", ""),
+    }
+    missing = [k for k, v in required.items() if not v]
+    if not missing:
+        return
+    if settings.ENVIRONMENT.lower() == "production":
+        raise RuntimeError(
+            "refusing to start in production: missing required secrets: "
+            + ", ".join(missing)
+            + ". Set them in .env or unset ENVIRONMENT to disable this check."
+        )
+    _log.warning(
+        "security_secrets_missing env=%s missing=%s — these endpoints are open",
+        settings.ENVIRONMENT, ",".join(missing),
+    )

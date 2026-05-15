@@ -7,7 +7,7 @@ import time as _time
 from pathlib import Path
 from typing import Optional, Dict
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -106,10 +106,13 @@ def auth_me(
 
 
 @router.post("/auth/token", tags=["auth"])
-def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
+def login(request: Request, response: Response, form: OAuth2PasswordRequestForm = Depends()):
     from app.security.users import authenticate, user_exists
     from app.security.rbac import get_user_role
     from app.core.auth import create_token
+    from app.api.deps import SESSION_COOKIE, CSRF_COOKIE
+    import secrets as _secrets
+
     username = form.username.strip().lower()
     now = _time.time()
     attempts = _login_failures.get(username, [])
@@ -130,7 +133,38 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
             result={"success": True}, source="auth")
     except Exception:
         pass
-    return {"access_token": token, "token_type": "bearer", "role": role, "username": username}
+
+    # ── httpOnly session cookie + CSRF cookie (double-submit pattern) ──
+    # The session cookie is httpOnly so it can't be read from JavaScript and
+    # therefore can't be stolen by a stored XSS that runs in the dashboard.
+    # The CSRF cookie is NOT httpOnly — the dashboard reads it and echoes
+    # the value as `X-CSRF-Token` on every mutating request. The deps layer
+    # rejects the request if header and cookie don't match.
+    # We default Secure=False and SameSite=Lax for HTTP local dev. In real
+    # production behind HTTPS, set NSOPS_COOKIE_SECURE=true.
+    import os as _os
+    _secure = _os.getenv("NSOPS_COOKIE_SECURE", "false").lower() == "true"
+    _max_age = 8 * 60 * 60  # 8h, matches JWT expiry
+    csrf_token = _secrets.token_urlsafe(32)
+    response.set_cookie(
+        key=SESSION_COOKIE, value=token,
+        max_age=_max_age, httponly=True,
+        secure=_secure, samesite="lax", path="/",
+    )
+    response.set_cookie(
+        key=CSRF_COOKIE, value=csrf_token,
+        max_age=_max_age, httponly=False,
+        secure=_secure, samesite="lax", path="/",
+    )
+    # access_token is still returned in the body for backward compatibility
+    # with existing API clients and the legacy localStorage frontend path.
+    return {
+        "access_token": token,
+        "token_type":   "bearer",
+        "role":         role,
+        "username":     username,
+        "csrf_token":   csrf_token,
+    }
 
 
 @router.get("/users", tags=["users"])
@@ -296,12 +330,20 @@ h2{{color:#f87171;margin-top:0}}a{{color:#60a5fa;text-decoration:none}}</style><
 
 
 @router.post("/auth/logout", tags=["auth"])
-def logout(credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
+def logout(request: Request, response: Response,
+           credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
            auth: AuthContext = Depends(require_viewer)):
-    """Revoke the current token so it cannot be reused even before expiry."""
+    """Revoke the current token so it cannot be reused even before expiry, and
+    clear the browser session cookies."""
     from app.core.auth import blacklist_token
-    if credentials and credentials.credentials:
-        blacklist_token(credentials.credentials)
+    from app.api.deps import SESSION_COOKIE, CSRF_COOKIE
+    # Blacklist the JWT — whether it came from the Bearer header or the cookie.
+    tok = (credentials.credentials if credentials else "") or request.cookies.get(SESSION_COOKIE, "")
+    if tok:
+        blacklist_token(tok)
+    # Clear cookies so the browser drops the session immediately.
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(CSRF_COOKIE,    path="/")
     try:
         from app.core.audit import audit_log as _al
         _al(user=auth.username, action="logout", params={"role": auth.role},
@@ -328,59 +370,6 @@ def revoke_all_user(username: str, auth: AuthContext = Depends(require_admin)):
 
 
 # ── Database backup endpoints ──────────────────────────────────
-
-@router.post("/admin/backups/database", tags=["admin"])
-def trigger_backup(auth: AuthContext = Depends(require_admin)):
-    """Run pg_dump and store the backup in the configured backup directory."""
-    import subprocess
-    import datetime
-
-    db_url  = os.getenv("DATABASE_URL", "")
-    backup_dir = Path(os.getenv("BACKUP_DIR", "/tmp/nexusops_backups"))
-    backup_dir.mkdir(parents=True, exist_ok=True)
-
-    ts       = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    out_file = backup_dir / f"nexusops_{ts}.dump"
-
-    if not db_url:
-        return {"success": False, "error": "DATABASE_URL not configured"}
-
-    try:
-        result = subprocess.run(
-            ["pg_dump", "--format=custom", "--no-password", f"--file={out_file}", db_url],
-            capture_output=True, text=True, timeout=300,
-        )
-        if result.returncode != 0:
-            return {"success": False, "error": result.stderr.strip() or "pg_dump failed"}
-
-        size_bytes = out_file.stat().st_size
-        return {
-            "success": True,
-            "file":    str(out_file),
-            "size_bytes": size_bytes,
-            "timestamp":  ts,
-        }
-    except FileNotFoundError:
-        return {"success": False, "error": "pg_dump not found — install postgresql-client in the container"}
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": "pg_dump timed out after 300s"}
-    except Exception as exc:
-        return {"success": False, "error": str(exc)}
-
-
-@router.get("/admin/backups", tags=["admin"])
-def list_backups(auth: AuthContext = Depends(require_admin)):
-    """List pg_dump backup files in the backup directory."""
-    backup_dir = Path(os.getenv("BACKUP_DIR", "/tmp/nexusops_backups"))
-    if not backup_dir.exists():
-        return {"backups": []}
-    files = sorted(backup_dir.glob("nexusops_*.dump"), key=lambda f: f.stat().st_mtime, reverse=True)
-    return {
-        "backups": [
-            {"file": f.name, "size_bytes": f.stat().st_size, "path": str(f)}
-            for f in files[:20]
-        ]
-    }
 
 
 # ── User invite endpoints ──────────────────────────────────────
@@ -597,42 +586,3 @@ def setup_password(req: SetupPasswordRequest):
     return {"success": True, "username": username, "message": "Password set. You can now sign in."}
 
 
-@router.post("/admin/smtp", tags=["auth"])
-def configure_smtp(req: SmtpConfigRequest, auth: AuthContext = Depends(require_admin)):
-    """Save SMTP settings to .env and test the connection. Admin only."""
-    import smtplib
-    updates = {}
-    if req.smtp_host:     updates["SMTP_HOST"]     = req.smtp_host
-    if req.smtp_user:     updates["SMTP_USER"]     = req.smtp_user
-    if req.smtp_password: updates["SMTP_PASSWORD"] = req.smtp_password
-    if req.smtp_from or req.smtp_user:
-        updates["SMTP_FROM"] = req.smtp_from or req.smtp_user
-    updates["SMTP_PORT"] = str(req.smtp_port)
-    if req.app_url:       updates["APP_URL"]       = req.app_url
-    _write_env(updates)
-    if req.smtp_host and req.smtp_user and req.smtp_password:
-        try:
-            if req.smtp_port == 465:
-                with smtplib.SMTP_SSL(req.smtp_host, req.smtp_port, timeout=8) as s:
-                    s.ehlo()
-                    s.login(req.smtp_user, req.smtp_password)
-            else:
-                with smtplib.SMTP(req.smtp_host, req.smtp_port, timeout=8) as s:
-                    s.ehlo(); s.starttls(); s.ehlo(); s.login(req.smtp_user, req.smtp_password)
-            return {"success": True, "message": "SMTP configured and connection verified"}
-        except Exception as e:
-            return {"success": False, "message": f"Settings saved but SMTP test failed: {e}"}
-    return {"success": True, "message": "SMTP settings saved (no test — fill all fields to verify)"}
-
-
-@router.post("/admin/smtp/test", tags=["auth"])
-def test_email(auth: AuthContext = Depends(require_admin)):
-    """Send a test email to the configured SMTP_USER address."""
-    from app.security.invite import send_invite_email
-    to = os.getenv("SMTP_USER", "")
-    if not to or "@" not in to:
-        raise HTTPException(400, detail="SMTP_USER not configured — set it in .env or via /auth/configure-smtp")
-    result = send_invite_email(to, auth.username, "123456", "test-token")
-    if result.get("success"):
-        return {"success": True, "message": f"Test email sent to {to}"}
-    raise HTTPException(400, detail=result.get("error", "Failed to send test email"))

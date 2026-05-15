@@ -9,14 +9,26 @@
   ],
 
   "action_permissions": {
+    "investigate":    "read",
     "k8s_restart":    "deploy",
     "k8s_scale":      "deploy",
+    "k8s_redeploy":   "deploy",
+    "k8s_rollback":   "deploy",
+    "rollback":       "deploy",
     "create_jira":    "write",
     "slack_notify":   "write",
+    "slack_warroom":  "write",
     "create_pr":      "write",
     "opsgenie_alert": "write",
     "aws_reboot":     "deploy",
-    "aws_terminate":  "delete"
+    "aws_terminate":  "delete",
+    "ec2_start":      "deploy",
+    "ec2_stop":       "deploy",
+    "ec2_reboot":     "deploy",
+    "ecs_scale":      "deploy",
+    "ecs_redeploy":   "deploy",
+    "lambda_invoke":  "deploy",
+    "rds_reboot":     "deploy"
   },
 
   "role_permissions": {

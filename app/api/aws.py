@@ -372,28 +372,6 @@ def aws_dynamodb_tables(region: str = ""):
         return {"tables": [], "count": 0, "note": str(e), "region": _region}
 
 
-@router.get("/aws/route53/healthchecks")
-def aws_route53_healthchecks():
-    result = list_route53_healthchecks()
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
-    return {"route53_healthchecks": result}
-
-
-@router.get("/aws/route53/health")
-def aws_route53_health():
-    """Alias for /aws/route53/healthchecks."""
-    return aws_route53_healthchecks()
-
-
-@router.get("/aws/sns/topics")
-def aws_sns_topics():
-    result = list_sns_topics()
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error"))
-    return {"sns_topics": result}
-
-
 @router.post("/aws/diagnose")
 def aws_diagnose(req: AWSDiagnoseRequest):
     valid_types = {"ec2", "ecs", "lambda", "rds", "alb"}
@@ -416,6 +394,19 @@ def aws_predict_scaling(req: PredictScalingRequest):
     }
 
 
+@router.get("/aws/region")
+def aws_region(_: AuthContext = Depends(require_viewer)):
+    """Active AWS region for the running platform. The dashboard calls this
+    once at boot so EC2/SG/CloudWatch console links open in the right
+    region instead of a hard-coded default."""
+    region = (
+        os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or "us-east-1"
+    )
+    return {"region": region}
+
+
 @router.get("/aws/context")
 def aws_context(resource_type: str = "", resource_id: str = "", hours: int = 1):
     """Collect full AWS observability context for a resource."""
@@ -431,27 +422,5 @@ def aws_synthesize(hours: int = 1):
     ctx = collect_all_context(hours=hours)
     summary = summarize_health(ctx)
     return {"summary": summary, "context": ctx}
-
-
-@router.get("/aws/cost/summary")
-def aws_cost_summary(months: int = 1):
-    """Alias for /cost/explorer — AWS Cost Explorer summary."""
-    import boto3 as _b3, datetime as _dt
-    try:
-        ce = _b3.client("ce", region_name="us-east-1")
-        end = _dt.date.today()
-        start = end.replace(day=1)
-        resp = ce.get_cost_and_usage(
-            TimePeriod={"Start": str(start), "End": str(end)},
-            Granularity="MONTHLY",
-            Metrics=["BlendedCost"],
-        )
-        total = sum(
-            float(r["Total"]["BlendedCost"]["Amount"])
-            for r in resp.get("ResultsByTime", [])
-        )
-        return {"total_cost_usd": round(total, 2), "period": f"{start} to {end}"}
-    except Exception as e:
-        return {"total_cost_usd": 0, "note": str(e)}
 
 

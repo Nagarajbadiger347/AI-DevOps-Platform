@@ -41,6 +41,11 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically start the integration server when VS Code opens"
+        },
+        "nsops.platformOrigin": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Comma-separated allowlist of origins the bridge will accept CORS requests from. Wildcard (*) is rejected by design — the bridge has terminal access."
         }
       }
     }
