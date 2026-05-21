@@ -54,13 +54,13 @@ class PredictScalingRequest(BaseModel):
 
 
 @router.get("/check/aws")
-def aws_check():
+def aws_check(_: AuthContext = Depends(require_viewer)):
     result = check_aws_infrastructure()
     return {"aws_check": result}
 
 
 @router.get("/aws/ec2/instances")
-def aws_ec2_list(state: str = "", region: str = ""):
+def aws_ec2_list(state: str = "", region: str = "", _: AuthContext = Depends(require_viewer)):
     result = list_ec2_instances(state, region=region) if region else list_ec2_instances(state)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -68,7 +68,7 @@ def aws_ec2_list(state: str = "", region: str = ""):
 
 
 @router.get("/aws/ec2/status")
-def aws_ec2_status(instance_id: str = ""):
+def aws_ec2_status(instance_id: str = "", _: AuthContext = Depends(require_viewer)):
     result = get_ec2_status_checks(instance_id)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -76,7 +76,8 @@ def aws_ec2_status(instance_id: str = ""):
 
 
 @router.get("/aws/ec2/console")
-def aws_ec2_console(instance_id: str):
+def aws_ec2_console(instance_id: str, _: AuthContext = Depends(require_developer)):
+    # Console output may include bootstrap secrets / user-data
     result = get_ec2_console_output(instance_id)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -108,7 +109,7 @@ def aws_ec2_reboot(instance_id: str, auth: AuthContext = Depends(require_develop
 
 
 @router.get("/aws/logs/groups")
-def aws_log_groups(prefix: str = "", limit: int = 50):
+def aws_log_groups(prefix: str = "", limit: int = 50, _: AuthContext = Depends(require_viewer)):
     result = list_log_groups(prefix, limit)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -116,7 +117,7 @@ def aws_log_groups(prefix: str = "", limit: int = 50):
 
 
 @router.get("/aws/logs/recent")
-def aws_logs_recent(log_group: str, minutes: int = 30, limit: int = 100):
+def aws_logs_recent(log_group: str, minutes: int = 30, limit: int = 100, _: AuthContext = Depends(require_viewer)):
     result = get_recent_logs(log_group, minutes, limit)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -124,7 +125,7 @@ def aws_logs_recent(log_group: str, minutes: int = 30, limit: int = 100):
 
 
 @router.get("/aws/logs/search")
-def aws_logs_search(log_group: str, pattern: str, hours: int = 1, limit: int = 100):
+def aws_logs_search(log_group: str, pattern: str, hours: int = 1, limit: int = 100, _: AuthContext = Depends(require_viewer)):
     result = search_logs(log_group, pattern, hours, limit)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -132,7 +133,7 @@ def aws_logs_search(log_group: str, pattern: str, hours: int = 1, limit: int = 1
 
 
 @router.get("/aws/cloudwatch/alarms")
-def aws_cw_alarms(state: str = ""):
+def aws_cw_alarms(state: str = "", _: AuthContext = Depends(require_viewer)):
     valid = {"", "OK", "ALARM", "INSUFFICIENT_DATA"}
     if state.upper() not in valid:
         raise HTTPException(status_code=400, detail=f"state must be one of {valid - {''}}")
@@ -143,7 +144,7 @@ def aws_cw_alarms(state: str = ""):
 
 
 @router.post("/aws/cloudwatch/metrics")
-def aws_cw_metrics(req: AWSMetricRequest):
+def aws_cw_metrics(req: AWSMetricRequest, _: AuthContext = Depends(require_viewer)):
     result = get_metric(req.namespace, req.metric_name, req.dimensions,
                         req.hours, req.period, req.stat)
     if not result.get("success"):
@@ -152,7 +153,7 @@ def aws_cw_metrics(req: AWSMetricRequest):
 
 
 @router.get("/aws/cloudwatch/logs")
-def aws_cw_logs(log_group: str = "", hours: int = 1, limit: int = 100):
+def aws_cw_logs(log_group: str = "", hours: int = 1, limit: int = 100, _: AuthContext = Depends(require_viewer)):
     """Alias: search CloudWatch logs with optional filter."""
     if log_group:
         result = get_recent_logs(log_group, hours * 60, limit)
@@ -164,7 +165,7 @@ def aws_cw_logs(log_group: str = "", hours: int = 1, limit: int = 100):
 
 
 @router.get("/aws/ecs/services")
-def aws_ecs_services(region: str = ""):
+def aws_ecs_services(region: str = "", _: AuthContext = Depends(require_viewer)):
     import boto3 as _b3
     _region = region or os.getenv("AWS_REGION", "us-east-1")
     try:
@@ -190,7 +191,7 @@ def aws_ecs_services(region: str = ""):
 
 
 @router.get("/aws/ecs/stopped-tasks")
-def aws_ecs_stopped(cluster: str = "default", limit: int = 20):
+def aws_ecs_stopped(cluster: str = "default", limit: int = 20, _: AuthContext = Depends(require_viewer)):
     result = get_stopped_ecs_tasks(cluster, limit)
     if not result.get("success"):
         return {"stopped_tasks": {"success": True, "cluster": cluster, "stopped_tasks": [], "count": 0, "note": result.get("error")}}
@@ -198,7 +199,7 @@ def aws_ecs_stopped(cluster: str = "default", limit: int = 20):
 
 
 @router.get("/aws/lambda/functions")
-def aws_lambda_list(region: str = ""):
+def aws_lambda_list(region: str = "", _: AuthContext = Depends(require_viewer)):
     import boto3 as _b3
     _region = region or os.getenv("AWS_REGION", "us-east-1")
     try:
@@ -221,7 +222,7 @@ def aws_lambda_list(region: str = ""):
 
 
 @router.get("/aws/lambda/errors")
-def aws_lambda_errors(function_name: str = "", hours: int = 1):
+def aws_lambda_errors(function_name: str = "", hours: int = 1, _: AuthContext = Depends(require_viewer)):
     if function_name:
         result = get_lambda_errors(function_name, hours)
         if not result.get("success"):
@@ -239,7 +240,7 @@ def aws_lambda_errors(function_name: str = "", hours: int = 1):
 
 
 @router.get("/aws/rds/instances")
-def aws_rds_list(region: str = ""):
+def aws_rds_list(region: str = "", _: AuthContext = Depends(require_viewer)):
     import boto3 as _b3
     _region = region or os.getenv("AWS_REGION", "us-east-1")
     try:
@@ -264,7 +265,7 @@ def aws_rds_list(region: str = ""):
 
 
 @router.get("/aws/rds/events")
-def aws_rds_events(db_instance_id: str = "", hours: int = 24):
+def aws_rds_events(db_instance_id: str = "", hours: int = 24, _: AuthContext = Depends(require_viewer)):
     if db_instance_id:
         result = get_rds_events(db_instance_id, hours)
         if not result.get("success"):
@@ -282,7 +283,7 @@ def aws_rds_events(db_instance_id: str = "", hours: int = 24):
 
 
 @router.get("/aws/elb/target-health")
-def aws_elb_health(region: str = ""):
+def aws_elb_health(region: str = "", _: AuthContext = Depends(require_viewer)):
     import boto3 as _b3
     _region = region or os.getenv("AWS_REGION", "us-east-1")
     try:
@@ -314,7 +315,8 @@ def aws_elb_health(region: str = ""):
 
 
 @router.get("/aws/cloudtrail/events")
-def aws_cloudtrail(hours: int = 1, resource_name: str = ""):
+def aws_cloudtrail(hours: int = 1, resource_name: str = "", _: AuthContext = Depends(require_developer)):
+    # Audit events can include sensitive principals — developer-only
     result = get_cloudtrail_events(hours, resource_name)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -322,7 +324,7 @@ def aws_cloudtrail(hours: int = 1, resource_name: str = ""):
 
 
 @router.get("/aws/s3/buckets")
-def aws_s3_buckets():
+def aws_s3_buckets(_: AuthContext = Depends(require_viewer)):
     result = list_s3_buckets()
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -330,7 +332,7 @@ def aws_s3_buckets():
 
 
 @router.get("/aws/sqs/queues")
-def aws_sqs_queues(region: str = ""):
+def aws_sqs_queues(region: str = "", _: AuthContext = Depends(require_viewer)):
     import boto3 as _b3
     _region = region or os.getenv("AWS_REGION", "us-east-1")
     try:
@@ -351,7 +353,7 @@ def aws_sqs_queues(region: str = ""):
 
 
 @router.get("/aws/dynamodb/tables")
-def aws_dynamodb_tables(region: str = ""):
+def aws_dynamodb_tables(region: str = "", _: AuthContext = Depends(require_viewer)):
     import boto3 as _b3
     _region = region or os.getenv("AWS_REGION", "us-east-1")
     try:
@@ -373,7 +375,7 @@ def aws_dynamodb_tables(region: str = ""):
 
 
 @router.post("/aws/diagnose")
-def aws_diagnose(req: AWSDiagnoseRequest):
+def aws_diagnose(req: AWSDiagnoseRequest, _: AuthContext = Depends(require_developer)):
     valid_types = {"ec2", "ecs", "lambda", "rds", "alb"}
     if req.resource_type not in valid_types:
         raise HTTPException(status_code=400, detail=f"resource_type must be one of {valid_types}")
@@ -383,7 +385,7 @@ def aws_diagnose(req: AWSDiagnoseRequest):
 
 
 @router.post("/aws/predict-scaling")
-def aws_predict_scaling(req: PredictScalingRequest):
+def aws_predict_scaling(req: PredictScalingRequest, _: AuthContext = Depends(require_developer)):
     metrics = get_scaling_metrics(req.resource_type, req.resource_id, req.hours)
     prediction = predict_scaling(metrics)
     return {
@@ -408,7 +410,7 @@ def aws_region(_: AuthContext = Depends(require_viewer)):
 
 
 @router.get("/aws/context")
-def aws_context(resource_type: str = "", resource_id: str = "", hours: int = 1):
+def aws_context(resource_type: str = "", resource_id: str = "", hours: int = 1, _: AuthContext = Depends(require_viewer)):
     """Collect full AWS observability context for a resource."""
     from app.integrations.aws_ops import collect_diagnosis_context
     result = collect_diagnosis_context(resource_type, resource_id, "", hours)
@@ -416,7 +418,7 @@ def aws_context(resource_type: str = "", resource_id: str = "", hours: int = 1):
 
 
 @router.get("/aws/synthesize")
-def aws_synthesize(hours: int = 1):
+def aws_synthesize(hours: int = 1, _: AuthContext = Depends(require_viewer)):
     """Synthesize overall AWS health across all resource types."""
     from app.integrations.universal_collector import collect_all_context, summarize_health
     ctx = collect_all_context(hours=hours)

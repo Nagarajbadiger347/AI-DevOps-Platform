@@ -1,0 +1,35 @@
+global:
+  resolve_timeout: 5m
+  # Set SMTP / slack defaults via env-substituted secrets if needed.
+  # Operators may override with their own template by mounting over this file.
+
+route:
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'default'
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: 'critical'
+      continue: true
+
+receivers:
+  - name: 'default'
+    # Operators should plug in a real webhook here (Slack, PagerDuty, OpsGenie).
+    webhook_configs:
+      - url: 'http://nexusops:8000/v1/webhooks/alertmanager'
+        send_resolved: true
+
+  - name: 'critical'
+    webhook_configs:
+      - url: 'http://nexusops:8000/v1/webhooks/alertmanager'
+        send_resolved: true
+
+inhibit_rules:
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ['alertname']

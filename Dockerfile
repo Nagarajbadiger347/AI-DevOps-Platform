@@ -22,15 +22,19 @@ COPY --from=deps /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.
 COPY --from=deps /usr/local/bin /usr/local/bin
 COPY --chown=nexusops:root . .
 
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 UVICORN_WORKERS=2
 
-RUN mkdir -p /app/logs /app/chroma_db && chown -R nexusops:root /app/logs /app/chroma_db
+RUN mkdir -p /app/logs /app/data /app/post_mortems && chown -R nexusops:root /app/logs /app/data /app/post_mortems
 
 USER nexusops
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+# Healthcheck is configured in docker-compose.yml (longer start-period during
+# migrations); avoid duplicate definitions.
 
-CMD ["sh", "-c", "python manage.py migrate && uvicorn app.orchestrator.main:app --host 0.0.0.0 --proxy-headers --forwarded-allow-ips=*"]
+# Multi-worker uvicorn — set UVICORN_WORKERS=1 in HA deployments where you run
+# a separate monitor container, since the background loop in lifespan() fires
+# once per worker. The monitor loop already de-duplicates triggers, so 2
+# workers on a single host is fine.
+CMD ["sh", "-c", "python manage.py migrate && exec uvicorn app.orchestrator.main:app --host 0.0.0.0 --workers ${UVICORN_WORKERS:-2} --proxy-headers --forwarded-allow-ips=*"]

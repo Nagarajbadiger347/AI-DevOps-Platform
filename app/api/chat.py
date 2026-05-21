@@ -507,6 +507,48 @@ def _rule_based_intent(message: str, conv_context: str = "") -> dict | None:
     iid_match = re.search(r'i-[0-9a-f]{8,17}', message) or re.search(r'i-[0-9a-f]{8,17}', conv_context)
     iid = iid_match.group(0) if iid_match else ""
 
+    # ── SAFETY: read-only intents ALWAYS win over destructive action matches ──
+    # Real failure: "check the instance's logs for any error messages before it
+    # stopped" used to match the EC2 stop branch because "stop" is a substring
+    # of "stopped". Past-tense narrative or info requests must never trigger
+    # destructive actions.
+    #
+    # Rule 1: anything that is clearly asking for logs/errors/console output is
+    # observation, not action — even if the message also contains action words
+    # describing what happened.
+    looking_for_logs = (
+        ("logs" in msg or "log " in msg or "log\n" in msg or msg.endswith(" log"))
+        or "console output" in msg or "system log" in msg or "boot log" in msg
+        or "kernel log" in msg or "error message" in msg or "error messages" in msg
+    )
+    asking_about = any(v in msg for v in (
+        "check", "show", "see", "view", "get", "tell me", "what are",
+        "what is", "any error", "any errors", "find", "look", "fetch", "give me",
+    ))
+    if looking_for_logs and asking_about:
+        return {"intent": "action", "action": "get_ec2_logs", "params": {"instance_id": iid}}
+
+    # Rule 2: past-tense narrative about a state change ("before it stopped",
+    # "when it crashed", "has stopped unexpectedly") is never an action
+    # request — it's describing the situation. Route to the chat path.
+    # These patterns are intentionally broad — false positives here just mean
+    # the chat path handles the query, which is safe. False NEGATIVES could
+    # mean a destructive action fires on a narrative description, which is
+    # the bug we're fixing.
+    _past_states = r'(?:stopped|crashed|died|failed|terminated|killed|halted|went\s+down|gone\s+down)'
+    narrative_past_patterns = (
+        rf'\b(?:before|after|when|since|until)\s+(?:it|the\s+\w+)\s+(?:was\s+)?{_past_states}\b',
+        rf'\b(?:it|the\s+\w+)\s+(?:has|had|have|is|was|got)\s+{_past_states}\b',
+        rf'\b{_past_states}\s+(?:unexpectedly|suddenly|yesterday|today|at\s+\d|on\s+\w|by\s+|because\s+|due\s+to)\b',
+        rf'\bwhen\s+was\s+(?:it|the\s+\w+)\s+{_past_states}\b',
+        rf'\b(?:it|the\s+\w+)\s+{_past_states}\s+at\s+\d',  # "it stopped at 2pm"
+        r'\bwhy\s+(?:did|does)\s+.*\b(?:stop|crash|fail|die|terminate)\b',
+        r'\bwhat\s+(?:caused|happened|went\s+wrong|made\s+it)\b',
+        r'\b(?:root\s+cause|reason)\s+(?:for|of)\b',
+    )
+    if any(re.search(p, msg) for p in narrative_past_patterns):
+        return {"intent": "question"}
+
     # Informational / exploratory queries — always questions, never actions
     info_kw = ["explore", "understand", "explain", "how does", "how do", "what is", "what are",
                "tell me about", "learn about", "show me how", "walk me through", "how can i",
@@ -526,22 +568,35 @@ def _rule_based_intent(message: str, conv_context: str = "") -> dict | None:
     if any(k in msg for k in status_kw) and ("instance" in msg or iid):
         return {"intent": "action", "action": "get_ec2_status", "params": {"instance_id": iid}}
 
-    # EC2 log queries
+    # EC2 log queries (singular variants — plural "logs" handled by the
+    # read-only safety branch above).
     log_kw = ["system log", "console output", "check log", "show log", "get log", "error log",
               "instance log", "boot log", "kernel log"]
     if any(k in msg for k in log_kw) and ("instance" in msg or iid):
         return {"intent": "action", "action": "get_ec2_logs", "params": {"instance_id": iid}}
 
-    # GitHub commit / repo review queries — always fetch real commits, never hallucinate
+    # Rule 3: incident-related queries are NEVER GitHub commit queries — even
+    # if they happen to contain "review" or "recent". Route to the chat path
+    # so `_fetch_incident_memory` handles them. Real failure: "Review recent
+    # incidents in the incident pipeline" used to fire get_recent_commits
+    # because "review recent" matched the commit branch.
+    if re.search(r'\bincidents?\b', msg) and not re.search(r'\b(?:github|commit|pull\s*request|\bpr\b|repo|repositor)', msg):
+        return {"intent": "question"}
+
+    # GitHub commit / repo review queries — always fetch real commits.
+    # The second-clause check now requires an EXPLICIT GitHub signal
+    # (github/commit/pr/repo) — not generic words like "recent" or "change"
+    # that collide with incident-investigation phrasing.
     commit_kw = ["recent commit", "recent commits", "review commit", "review commits",
                  "check commit", "show commit", "list commit", "github commit",
                  "what commit", "latest commit", "last commit", "commit history",
-                 "commit review", "review recent", "recent changes", "recent change",
+                 "commit review",
                  "review your github", "review the github", "review github repo",
-                 "github repository", "any recent", "new commit", "new commits",
-                 "audit log", "audit logs", "examine the audit", "details on changes",
+                 "github repository", "new commit", "new commits",
                  "changes made during", "changes in the commit", "changes during commit"]
-    if any(k in msg for k in commit_kw) and any(g in msg for g in ("github", "commit", "repo", "repositor", "change", "recent", "audit")):
+    if any(k in msg for k in commit_kw) and any(
+        g in msg for g in ("github", "commit", "pull request", "pr ", "repo", "repositor")
+    ):
         hours = 48
         import re as _re
         h_match = _re.search(r'(\d+)\s*hour', msg)
@@ -549,14 +604,22 @@ def _rule_based_intent(message: str, conv_context: str = "") -> dict | None:
             hours = max(1, int(h_match.group(1)))  # guard against 0
         return {"intent": "action", "action": "get_recent_commits", "params": {"hours": hours}}
 
-    # EC2 start / stop / reboot — rule-based to prevent LLM from hallucinating execution
-    ec2_action_kw = {"start", "stop", "reboot", "restart", "boot", "power"}
-    ec2_ctx_kw    = {"ec2", "instance", "server", "vm", "machine", "compute"}
-    if any(k in msg for k in ec2_action_kw) and (iid or any(k in msg for k in ec2_ctx_kw)):
-        # Disambiguate: "start" vs "stop" vs "reboot"
-        is_stop   = any(k in msg for k in ("stop", "shutdown", "shut down", "power off", "terminate"))
-        is_reboot = any(k in msg for k in ("reboot", "restart", "bounce"))
-        is_start  = any(k in msg for k in ("start", "boot", "power on", "bring up"))
+    # EC2 start / stop / reboot — must use word-boundary matching so past-
+    # tense forms ("stopped", "started", "rebooted") and unrelated substrings
+    # don't trigger a destructive action. Previously `"stop" in "stopped"` was
+    # True, causing "before it stopped" to fire stop_ec2.
+    _ec2_ctx_kw = {"ec2", "instance", "server", "vm", "machine", "compute"}
+    _has_ec2_ctx = iid or any(k in msg for k in _ec2_ctx_kw)
+    if _has_ec2_ctx:
+        # Imperative verb forms only — no past tense, no participle.
+        is_stop = bool(re.search(
+            r'\b(?:stop|shutdown|shut\s+down|power\s+off|terminate|halt|kill)\b', msg
+        )) and not re.search(r'\b(?:stopped|terminated|halted|killed)\b', msg)
+        is_reboot = bool(re.search(r'\b(?:reboot|restart|bounce|cycle)\b', msg)) \
+            and not re.search(r'\b(?:rebooted|restarted|bounced)\b', msg)
+        is_start = bool(re.search(
+            r'\b(?:start|boot(?:\s+up)?|power\s+on|bring\s+up|launch)\b', msg
+        )) and not re.search(r'\b(?:started|booted|launched)\b', msg)
         if is_stop and not is_start:
             return {"intent": "action", "action": "stop_ec2",   "params": {"instance_id": iid}}
         if is_reboot:
@@ -696,6 +759,23 @@ def _build_action_reply(action_name: str, user_msg: str, action_result: dict,
         "Suggestion three\n"
         "[/SUGGESTIONS]"
     )
+    # Special-case EC2 console logs: even when the LLM call succeeds, sending
+    # 50KB of kernel boot output as JSON wastes tokens and the LLM rarely
+    # surfaces the actual errors. Pre-summarise so the LLM (or the fallback
+    # branch) gets a focused payload.
+    if action_name in ("get_ec2_logs", "get_ec2_console_output") and isinstance(action_result, dict):
+        focused = {
+            "instance_id": action_result.get("instance_id"),
+            "summary":     action_result.get("summary"),
+            "errors":      action_result.get("errors") or [],
+            "tail":        action_result.get("tail") or "",
+        }
+        # If the integration didn't return the new structured fields (older
+        # callers), fall back to a trimmed last-3KB of raw output.
+        if not focused["tail"] and action_result.get("output"):
+            focused["tail"] = (action_result["output"] or "")[-3000:]
+        result_json = _j.dumps(focused, default=str, indent=2)
+
     try:
         return _llm(
             ACTION_REPLY_SYSTEM,
@@ -705,11 +785,108 @@ def _build_action_reply(action_name: str, user_msg: str, action_result: dict,
             force_provider=force_prov,
         )
     except Exception:
-        if succeeded:
-            return "\u2705 `{}` completed. {}".format(action_name, _j.dumps(
-                {k: v for k, v in action_result.items() if k != "success"}, default=str))
-        else:
-            return "\u274c `{}` failed: {}".format(action_name, action_result.get("error", "unknown error"))
+        # Fallback when the LLM is unavailable / weak (e.g. Ollama timing out
+        # on the complex format prompt). Build a deterministic prose summary
+        # so the user gets something USEFUL \u2014 not a raw JSON dump \u2014 and the
+        # next turn ("how do I fix this") has meaningful chat history to
+        # reference instead of a code block.
+        if not succeeded:
+            err = action_result.get("error", "unknown error") if isinstance(action_result, dict) else "unknown error"
+            return f"\u274c `{action_name}` failed: {err}"
+        return _template_action_reply(action_name, action_result)
+
+
+# \u2500\u2500 Deterministic prose formatters \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# These run when the LLM call fails OR returns garbage. Each formatter knows
+# the structure of one action's result and produces readable markdown.
+
+def _template_action_reply(action_name: str, action_result: dict) -> str:
+    """Render a human-readable reply for an action result without an LLM."""
+    if not isinstance(action_result, dict):
+        return f"\u2705 `{action_name}` completed."
+
+    # EC2 console logs \u2014 the high-value case that triggered this file's growth.
+    if action_name in ("get_ec2_logs", "get_ec2_console_output"):
+        return _format_ec2_logs(action_result)
+
+    # Generic fallback: instance info / status / etc. \u2014 short bullet list.
+    iid = action_result.get("instance_id") or action_result.get("id") or ""
+    head = f"\u2705 Fetched **{action_name.replace('_', ' ')}**"
+    if iid:
+        head += f" for `{iid}`"
+    head += "."
+
+    bullets = []
+    for k, v in action_result.items():
+        if k in ("success", "instance_id", "id"):
+            continue
+        if isinstance(v, (str, int, float, bool)) and len(str(v)) < 200:
+            bullets.append(f"- **{k.replace('_', ' ').title()}**: {v}")
+    if bullets:
+        return head + "\n\n" + "\n".join(bullets[:10])
+    return head
+
+
+def _format_ec2_logs(r: dict) -> str:
+    """Prose summary of an EC2 console-output fetch \u2014 robust to small LLMs."""
+    iid = r.get("instance_id", "?")
+    summary = r.get("summary") or "Console output retrieved."
+    errors = r.get("errors") or []
+
+    parts = [f"\u2705 Fetched console output for **{iid}**.", "", f"**Summary:** {summary}"]
+
+    if errors:
+        parts.append("")
+        parts.append("**Errors / panics detected (most recent at bottom):**")
+        for e in errors[:8]:
+            # Strip ANSI / kernel timestamps so the bullets are readable
+            line = e
+            import re as _re
+            line = _re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line)  # ANSI codes
+            line = _re.sub(r"^\[\s*\d+\.\d+\]\s*", "", line)    # kernel timestamps
+            line = line.strip()
+            if len(line) > 220:
+                line = line[:220] + "\u2026"
+            parts.append(f"- `{line}`")
+
+    # Surface the most actionable root-cause class with a "what to do" line.
+    blob = " ".join(errors).lower()
+    hint = None
+    if "accessdenied" in blob or "no valid credentials" in blob or "ssm agent unable" in blob:
+        hint = ("**Most actionable signal:** the SSM agent could not acquire credentials "
+                "(`AccessDeniedException`). Likely cause: the EC2 instance's IAM role is "
+                "missing `AmazonSSMManagedInstanceCore` (or equivalent). Attaching that "
+                "policy to the instance role usually resolves this.")
+    elif "out of memory" in blob or "oom" in blob:
+        hint = ("**Most actionable signal:** Out-of-memory / OOM killer fired. "
+                "Check instance memory size vs. workload, look for memory leaks, "
+                "and consider scaling to a larger instance type.")
+    elif "kernel panic" in blob or "call trace" in blob:
+        hint = ("**Most actionable signal:** kernel panic. This is almost always a "
+                "host-level problem \u2014 try stop/start (re-hosts the instance) before "
+                "investigating further.")
+    elif "ext4-fs error" in blob or "i/o error" in blob or "xfs" in blob and "error" in blob:
+        hint = ("**Most actionable signal:** filesystem error. Run `fsck` against the "
+                "root volume, or replace the EBS volume from snapshot.")
+    elif "failed to start" in blob or "emergency mode" in blob:
+        hint = ("**Most actionable signal:** a critical service failed to start. "
+                "Boot to rescue, inspect `journalctl -xb`, and disable the failing unit.")
+
+    if hint:
+        parts.append("")
+        parts.append(hint)
+
+    if not errors:
+        parts.append("")
+        parts.append("No error/panic patterns detected in the console output. "
+                     "The instance may have been stopped cleanly (via API or normal "
+                     "shutdown) rather than crashed. Check CloudTrail for a "
+                     "`StopInstances` call around the time of the event.")
+
+    return "\n".join(parts)
+
+
+_VALID_PROVIDERS = {"", "anthropic", "groq", "openai", "ollama"}
 
 
 def _chat_inner(payload: ChatPayload, x_user: str):
@@ -719,7 +896,15 @@ def _chat_inner(payload: ChatPayload, x_user: str):
     from app.core.ratelimit import check_chat, check_action
     from app.core.audit import audit_log
 
-    force_prov = payload.provider or ""
+    force_prov = (payload.provider or "").lower().strip()
+    if force_prov not in _VALID_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown LLM provider '{force_prov}'. "
+                f"Valid options: {', '.join(sorted(p for p in _VALID_PROVIDERS if p))}."
+            ),
+        )
     history = [{"role": m.role, "content": m.content} for m in payload.history]
     catalogue = _get_catalogue()
 
@@ -888,6 +1073,24 @@ def _chat_inner(payload: ChatPayload, x_user: str):
                     action_taken  = action_name
                 audit_log(user=x_user, action=action_name, params=params,
                           result=action_result or {}, source="chat")
+                # State-changing infra actions invalidate cached state for this
+                # session — otherwise the next turn replays the pre-action
+                # snapshot and contradicts itself ("instance is running" right
+                # after we stopped it).
+                _STATE_CHANGING = {
+                    "start_ec2", "stop_ec2", "reboot_ec2",
+                    "start_rds", "stop_rds", "reboot_rds",
+                    "restart_pod", "delete_pod", "scale_deployment",
+                    "restart_deployment", "rollout_restart",
+                    "update_ecs_service", "stop_ecs_task",
+                }
+                if action_name in _STATE_CHANGING:
+                    try:
+                        from app.chat.intelligence import invalidate_session_cache
+                        invalidate_session_cache(payload.session_id or f"chat-{x_user}-default")
+                        invalidate_session_cache(payload.session_id or f"chat-{x_user}")
+                    except Exception:
+                        pass
                 try:
                     reply = _build_action_reply(action_name, payload.message, action_result, force_prov, _llm, _j)
                 except Exception as exc:
@@ -948,6 +1151,30 @@ def _chat_inner(payload: ChatPayload, x_user: str):
     used_provider = force_prov or "none"
     # Use the same sid that was used for history storage (Path C), not a new random one
     sid_out = payload.session_id or f"chat-{x_user}-default"
+
+    # Persist user + assistant messages to history when we took the action
+    # path (Path A/B). Path C (chat_with_intelligence) already persists its
+    # own turn. Without this, follow-up questions like "how do I fix this"
+    # have no context because the action's prose reply was never saved.
+    #
+    # There are TWO history stores in this codebase:
+    #   1. app.chat.memory       — Postgres-backed (durable, shared across workers)
+    #   2. app.chat.intelligence — in-memory dict (what Path C actually reads from)
+    # We must write to BOTH so the next turn's chat path can see this turn.
+    if action_taken and reply:
+        try:
+            from app.chat.memory import add_message as _am_pg
+            _am_pg(sid_out, "user", payload.message)
+            _am_pg(sid_out, "assistant", reply)
+        except Exception:
+            pass
+        try:
+            from app.chat.intelligence import add_message as _am_mem
+            _am_mem(sid_out, "user", payload.message)
+            _am_mem(sid_out, "assistant", reply)
+        except Exception:
+            pass
+
     return {
         "reply":          reply,
         "answer":         reply,
@@ -1072,11 +1299,30 @@ async def chat_stream(payload: ChatPayload, auth: AuthContext = Depends(require_
 
         _threading.Thread(target=_run_stream, daemon=True).start()
 
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            yield f"data: {item}\n\n"
+        # Wrap the yield in try/except so a client disconnect mid-stream
+        # (browser closes the tab, network blip, SSE reader cancelled) is
+        # treated as a clean end-of-stream rather than bubbling up as a
+        # "No response returned" RuntimeError from the middleware chain.
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield f"data: {item}\n\n"
+        except asyncio.CancelledError:
+            # Normal: client disconnected. Swallow and let the worker thread
+            # finish writing into the queue (it's daemon so it won't block
+            # shutdown either way).
+            return
+        except Exception as _stream_exc:
+            # Unexpected — log once and exit cleanly. The earlier _run_stream
+            # thread already emits "type":"error" events on its own
+            # exceptions; this catch is for transport-level failures only.
+            import logging as _lg
+            _lg.getLogger("chat.stream").warning(
+                "sse_yield_aborted: %s: %s", type(_stream_exc).__name__, _stream_exc,
+            )
+            return
 
     return StreamingResponse(_event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

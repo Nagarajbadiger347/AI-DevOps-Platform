@@ -25,10 +25,16 @@ class K8sAgent(BaseAgent):
                 check_k8s_deployments,
             )
             cluster = check_k8s_cluster()
-            if isinstance(cluster, dict) and cluster.get("status") == "error":
+            # check_k8s_cluster returns one of: healthy | degraded | unavailable | error.
+            # Only `healthy` and `degraded` mean we actually have a usable cluster.
+            # `unavailable` (no KUBECONFIG) used to leak through as `_data_available=True`,
+            # making the planner think it could schedule k8s_* actions on a non-existent
+            # cluster.
+            status = (cluster.get("status") if isinstance(cluster, dict) else "") or ""
+            if status in ("error", "unavailable") or (isinstance(cluster, dict) and cluster.get("success") is False):
                 return {
                     "_data_available": False,
-                    "_reason": cluster.get("details", "K8s unavailable"),
+                    "_reason": cluster.get("details") or cluster.get("error") or "K8s not configured",
                 }
             pods    = check_k8s_pods(namespace)
             deploys = check_k8s_deployments(namespace)

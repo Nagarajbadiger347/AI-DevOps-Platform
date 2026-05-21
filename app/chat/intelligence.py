@@ -72,18 +72,31 @@ _MODELS = {
     "openai":    "gpt-4o-mini",
 }
 
-# Dead-provider registry — providers that failed with billing/quota errors
-# Cleared on server restart; prevents retrying dead providers on every message
-_DEAD_PROVIDERS: set[str] = set()
+# Dead-provider registry — providers that failed with billing/quota/auth errors
+# get a cooldown so we skip them for a while but eventually retry. Without a
+# TTL a transient 429 would silently kill a paid provider for the whole process
+# lifetime and quietly route traffic to Ollama (or fail).
+_DEAD_PROVIDERS: dict[str, float] = {}   # provider -> unix ts when cooldown ends
+_DEAD_TTL_SECONDS = 300                  # retry after 5 minutes
 
 
-def _mark_dead(provider: str) -> None:
-    _DEAD_PROVIDERS.add(provider)
-    logger.warning(f"Provider '{provider}' marked dead (billing/quota). Will skip.")
+def _mark_dead(provider: str, ttl: float = _DEAD_TTL_SECONDS) -> None:
+    _DEAD_PROVIDERS[provider] = time.time() + ttl
+    logger.warning(
+        f"Provider '{provider}' marked dead for {int(ttl)}s "
+        "(billing/quota/auth). Will retry after cooldown."
+    )
 
 
 def _is_dead(provider: str) -> bool:
-    return provider in _DEAD_PROVIDERS
+    exp = _DEAD_PROVIDERS.get(provider)
+    if exp is None:
+        return False
+    if time.time() >= exp:
+        _DEAD_PROVIDERS.pop(provider, None)
+        logger.info(f"Provider '{provider}' cooldown elapsed — retrying.")
+        return False
+    return True
 
 
 # Pre-validate providers at startup (quick test call)
@@ -328,8 +341,11 @@ _GLOBAL_INFRA_TS: float = 0.0
 _GLOBAL_INFRA_TTL = 90
 
 # Per-session EC2 instance cache
+# Short TTL — EC2 state can change in seconds (start/stop, autoscaling, external
+# console action). A long TTL was causing the chat to insist an instance was
+# "running" minutes after it had been stopped.
 _EC2_SESSION: dict[str, dict] = {}
-_EC2_TTL = 300
+_EC2_TTL = 30
 
 _ec2_session_cache = _EC2_SESSION   # alias used by chat.py
 
@@ -371,6 +387,87 @@ def _set_cached_ec2(session_id: str, instances: list[dict]) -> None:
     _EC2_SESSION[session_id] = {"data": instances, "exp": time.time() + _EC2_TTL}
 
 
+def invalidate_session_cache(session_id: str) -> None:
+    """Drop cached EC2 state + prefetch snapshots for a session.
+
+    Call after any action that mutates infra state (start_ec2, stop_ec2,
+    reboot_ec2, scale_deployment, etc.) so the next chat turn re-reads live
+    data instead of replaying the pre-action snapshot.
+    """
+    _EC2_SESSION.pop(session_id, None)
+    prefix = f"{session_id}:"
+    for k in list(_PREFETCH_CACHE.keys()):
+        if k.startswith(prefix):
+            _PREFETCH_CACHE.pop(k, None)
+
+
+# ── User-assertion guard ──────────────────────────────────────────────────────
+# Weaker LLMs (Ollama llama3, smaller Groq variants) tend to echo a state the
+# user asserted ("the instance is running") even when LIVE DATA contradicts it.
+# We detect such assertions and prepend an explicit CORRECTION block to the
+# turn so the model cannot miss it.
+
+_STATE_ASSERTION_RE = re.compile(
+    r"\b(?:instance|server|vm|machine|pod|deployment|service)\s+"
+    r"(?:(i-[0-9a-f]{8,17}|[\w.-]+)\s+)?"
+    r"(?:is|was|seems|appears\s+to\s+be|should\s+be)\s+"
+    r"(running|stopped|up|down|healthy|unhealthy|crashing|alive|dead)",
+    re.IGNORECASE,
+)
+
+# Map of user-asserted state -> canonical EC2 state we should compare against.
+_STATE_SYNONYMS = {
+    "running": "running",
+    "up": "running",
+    "alive": "running",
+    "healthy": "running",
+    "stopped": "stopped",
+    "down": "stopped",
+    "dead": "stopped",
+    "crashing": "stopped",
+    "unhealthy": "stopped",
+}
+
+
+def _detect_user_state_assertion(message: str) -> tuple[str, str] | None:
+    """Return (resource_id_or_empty, asserted_state) or None."""
+    m = _STATE_ASSERTION_RE.search(message or "")
+    if not m:
+        return None
+    rid = (m.group(1) or "").strip()
+    asserted = _STATE_SYNONYMS.get(m.group(2).lower())
+    if not asserted:
+        return None
+    return rid, asserted
+
+
+def _build_assertion_correction(message: str, infra_data: str, session_id: str) -> str:
+    """If the user asserts a state that disagrees with LIVE DATA, return a
+    CORRECTION line to prepend. Empty string if no conflict (or no live data)."""
+    if not infra_data:
+        return ""
+    detected = _detect_user_state_assertion(message)
+    if not detected:
+        return ""
+    rid, asserted = detected
+    cached = _get_cached_ec2(session_id) or []
+    target = None
+    if rid:
+        target = next((i for i in cached if i.get("id") == rid or i.get("name") == rid), None)
+    elif len(cached) == 1:
+        target = cached[0]
+    if not target:
+        return ""
+    real = (target.get("state") or "").lower()
+    if not real or real == asserted:
+        return ""
+    return (
+        f"CORRECTION (do not contradict): the user said the resource is "
+        f"'{asserted}', but live AWS data shows {target.get('id','?')} is "
+        f"'{real}'. Report the live state, not the user's claim."
+    )
+
+
 # ── Infra prefetch ────────────────────────────────────────────────────────────
 
 def _prefetch_infra(message: str, session_id: str) -> str:
@@ -405,12 +502,16 @@ def _prefetch_infra(message: str, session_id: str) -> str:
     gh_kw     = {"github", "commit", "pr", "pull request", "deploy", "release", "repo", "repos", "repository", "repositories", "git", "branch", "merge"}
 
     def _fetch_ec2():
-        if not (_AWS_OK and (fetch_all or any(k in msg for k in ec2_kw))):
+        is_relevant = _AWS_OK and (fetch_all or any(k in msg for k in ec2_kw))
+        if not is_relevant:
             return None
         try:
             cached_instances = _get_cached_ec2(session_id)
             if not cached_instances:
                 r = _aws_ops.list_ec2_instances()
+                if not r.get("success", True):
+                    logger.warning("ec2 prefetch returned error: %s", r.get("error"))
+                    return "[EC2: live data unavailable — do not assert any instance state, type, or count. Tell the user the AWS call failed.]"
                 cached_instances = r.get("instances", [])
                 if cached_instances:
                     _set_cached_ec2(session_id, [
@@ -424,9 +525,10 @@ def _prefetch_infra(message: str, session_id: str) -> str:
                     n = f' ({i["name"]})' if i.get("name") else ""
                     lines.append(f"  • {i['id']}{n} — {i.get('state','?')} — {i.get('type','?')}")
                 return "\n".join(lines)
-        except Exception:
-            pass
-        return None
+            return "EC2: no instances found in this account/region."
+        except Exception as exc:
+            logger.warning("ec2 prefetch failed: %s", exc)
+            return "[EC2: live data unavailable — do not assert any instance state, type, or count. Tell the user the AWS call failed.]"
 
     def _fetch_alarms():
         if not (_AWS_OK and (fetch_all or any(k in msg for k in alarm_kw))):
@@ -440,11 +542,13 @@ def _prefetch_infra(message: str, session_id: str) -> str:
                     lines.append(f"  • {a.get('name','?')} — {a.get('reason','')[:80]}")
                 return "\n".join(lines)
             return "CloudWatch: No alarms firing."
-        except Exception:
-            return None
+        except Exception as exc:
+            logger.warning("cloudwatch alarms prefetch failed: %s", exc)
+            return "[CloudWatch Alarms: live data unavailable — do not assert alarm state.]"
 
     def _fetch_k8s():
-        if not (_K8S_OK and (fetch_all or any(k in msg for k in k8s_kw))):
+        is_relevant = _K8S_OK and (fetch_all or any(k in msg for k in k8s_kw))
+        if not is_relevant:
             return None
         try:
             r = _k8s_ops.list_pods()
@@ -453,12 +557,14 @@ def _prefetch_infra(message: str, session_id: str) -> str:
                 bad = [p for p in pods if p.get("status") not in ("Running","Completed","Succeeded")]
                 return (f"K8s: {len(pods)} pods, {len(bad)} unhealthy" +
                         (": " + ", ".join(p["name"] for p in bad[:3]) if bad else ""))
-        except Exception:
-            pass
-        return None
+            return "K8s: no pods found."
+        except Exception as exc:
+            logger.warning("k8s prefetch failed: %s", exc)
+            return "[Kubernetes: live data unavailable — do not assert pod or deployment state.]"
 
     def _fetch_ecs():
-        if not (_AWS_OK and (fetch_all or any(k in msg for k in ecs_kw))):
+        is_relevant = _AWS_OK and (fetch_all or any(k in msg for k in ecs_kw))
+        if not is_relevant:
             return None
         try:
             r = _aws_ops.list_ecs_services()
@@ -468,12 +574,14 @@ def _prefetch_infra(message: str, session_id: str) -> str:
                 for s in svcs[:5]:
                     lines.append(f"  • {s.get('name','?')} — {s.get('running_count','?')}/{s.get('desired_count','?')} tasks")
                 return "\n".join(lines)
-        except Exception:
-            pass
-        return None
+            return "ECS: no services found."
+        except Exception as exc:
+            logger.warning("ecs prefetch failed: %s", exc)
+            return "[ECS: live data unavailable — do not assert service state.]"
 
     def _fetch_rds():
-        if not (_AWS_OK and (fetch_all or any(k in msg for k in rds_kw))):
+        is_relevant = _AWS_OK and (fetch_all or any(k in msg for k in rds_kw))
+        if not is_relevant:
             return None
         try:
             r = _aws_ops.list_rds_instances()
@@ -483,21 +591,24 @@ def _prefetch_infra(message: str, session_id: str) -> str:
                 for d in dbs[:5]:
                     lines.append(f"  • {d.get('id','?')} ({d.get('engine','?')}) — {d.get('status','?')}")
                 return "\n".join(lines)
-        except Exception:
-            pass
-        return None
+            return "RDS: no database instances found."
+        except Exception as exc:
+            logger.warning("rds prefetch failed: %s", exc)
+            return "[RDS: live data unavailable — do not assert database state.]"
 
     def _fetch_lambda():
-        if not (_AWS_OK and (fetch_all or any(k in msg for k in lambda_kw))):
+        is_relevant = _AWS_OK and (fetch_all or any(k in msg for k in lambda_kw))
+        if not is_relevant:
             return None
         try:
             r = _aws_ops.list_lambda_functions()
             fns = r.get("functions", [])
             if fns:
                 return f"Lambda: {len(fns)} functions — " + ", ".join(f.get("name","?") for f in fns[:5])
-        except Exception:
-            pass
-        return None
+            return "Lambda: no functions found."
+        except Exception as exc:
+            logger.warning("lambda prefetch failed: %s", exc)
+            return "[Lambda: live data unavailable — do not assert function names or counts.]"
 
     def _fetch_github():
         # Only trigger on GitHub-related keywords
@@ -549,31 +660,49 @@ def _prefetch_infra(message: str, session_id: str) -> str:
                    "analyse incident", "analyze incident", "incident analysis"}
 
     def _fetch_incident_memory():
-        if not (_MEMORY_OK and (fetch_all or any(k in msg for k in incident_kw))):
+        user_asked = fetch_all or any(k in msg for k in incident_kw)
+        if not user_asked:
             return None
+        if not _MEMORY_OK:
+            # User asked about incidents but the memory backend is offline.
+            # Emit an explicit sentinel so the LLM does not invent incidents.
+            return ("Incident memory: backend unavailable. No real incident data "
+                    "can be returned. Do not invent incident IDs, root causes, "
+                    "or counts in your response.")
         try:
-            # Retrieve similar incidents + trend report
             similar = retrieve_similar(message, n_results=10)
-            if not similar:
-                return None
             trend_report = get_trend_report()
-            lines = ["**Incident Memory (ChromaDB):**"]
-            for inc in similar[:6]:
-                inc_id = inc.get("incident_id") or inc.get("id", "?")
-                inc_type = inc.get("type") or inc.get("incident_type", "unknown")
-                sim = inc.get("_similarity", 0.0)
-                root = (inc.get("root_cause") or inc.get("analysis") or "")[:80]
-                res = inc.get("resolution_time") or inc.get("elapsed_s", "")
-                lines.append(
-                    f"  • [{inc_id}] type={inc_type} similarity={sim:.0%}"
-                    + (f" root_cause={root}" if root else "")
-                    + (f" resolution_time={res}" if res else "")
-                )
+            if not similar and not trend_report:
+                # No matching incidents AND no trend data. The user asked, so
+                # we must tell the model "nothing here" — otherwise it will
+                # hallucinate plausible-looking INC-123 / fake root causes.
+                return ("Incident memory: no incidents matched the query. "
+                        "The incident store contains 0 completed incidents "
+                        "relevant to this question. Do not invent incident IDs, "
+                        "counts, or root causes — say there is no incident "
+                        "data and suggest checking pending approvals or running "
+                        "a new pipeline.")
+            lines = ["**Incident Memory:**"]
+            if similar:
+                for inc in similar[:6]:
+                    inc_id = inc.get("incident_id") or inc.get("id", "?")
+                    inc_type = inc.get("type") or inc.get("incident_type", "unknown")
+                    sim = inc.get("_similarity", 0.0)
+                    root = (inc.get("root_cause") or inc.get("analysis") or "")[:80]
+                    res = inc.get("resolution_time") or inc.get("elapsed_s", "")
+                    lines.append(
+                        f"  • [{inc_id}] type={inc_type} similarity={sim:.0%}"
+                        + (f" root_cause={root}" if root else "")
+                        + (f" resolution_time={res}" if res else "")
+                    )
+            else:
+                lines.append("  • No similar incidents in memory.")
             if trend_report:
                 lines.append("\n" + trend_report)
             return "\n".join(lines)
-        except Exception:
-            return None
+        except Exception as _exc:
+            return ("Incident memory: query failed. Do not invent incident "
+                    f"data. Error class: {type(_exc).__name__}")
 
     def _fetch_ec2_logs():
         """Fetch EC2 console output (system logs) when user asks about logs/errors."""
@@ -661,7 +790,9 @@ _SYSTEM_PROMPT = """You are **NexusOps AI** — the senior SRE assistant embedde
 
 ## How to answer:
 
-**Infrastructure questions** → use the live data injected below. Be specific: real instance IDs, real states, real counts. Never say "I don't have access" when data is already in context. If live data is absent for a source (e.g. `[GitHub: token not configured]`), say exactly that — do NOT fabricate data.
+**Infrastructure questions** → use the live data injected in the LIVE DATA section below. Be specific: real instance IDs, real states, real counts. Never say "I don't have access" when data is already in context. If a source has no entry in LIVE DATA at all, do not invent a status line for it — just don't bring that source up. Never write a bracketed sentinel like `[GitHub: …]` or `[Kubernetes: …]` unless that exact text appears in the LIVE DATA section; if it does, reproduce it verbatim with no edits.
+
+**Never echo a state the user asserted.** If the user types "the instance is running", "the pod is down", "the deploy worked", or any similar claim, do NOT repeat it back as if confirmed. Report only what appears in LIVE DATA. If LIVE DATA shows the opposite, say so explicitly ("the user said running, but live data shows the instance is stopped — last refreshed in this session"). If LIVE DATA has no entry for the resource the user named, say "I don't have live data for `<resource>` right now — want me to refresh?" and stop. Do NOT invent a state, instance type, count, or reliability score to agree with the user.
 
 **Action requests** (restart, scale, stop, start, run pipeline) → ALWAYS ask for confirmation before executing. Never execute an action autonomously. Say "Should I stop instance `<id>` now?" and wait for the user to confirm. Only trigger the action after explicit user approval. Do NOT give AWS CLI commands unless the user asks "how do I do this manually".
 
@@ -681,7 +812,8 @@ _SYSTEM_PROMPT = """You are **NexusOps AI** — the senior SRE assistant embedde
 3. **No unnecessary confirms.** If you already have the info, act or answer — don't ask again.
 4. **Honest.** If data is missing, say exactly what is missing and how to get it.
 8. **NEVER fabricate data.** This applies to ALL sources — not just metrics:
-   - **GitHub**: never invent commit SHAs, commit messages, PR titles, or repo names. If the live data says `[GitHub: token not configured]` or `[GitHub: API returned no data]`, say exactly that to the user and tell them what to configure. Do NOT generate fake commit IDs like `abc123`.
+   - **GitHub**: every commit SHA, commit message, author, PR number, PR title, and repository name in your response must appear verbatim in the LIVE DATA section. If you cannot find a value there, omit it. If LIVE DATA contains no GitHub block, do not write anything about GitHub — no status sentence, no bracketed status line, no speculation about whether the integration is configured.
+   - **Incidents**: every incident ID, root cause, severity, status, count, and resolution time in your response must appear verbatim in the LIVE DATA section's Incident Memory block. Never invent incident IDs like `INC-123`, `INC-456`, never invent root causes ("network connectivity issue", "database query optimization"), never invent counts ("5 incidents in the last 24 hours"). If Incident Memory says "no incidents matched the query" or is missing entirely, tell the user there are no incidents in the memory store and stop — do not generate a sample table.
    - **AWS/K8s**: never invent instance IDs, pod names, alarm names, or resource counts.
    - **Metrics**: never invent CPU percentages, latency numbers, error rates, or timestamps.
    - Fabricated data is far worse than saying "I don't have this data right now".
@@ -850,10 +982,13 @@ def chat_with_intelligence(
             if _is_infra_check else
             "\n\nUse the above live data to answer specifically."
         )
+        correction = _build_assertion_correction(message, infra_data, session_id)
+        correction_block = f"\n\n!!! {correction} !!!" if correction else ""
         user_turn = (
             f"{message}\n\n"
             f"--- Live Infrastructure Data ---\n{infra_data}\n"
             f"--- End Live Data ---"
+            f"{correction_block}"
             f"{extra}"
         )
 
@@ -870,13 +1005,23 @@ def chat_with_intelligence(
         _is_memory_query = any(k in message.lower() for k in (
             "incident", "trend", "mttr", "pattern", "recurring", "memory", "past", "analysis"
         ))
+        # Drop temperature when answering against grounded live data — high
+        # temperatures invite the model to fabricate plausible-looking facts
+        # (instance types, alarm counts, reliability scores) instead of reading
+        # the LIVE DATA section.
+        if _is_memory_query:
+            _temp = 0.4
+        elif infra_data:
+            _temp = 0.2
+        else:
+            _temp = 0.7
         reply = _llm_call(
             user_turn,
             system=system,
             history=history_messages,
             provider=provider,
             max_tokens=3000 if _is_memory_query else 2048,
-            temperature=0.4 if _is_memory_query else 0.7,
+            temperature=_temp,
         )
     except RuntimeError as e:
         reply = str(e)

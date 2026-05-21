@@ -250,9 +250,12 @@ def _run_pipeline_from_request(req: IncidentRunRequest, auth: Optional[AuthConte
 @router.post("/incidents/run")
 def incidents_run(
     req: IncidentRunRequest,
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(require_viewer),
 ):
-    """Run the LangGraph incident pipeline. Single canonical endpoint for all pipeline runs."""
+    """Run the LangGraph incident pipeline. Single canonical endpoint for all pipeline runs.
+
+    Viewer can trigger investigative runs (read-only context collection); auto_remediate
+    is further gated to developer+ inside _run_pipeline_from_request."""
     return _run_pipeline_from_request(req, auth)
 
 

@@ -1,11 +1,13 @@
 import json
 import os
 import re
+import time as _time
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from app.llm.base import BaseLLM, LLMResponse
+from app.core.metrics import llm_request_duration, llm_requests_total
 
 # ── Provider auto-detection ───────────────────────────────────
 # Priority: Anthropic → Groq → Ollama (local, no key needed)
@@ -46,16 +48,25 @@ if GROQ_API_KEY:
         client    = _groq_client
         _provider = "groq"
 
-# Track billing/auth failures to skip dead providers in same session
-_PROVIDER_DEAD: dict[str, bool] = {}
+# Track billing/auth failures to skip dead providers — with a TTL so transient
+# 429s don't permanently kill a paid provider (which would silently route all
+# traffic to whatever fallback exists, often Ollama).
+_PROVIDER_DEAD: dict[str, float] = {}   # provider -> unix ts when cooldown ends
+_PROVIDER_DEAD_TTL = 300                # retry after 5 minutes
 
 
-def _mark_dead(provider: str) -> None:
-    _PROVIDER_DEAD[provider] = True
+def _mark_dead(provider: str, ttl: float = _PROVIDER_DEAD_TTL) -> None:
+    _PROVIDER_DEAD[provider] = _time.time() + ttl
 
 
 def _is_dead(provider: str) -> bool:
-    return _PROVIDER_DEAD.get(provider, False)
+    exp = _PROVIDER_DEAD.get(provider)
+    if exp is None:
+        return False
+    if _time.time() >= exp:
+        _PROVIDER_DEAD.pop(provider, None)
+        return False
+    return True
 
 # Always probe Ollama regardless of other providers — needed for explicit selection
 try:
@@ -70,11 +81,16 @@ except Exception:
 
 
 def _llm(system: str, messages: list, max_tokens: int = 1024,
-         force_provider: str = "", temperature: float = 0.7) -> str:
+         force_provider: str = "", temperature: float = 0.7,
+         cache_system: bool = True) -> str:
     """Unified LLM call — Anthropic / Groq / Ollama (local, no key).
 
     force_provider: override the auto-detected provider ("anthropic", "groq", "ollama").
     Falls back to the auto-detected provider if the requested one is not configured.
+    cache_system: when True (default) and provider is Anthropic, tag the system
+        prompt with cache_control:ephemeral. Only effective for system prompts
+        over ~1KB; harmless otherwise. Cuts input cost ~80% on repeat calls
+        within the 5-minute cache TTL.
     """
     provider = force_provider if force_provider else _provider
     # When user explicitly picks a provider, check it's actually available
@@ -101,22 +117,40 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
             if _groq_client:
                 return _llm(system, messages, max_tokens, force_provider="groq", temperature=temperature)
             raise RuntimeError("Anthropic billing/auth error — add credits at console.anthropic.com or configure GROQ_API_KEY.")
+        _t0 = _time.monotonic()
+        # Wrap system as a cache_control block when it's substantial. The
+        # Anthropic API requires the block-form for cache_control; a plain
+        # string still works but won't cache. Threshold matches Anthropic's
+        # 1024-token minimum (~4000 chars) for ephemeral caching.
+        if cache_system and system and len(system) >= 4000:
+            system_arg = [{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }]
+        else:
+            system_arg = system
         try:
             resp = _anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=max_tokens,
-                system=system,
+                system=system_arg,
                 messages=messages,
                 temperature=temperature,
             )
+            llm_request_duration.labels(provider="anthropic", model="claude-sonnet-4-6").observe(_time.monotonic() - _t0)
+            llm_requests_total.labels(provider="anthropic", status="success").inc()
             return resp.content[0].text or ""
         except Exception as _ant_exc:
+            llm_request_duration.labels(provider="anthropic", model="claude-sonnet-4-6").observe(_time.monotonic() - _t0)
+            llm_requests_total.labels(provider="anthropic", status="error").inc()
             _err = str(_ant_exc)
             _billing = (
                 "credit balance" in _err.lower() or "too low" in _err.lower() or
                 "no credits" in _err.lower() or "401" in _err or
                 "invalid_api_key" in _err.lower() or "authentication" in _err.lower()
             )
+            _rate_limited = "429" in _err or "rate_limit" in _err.lower() or "too many requests" in _err.lower()
             if _billing:
                 _mark_dead("anthropic")
                 # Auto-fallback to Groq if available
@@ -126,12 +160,31 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
                     "Anthropic API error: " + _err[:200] +
                     "\nFix: Add credits at console.anthropic.com or set GROQ_API_KEY in .env"
                 )
+            if _rate_limited:
+                # Anthropic is rate-limiting us. Mark a short cooldown via the
+                # factory + transparently fall back to Groq so the caller still
+                # gets a response. The cooldown lets the factory skip Anthropic
+                # for follow-on calls rather than re-attempting and re-failing.
+                try:
+                    from app.llm.factory import mark_rate_limited
+                    mark_rate_limited("anthropic", _err)
+                    mark_rate_limited("claude", _err)
+                except Exception:
+                    pass
+                if _groq_client and force_provider != "anthropic":
+                    return _llm(system, messages, max_tokens, force_provider="groq",
+                                temperature=temperature, cache_system=cache_system)
+                raise RuntimeError(
+                    "Anthropic rate limit hit and no Groq fallback available. "
+                    "Set GROQ_API_KEY for automatic failover, or wait a few minutes."
+                )
             raise
 
     elif provider == "groq":
         all_msgs = [{"role": "system", "content": system}] + messages
         # Use a fast model; cap tokens to stay under free-tier limits (6000 tok/min)
         groq_max = min(max_tokens, 1024)
+        _t0 = _time.monotonic()
         try:
             resp = _groq_client.chat.completions.create(
                 model="llama-3.1-8b-instant",   # fastest Groq model, lowest token cost
@@ -139,13 +192,30 @@ def _llm(system: str, messages: list, max_tokens: int = 1024,
                 max_tokens=groq_max,
                 temperature=temperature,
             )
+            llm_request_duration.labels(provider="groq", model="llama-3.1-8b-instant").observe(_time.monotonic() - _t0)
+            llm_requests_total.labels(provider="groq", status="success").inc()
             return resp.choices[0].message.content or ""
         except Exception as groq_exc:
+            llm_request_duration.labels(provider="groq", model="llama-3.1-8b-instant").observe(_time.monotonic() - _t0)
+            llm_requests_total.labels(provider="groq", status="error").inc()
             err = str(groq_exc)
             if "rate_limit" in err.lower() or "429" in err:
+                # Mark Groq as cooled down so the factory skips it on the
+                # next call, and try Anthropic in-line so the CURRENT request
+                # still returns a useful response rather than failing the
+                # user with a "wait 60 seconds" error.
+                try:
+                    from app.llm.factory import mark_rate_limited
+                    mark_rate_limited("groq", err)
+                except Exception:
+                    pass
+                if _anthropic_client and not _is_dead("anthropic") and not force_provider == "groq":
+                    return _llm(system, messages, max_tokens, force_provider="anthropic",
+                                temperature=temperature, cache_system=cache_system)
                 raise RuntimeError(
-                    "Groq free tier rate limit hit. Wait 60 seconds and try again, "
-                    "or upgrade at console.groq.com."
+                    "Groq rate limit hit and no Anthropic fallback available. "
+                    "Set ANTHROPIC_API_KEY for automatic failover, "
+                    "or wait ~60 seconds and retry."
                 )
             raise
 
@@ -224,7 +294,7 @@ def analyze_context(context: dict) -> dict:
     """
 
     try:
-        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1000)
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1000, temperature=0.2)
         rca = content.split("1.")[1].split("2.")[0].strip() if "1." in content else content
         confidence = 0.8
         actions = content.split("3.")[1].strip() if "3." in content else "Investigate further"
@@ -254,10 +324,31 @@ def diagnose_aws_resource(obs_context: dict) -> dict:
     resource_id   = obs_context.get("resource_id", "unknown")
     region        = obs_context.get("region", "unknown")
 
+    # Compact summary instead of dumping raw observability JSON. Falls back
+    # to the original blob if the summarizer can't import (defensive — this
+    # is the diagnosis hot path).
+    try:
+        from app.llm.context_summary import summarize_aws_for_prompt
+        summary = summarize_aws_for_prompt(obs_context)
+        # Diagnosis prompt needs the resource itself in scope; the summarizer
+        # focuses on incident-level signal so include the raw target too.
+        diagnosis_data = {
+            "target": {
+                "resource_type": resource_type,
+                "resource_id":   resource_id,
+                "region":        region,
+                "raw":           obs_context.get("raw", obs_context),
+            },
+            "signals": summary,
+        }
+        observability_block = json.dumps(diagnosis_data, indent=2, default=str)
+    except Exception:
+        observability_block = json.dumps(obs_context, indent=2, default=str)
+
     prompt = f"""You are an expert AWS SRE. Analyze the following observability data collected from a {resource_type} resource ({resource_id}) in region {region} and diagnose any issues.
 
 === OBSERVABILITY DATA ===
-{json.dumps(obs_context, indent=2, default=str)}
+{observability_block}
 === END DATA ===
 
 Respond in the following JSON format only (no markdown, no extra text):
@@ -278,7 +369,7 @@ Respond in the following JSON format only (no markdown, no extra text):
 
     content = ""
     try:
-        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1500)
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1500, temperature=0.2)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -365,7 +456,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
     content = ""
     try:
-        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=2000)
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=2000, temperature=0.2)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -438,7 +529,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
     content = ""
     try:
-        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=2000)
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=2000, temperature=0.2)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -568,7 +659,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
     content = ""
     try:
-        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1500)
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=1500, temperature=0.2)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -636,7 +727,7 @@ Respond ONLY in this JSON format (no markdown, no extra text):
 
     content = ""
     try:
-        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=2000)
+        content = _llm("", [{"role": "user", "content": prompt}], max_tokens=2000, temperature=0.2)
         return json.loads(_extract_json(content))
     except json.JSONDecodeError:
         return {
@@ -765,15 +856,17 @@ class ClaudeProvider(BaseLLM):
                            temperature=temperature)
         except Exception as exc:
             err = str(exc)
-            # Credit exhausted or billing error — mark provider permanently unavailable
-            # for this process so the factory falls back to next provider
+            # Credit/billing error: cool down for 30 minutes (admins can top
+            # up and we'll auto-recover) instead of the previous 999-minute
+            # "dead until restart" hack. Operators get a real chance to fix
+            # billing without a redeploy.
             if "credit balance" in err.lower() or "billing" in err.lower() or "payment" in err.lower():
                 _prov = self._force_provider or _provider or "anthropic"
                 from app.llm.factory import mark_rate_limited
                 # Mark both "claude" and "anthropic" keys so factory skips it
-                mark_rate_limited(_prov, "try again in 999m0s")
-                mark_rate_limited("claude", "try again in 999m0s")
-                mark_rate_limited("anthropic", "try again in 999m0s")
+                mark_rate_limited(_prov, "try again in 30m0s")
+                mark_rate_limited("claude", "try again in 30m0s")
+                mark_rate_limited("anthropic", "try again in 30m0s")
                 raise RuntimeError(
                     f"Provider '{_prov}' has no credits. Falling back to next available provider."
                 ) from exc

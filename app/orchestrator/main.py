@@ -136,7 +136,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="NsOps — AI DevOps Platform",
+    title="NexusOps — AI DevOps Platform",
     description="Autonomous incident response, AI chat, multi-cloud observability, and approval workflows.",
     version="2.0.0",
     lifespan=lifespan,
@@ -178,6 +178,19 @@ class ActiveRequestTracker(BaseHTTPMiddleware):
             response = await call_next(request)
             status = str(response.status_code)
             return response
+        except RuntimeError as rt:
+            # Starlette's BaseHTTPMiddleware re-raises ANY downstream
+            # exception (incl. client-disconnect of a StreamingResponse) as
+            # "No response returned." We DON'T want that filling traces —
+            # treat it as a 499-style client-closed-request and return a
+            # minimal response so the rest of the middleware chain unwinds
+            # cleanly without a stack dump.
+            if str(rt) == "No response returned.":
+                status = "499"
+                from starlette.responses import Response as _Resp
+                return _Resp(status_code=499)
+            status = "500"
+            raise
         except Exception:
             status = "500"
             raise

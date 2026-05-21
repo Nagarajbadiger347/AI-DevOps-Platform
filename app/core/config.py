@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     GITHUB_REPO: str = ""
     SLACK_BOT_TOKEN: str = ""
     SLACK_CHANNEL: str = "#incidents"
+    SLACK_SIGNING_SECRET: str = ""   # HMAC-SHA256 signing secret from Slack app config
     JIRA_URL: str = ""
     JIRA_USER: str = ""
     JIRA_TOKEN: str = ""
@@ -107,23 +108,35 @@ settings = Settings()
 
 def validate_security() -> None:
     """In production mode, refuse to import (and therefore boot) unless every
-    inbound-webhook secret is set. In dev mode, log warnings only.
+    inbound-webhook secret is set AND AUTH_ENABLED is true. In dev mode, log
+    warnings only.
 
     Called once at module import time from app.orchestrator.main."""
+    import os as _os
     import logging as _logging
     _log = _logging.getLogger("nsops.security")
+    is_prod = settings.ENVIRONMENT.lower() == "production"
+
+    # AUTH_ENABLED=false in production turns the platform into an open API.
+    auth_enabled = _os.getenv("AUTH_ENABLED", "true").lower() in ("1", "true", "yes")
+    if is_prod and not auth_enabled:
+        raise RuntimeError(
+            "refusing to start in production: AUTH_ENABLED=false would disable "
+            "authentication entirely. Set AUTH_ENABLED=true or unset ENVIRONMENT."
+        )
+
     required = {
         "PAGERDUTY_WEBHOOK_SECRET": settings.PAGERDUTY_WEBHOOK_SECRET,
         "OPSGENIE_WEBHOOK_TOKEN":   settings.OPSGENIE_WEBHOOK_TOKEN,
         "GITHUB_WEBHOOK_SECRET":    settings.GITHUB_WEBHOOK_SECRET,
         "GRAFANA_WEBHOOK_TOKEN":    settings.GRAFANA_WEBHOOK_TOKEN,
         "CLOUDWATCH_WEBHOOK_TOKEN": settings.CLOUDWATCH_WEBHOOK_TOKEN,
-        "JWT_SECRET_KEY":           __import__("os").getenv("JWT_SECRET_KEY", ""),
+        "JWT_SECRET_KEY":           _os.getenv("JWT_SECRET_KEY", ""),
     }
     missing = [k for k, v in required.items() if not v]
     if not missing:
         return
-    if settings.ENVIRONMENT.lower() == "production":
+    if is_prod:
         raise RuntimeError(
             "refusing to start in production: missing required secrets: "
             + ", ".join(missing)

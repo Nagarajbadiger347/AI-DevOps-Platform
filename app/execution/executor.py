@@ -51,6 +51,12 @@ class ExecutionContext:
     trace_id:    str
     incident_id: str
     dry_run:     bool
+    # Set of resource identifiers (instance IDs, deployment names, etc.) that
+    # were observed in the collected context. Used by the hallucination guard
+    # to refuse executing on resources the LLM made up. Empty set disables
+    # the check (e.g. when context collection failed and we don't want to
+    # double-block a valid manually-approved action).
+    known_resources: frozenset = frozenset()
 
     @classmethod
     def from_state(cls, state: dict) -> "ExecutionContext":
@@ -61,7 +67,55 @@ class ExecutionContext:
             trace_id    = state.get("trace_id")  or trace_id_var.get(""),
             incident_id = state.get("incident_id", "unknown"),
             dry_run     = bool(state.get("dry_run", False)),
+            known_resources = frozenset(_collect_known_resources(state)),
         )
+
+
+# Keys in an action dict that name a real resource we should verify exists.
+# Anything not in this set (e.g. action_type, description, severity) is metadata.
+_TARGET_KEYS = (
+    "instance_id", "resource_id", "deployment", "deployment_name",
+    "pod", "pod_name", "function_name", "db_instance_id",
+    "cluster", "cluster_name", "service_name", "queue_url", "table_name",
+    "bucket", "bucket_name", "alarm_name", "node",
+)
+
+
+def _collect_known_resources(state: dict) -> set:
+    """Walk state.{aws,k8s,github}_context once and harvest all known
+    resource identifiers (case-insensitive). The hallucination guard then
+    requires every action's target identifier to appear here."""
+    found: set[str] = set()
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                # Common identifier-shaped keys to harvest
+                if k in ("id", "name", "instance_id", "function_name",
+                         "deployment", "pod", "service_name", "cluster",
+                         "queue_url", "table_name", "bucket", "alarm_name",
+                         "node", "arn", "identifier") and isinstance(v, str) and v:
+                    found.add(v.lower())
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    for key in ("aws_context", "k8s_context", "github_context"):
+        _walk(state.get(key) or {})
+    return found
+
+
+def _verify_action_target(action: dict, known: frozenset) -> tuple[bool, str]:
+    """Return (ok, reason). When known is empty, never block — context
+    collection probably failed and the planner would already be aware."""
+    if not known:
+        return True, ""
+    for key in _TARGET_KEYS:
+        target = action.get(key)
+        if target and isinstance(target, str) and target.lower() not in known:
+            return False, f"action target {key}={target!r} not present in collected context (possible hallucination)"
+    return True, ""
 
 
 # ── RBAC helper ───────────────────────────────────────────────────────────────
@@ -121,6 +175,21 @@ def _run_action(action: dict, ctx: ExecutionContext) -> tuple[str, dict]:
                   result={"success": False, "error": rbac_reason, "blocked_by": "rbac"},
                   source="executor")
         return "blocked", _blocked_entry(action, action_id, rbac_reason, "rbac", duration_ms)
+
+    # 1b. Hallucination guard — refuse to act on resources we never observed.
+    target_ok, target_reason = _verify_action_target(action, ctx.known_resources)
+    if not target_ok:
+        duration_ms = int((time.monotonic() - t_start) * 1000)
+        logger.warning("action_hallucination_blocked", extra={
+            "incident_id": ctx.incident_id, "trace_id": ctx.trace_id,
+            "action": action_type, "action_id": action_id,
+            "reason": target_reason,
+        })
+        audit_log(user=ctx.user, action=action_type,
+                  params={**action, "action_id": action_id, "trace_id": ctx.trace_id},
+                  result={"success": False, "error": target_reason, "blocked_by": "hallucination_guard"},
+                  source="executor")
+        return "blocked", _blocked_entry(action, action_id, target_reason, "hallucination_guard", duration_ms)
 
     # 2. Policy engine
     allowed, policy_reason = _policy.evaluate(action, user=ctx.user, role=ctx.role)

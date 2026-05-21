@@ -13,12 +13,19 @@ _OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 _OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 _client = None
+_init_error: str = ""
 if _OPENAI_API_KEY:
     try:
         from openai import OpenAI as _OpenAI
         _client = _OpenAI(api_key=_OPENAI_API_KEY)
-    except ImportError:
-        pass
+    except Exception as _exc:  # Catch BOTH ImportError and the openai-vs-httpx
+        # `proxies` kwarg mismatch (openai<1.55 + httpx>=0.28). The provider
+        # is just disabled in that case — never let it crash a pipeline run.
+        _init_error = f"{type(_exc).__name__}: {_exc}"
+        import logging as _logging
+        _logging.getLogger("nsops.llm.openai").warning(
+            "openai_client_init_failed error=%s — provider disabled", _init_error,
+        )
 
 
 class OpenAIProvider(BaseLLM):

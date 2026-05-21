@@ -3,8 +3,13 @@ War room and Slack events routes.
 Paths: /warroom/*, /slack/events
 """
 import os
+import hmac
+import hashlib
+import time
+import json as _json
 import asyncio
 import datetime as _datetime
+import logging as _logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -19,8 +24,34 @@ from app.integrations.slack import create_incident_channel, post_incident_summar
 from app.integrations.universal_collector import collect_all_context
 
 router = APIRouter(tags=["warroom"])
+_log = _logging.getLogger("nsops.warroom")
 
 _SLACK_BOT_USER_ID: str = os.getenv("SLACK_BOT_USER_ID", "")
+
+
+def _verify_slack_signature(raw_body: bytes, timestamp: str, signature: str) -> bool:
+    """Verify Slack request signature using HMAC-SHA256.
+
+    See https://api.slack.com/authentication/verifying-requests-from-slack
+    Returns True if valid, False otherwise. Never raises on missing fields.
+    """
+    secret = os.getenv("SLACK_SIGNING_SECRET", "")
+    if not secret:
+        # In dev (no signing secret configured) we accept; production guard is
+        # the global validate_security() check and ENVIRONMENT setting below.
+        return os.getenv("ENVIRONMENT", "development").lower() != "production"
+    if not timestamp or not signature:
+        return False
+    try:
+        # Reject replays older than 5 minutes
+        if abs(time.time() - int(timestamp)) > 60 * 5:
+            return False
+    except ValueError:
+        return False
+    base = f"v0:{timestamp}:".encode() + raw_body
+    digest = hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
+    expected = f"v0={digest}"
+    return hmac.compare_digest(expected, signature)
 
 
 class WarRoomRequest(BaseModel):
@@ -281,7 +312,16 @@ def delete_war_room(war_room_id: str, auth: AuthContext = Depends(require_develo
 @router.post("/slack/events", include_in_schema=False)
 async def slack_events_webhook(request: Request):
     """Receive Slack Events API payloads and route channel messages to war room AI."""
-    body = await request.json()
+    raw = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+    if not _verify_slack_signature(raw, timestamp, signature):
+        _log.warning("slack_events_invalid_signature ts=%s", timestamp)
+        raise HTTPException(status_code=401, detail="Invalid Slack signature")
+    try:
+        body = _json.loads(raw or b"{}")
+    except _json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
     if body.get("type") == "url_verification":
         return {"challenge": body.get("challenge")}

@@ -69,20 +69,32 @@ def _is_rate_limited(provider_key: str) -> bool:
 
 
 def _build_chain(preferred: str) -> list[tuple[str, BaseLLM]]:
-    """Import providers lazily to avoid hard failures at import time."""
-    from app.llm.claude import ClaudeProvider
-    from app.llm.openai import OpenAIProvider
-    from app.llm.ollama import OllamaProvider
+    """Import providers lazily to avoid hard failures at import time.
 
+    Each provider import is wrapped — a broken SDK (e.g. openai<>httpx
+    version mismatch) just disables that one provider instead of taking
+    down every pipeline run."""
     _alias = {"anthropic": "claude"}
     preferred = _alias.get(preferred, preferred)
 
-    providers: dict[str, BaseLLM] = {
-        "claude":  ClaudeProvider(),
-        "openai":  OpenAIProvider(),
-        "groq":    ClaudeProvider(force_provider="groq"),
-        "ollama":  OllamaProvider(),
-    }
+    providers: dict[str, BaseLLM] = {}
+    try:
+        from app.llm.claude import ClaudeProvider
+        providers["claude"] = ClaudeProvider()
+        providers["groq"]   = ClaudeProvider(force_provider="groq")
+    except Exception as exc:
+        logger.warning("claude_provider_load_failed", extra={"error": str(exc)})
+    try:
+        from app.llm.openai import OpenAIProvider
+        providers["openai"] = OpenAIProvider()
+    except Exception as exc:
+        logger.warning("openai_provider_load_failed", extra={"error": str(exc)})
+    try:
+        from app.llm.ollama import OllamaProvider
+        providers["ollama"] = OllamaProvider()
+    except Exception as exc:
+        logger.warning("ollama_provider_load_failed", extra={"error": str(exc)})
+
     order = [preferred] + [k for k in providers if k != preferred]
     return [(k, providers[k]) for k in order if k in providers]
 

@@ -307,13 +307,28 @@ def deduplicate(pairs: list[dict]) -> list[dict]:
 
 
 def quality_filter(pairs: list[dict], min_output_len: int = 30) -> list[dict]:
-    bad_phrases = {"not determined", "lllm", "parsing failed", "none recorded", "see incident description"}
+    # Phrases that indicate the row captures a pipeline failure rather than
+    # a useful incident outcome — never use these as training examples.
+    bad_phrases = {
+        "not determined", "lllm", "parsing failed", "none recorded",
+        "see incident description",
+        "llm parse error", "expecting value", "json.decoder",
+        "rate_limit", "rate limit hit",
+        "api error", "anthropic api error",
+        "no credits", "credit balance",
+        "traceback", "exception:",
+        "under investigation", "investigate further", "analysis failed",
+        "unknown", "[error]",
+    }
     out = []
     for p in pairs:
-        output = p["output"].lower()
-        if len(p["output"]) < min_output_len:
+        output = (p.get("output") or "").lower()
+        if len(p.get("output") or "") < min_output_len:
             continue
         if any(bp in output for bp in bad_phrases):
+            continue
+        # Drop responses that start with a bullet but contain nothing useful
+        if output.startswith("- llm") or output.startswith("- parse"):
             continue
         out.append(p)
     return out

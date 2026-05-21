@@ -91,13 +91,28 @@ def list_approval_history_endpoint(auth: AuthContext = Depends(require_viewer)):
 
 @router.delete("/{correlation_id}")
 def delete_approval_endpoint(correlation_id: str, auth: AuthContext = Depends(require_developer)):
+    """Delete a pending approval. Restricted to the original requester or an admin.
+
+    Without the requester check, any developer in the tenant could delete each
+    other's pending approvals — a denial-of-approval primitive."""
     from app.core.database import execute
     rows = execute(
-        "DELETE FROM approvals WHERE approval_id = %s AND tenant_id = %s RETURNING approval_id",
+        "SELECT requested_by FROM approvals WHERE approval_id = %s AND tenant_id = %s",
         (correlation_id, auth.tenant_id)
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Approval not found")
+    requested_by = rows[0].get("requested_by") if isinstance(rows[0], dict) else rows[0][0]
+    is_admin = auth.role in ("admin", "super_admin")
+    if requested_by and requested_by != auth.username and not is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the requester or an admin can delete this approval",
+        )
+    execute(
+        "DELETE FROM approvals WHERE approval_id = %s AND tenant_id = %s",
+        (correlation_id, auth.tenant_id)
+    )
     from app.incident import pending_state as _ps
     _ps.delete(correlation_id)
     return {"ok": True, "deleted": correlation_id}

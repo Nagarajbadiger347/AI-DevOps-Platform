@@ -3,6 +3,8 @@ Authentication, user management, and SSO routes.
 Paths: /auth/*, /users/*, /admin/backup/*
 """
 import os
+import html as _html
+import json as _json
 import time as _time
 from pathlib import Path
 from typing import Optional, Dict
@@ -12,6 +14,21 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
+
+def _js_literal(value: str) -> str:
+    """Return a JSON-encoded literal that is safe to embed inside a <script> tag.
+
+    Escapes characters that could break out of a JS string OR a script context
+    (</script>, line separators). Use as: `var x = {_js_literal(value)};`."""
+    s = _json.dumps(value if value is not None else "")
+    return (
+        s.replace("<", "\\u003c")
+         .replace(">", "\\u003e")
+         .replace("&", "\\u0026")
+         .replace(" ", "\\u2028")
+         .replace(" ", "\\u2029")
+    )
+
 from app.api.deps import (
     require_admin, require_viewer, require_super_admin,
     AuthContext, _bearer_scheme, RoleAssignment,
@@ -20,9 +37,66 @@ from app.api.deps import (
 router = APIRouter(tags=["auth"])
 
 # ── Brute-force protection ─────────────────────────────────────
+# Counter is Redis-backed when available so the lockout works across uvicorn
+# workers; the in-process dict is only a fallback for single-instance dev mode.
 _login_failures: dict[str, list[float]] = {}
 _LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
+
+
+def _login_failures_get(username: str) -> list[float]:
+    """Return recent failure timestamps for ``username``, oldest first."""
+    try:
+        from app.core.ratelimit import _get_redis
+        r = _get_redis()
+    except Exception:
+        r = None
+    if r is None:
+        return list(_login_failures.get(username, []))
+    try:
+        now = _time.time()
+        key = f"login_fail:{username}"
+        # ZSet of timestamps; drop entries outside the lockout window.
+        r.zremrangebyscore(key, 0, now - _LOGIN_LOCKOUT_SECONDS)
+        members = r.zrange(key, 0, -1, withscores=True)
+        return [float(score) for _m, score in members]
+    except Exception:
+        return list(_login_failures.get(username, []))
+
+
+def _login_failures_record(username: str, ts: float) -> None:
+    """Record a single failed login at time ``ts``."""
+    try:
+        from app.core.ratelimit import _get_redis
+        r = _get_redis()
+    except Exception:
+        r = None
+    if r is None:
+        attempts = _login_failures.setdefault(username, [])
+        attempts.append(ts)
+        _login_failures[username] = attempts[-_LOGIN_MAX_ATTEMPTS:]
+        return
+    try:
+        key = f"login_fail:{username}"
+        r.zadd(key, {f"{ts}:{int(ts * 1000) % 1000}": ts})
+        r.expire(key, _LOGIN_LOCKOUT_SECONDS)
+        # Trim window
+        r.zremrangebyscore(key, 0, ts - _LOGIN_LOCKOUT_SECONDS)
+    except Exception:
+        attempts = _login_failures.setdefault(username, [])
+        attempts.append(ts)
+        _login_failures[username] = attempts[-_LOGIN_MAX_ATTEMPTS:]
+
+
+def _login_failures_clear(username: str) -> None:
+    try:
+        from app.core.ratelimit import _get_redis
+        r = _get_redis()
+        if r is not None:
+            r.delete(f"login_fail:{username}")
+    except Exception:
+        pass
+    _login_failures.pop(username, None)
 
 # ── .env writer (used by /auth/configure-smtp and /secrets) ───
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
@@ -115,16 +189,14 @@ def login(request: Request, response: Response, form: OAuth2PasswordRequestForm 
 
     username = form.username.strip().lower()
     now = _time.time()
-    attempts = _login_failures.get(username, [])
-    recent = [t for t in attempts if now - t < _LOGIN_LOCKOUT_SECONDS]
+    recent = [t for t in _login_failures_get(username) if now - t < _LOGIN_LOCKOUT_SECONDS]
     if len(recent) >= _LOGIN_MAX_ATTEMPTS:
         retry_after = int(_LOGIN_LOCKOUT_SECONDS - (now - recent[0]))
         raise HTTPException(status_code=429, detail=f"Too many failed login attempts. Try again in {retry_after}s.")
     if not user_exists(username) or not authenticate(username, form.password):
-        recent.append(now)
-        _login_failures[username] = recent[-_LOGIN_MAX_ATTEMPTS:]
+        _login_failures_record(username, now)
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    _login_failures.pop(username, None)
+    _login_failures_clear(username)
     role = get_user_role(username)
     token = create_token(username, role)
     try:
@@ -320,11 +392,14 @@ h2{{color:#f87171;margin-top:0}}a{{color:#60a5fa;text-decoration:none}}</style><
             result={"success": True}, source="auth")
     except Exception:
         pass
+    safe_token = _js_literal(token)
+    safe_user  = _js_literal(username)
+    safe_role  = _js_literal(role)
     return HTMLResponse(content=f"""<!doctype html><html><body>
 <script>
-  localStorage.setItem('nexusops_token', '{token}');
-  localStorage.setItem('nexusops_user', '{username}');
-  localStorage.setItem('nexusops_role', '{role}');
+  localStorage.setItem('nexusops_token', {safe_token});
+  localStorage.setItem('nexusops_user', {safe_user});
+  localStorage.setItem('nexusops_role', {safe_role});
   window.location.href = '/';
 </script></body></html>""")
 
@@ -465,12 +540,14 @@ def setup_password_page(token: str = ""):
 <h2 style="font-size:1.3em;margin-bottom:8px">Link Expired or Invalid</h2>
 <p style="color:#4f6a9a">This invite link has expired or already been used.<br>Ask your admin to send a new invite.</p>
 </div></body></html>""", status_code=400)
+    safe_username = _html.escape(username or "")
+    safe_token_js = _js_literal(token)
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Set Your Password — NsOps</title>
+  <title>Set Your Password — NexusOps</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
   <style>
     *{{margin:0;padding:0;box-sizing:border-box}}
@@ -507,10 +584,10 @@ def setup_password_page(token: str = ""):
       <div class="logo-icon">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
       </div>
-      <span class="logo-text">NsOps</span>
+      <span class="logo-text">NexusOps</span>
     </div>
     <h2>Set Your Password</h2>
-    <p class="sub">Welcome, <strong>{username}</strong>. Enter the OTP from your invite email and choose a password.</p>
+    <p class="sub">Welcome, <strong>{safe_username}</strong>. Enter the OTP from your invite email and choose a password.</p>
     <div id="err" class="err"></div>
     <div class="field">
       <label>One-Time Password (OTP)</label>
@@ -533,7 +610,7 @@ def setup_password_page(token: str = ""):
     </div>
   </div>
   <script>
-    var TOKEN = '{token}';
+    var TOKEN = {safe_token_js};
     function submit() {{
       var otp = document.getElementById('otp').value.trim();
       var pw1 = document.getElementById('pw1').value;

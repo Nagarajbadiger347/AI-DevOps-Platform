@@ -155,23 +155,66 @@ def reboot_ec2_instance(instance_id: str, region: str = "") -> dict:
 
 
 def get_ec2_console_output(instance_id: str) -> dict:
-    """Retrieve the last console/serial output of an EC2 instance (kernel panics, boot errors)."""
+    """Retrieve the last console/serial output of an EC2 instance (kernel panics, boot errors).
+
+    Returns a structured dict with:
+      - output: raw console output (capped at 100 KB for prompts that need it)
+      - tail:   last 60 lines (most useful for "what happened before stop?")
+      - errors: lines matching kernel-panic / OOM / segfault / fatal patterns
+    Without this filtering the previous version dumped 50KB of boot logs that
+    started with `[ 0.193443] DMA: preallocated…` — useless for incident triage.
+    """
     try:
         ec2 = _client("ec2")
         resp = ec2.get_console_output(InstanceId=instance_id)
-        import base64
+        import base64, re as _re
         raw = resp.get("Output", "")
         if not raw:
-            decoded = "(no output available)"
+            decoded = ""
         elif isinstance(raw, bytes):
             decoded = raw.decode("utf-8", errors="replace")
         else:
-            # boto3 returns the output already decoded as a string in newer SDK versions
             try:
                 decoded = base64.b64decode(raw.encode("ascii")).decode("utf-8", errors="replace")
             except (ValueError, UnicodeEncodeError):
-                decoded = raw  # already a plain string
-        return {"success": True, "instance_id": instance_id, "output": decoded}
+                decoded = raw
+
+        if not decoded:
+            return {"success": True, "instance_id": instance_id,
+                    "output": "(no console output available)",
+                    "tail": "", "errors": [], "summary": "No console output."}
+
+        lines = decoded.splitlines()
+        tail_lines = lines[-60:]
+
+        # Error-class line patterns common in Linux/EC2 console output.
+        err_re = _re.compile(
+            r'\b(?:ERROR|FATAL|PANIC|Kernel panic|Call Trace|BUG:|'
+            r'Out of memory|OOM killed|oom-killer|segfault|'
+            r'failed to start|Failed to start|emergency mode|'
+            r'rescue mode|systemd-fsck.*failed|Read-only file system|'
+            r'I/O error|EXT4-fs error|XFS.*error)',
+            _re.IGNORECASE,
+        )
+        error_lines = [ln for ln in lines if err_re.search(ln)][-40:]
+
+        if error_lines:
+            summary = f"{len(error_lines)} error/panic line(s) found near the end of the console output."
+        else:
+            summary = "No error/panic patterns detected. Showing last 60 lines."
+
+        # Cap raw output at 100 KB so very long boot logs don't blow the prompt.
+        if len(decoded) > 100_000:
+            decoded = decoded[-100_000:]
+
+        return {
+            "success":     True,
+            "instance_id": instance_id,
+            "summary":     summary,
+            "tail":        "\n".join(tail_lines),
+            "errors":      error_lines,
+            "output":      decoded,
+        }
     except (BotoCoreError, ClientError) as e:
         return {"success": False, "error": str(e)}
 

@@ -36,17 +36,24 @@ _SYSTEM = (
     "You are an expert SRE. You produce lean, precise, EXECUTABLE incident remediation plans. "
     "RULES:\n"
     "1. Only recommend actions for infrastructure that is marked AVAILABLE in the data summary. "
-    "If Kubernetes is NOT AVAILABLE, output zero k8s_* actions. "
-    "If AWS is NOT AVAILABLE, output zero ec2_*/ecs_*/lambda_*/rds_* actions.\n"
-    "2. Use ONLY real resource identifiers (IDs, names) from the context. "
-    "Never invent example values like i-0abc123, api-server, production, etc.\n"
+    "If Kubernetes is NOT AVAILABLE, output zero k8s_* actions AND do NOT mention pods, deployments, "
+    "namespaces, or kubectl anywhere — not in actions, not in root_cause, not in summary, not in reasoning. "
+    "If AWS is NOT AVAILABLE, output zero ec2_*/ecs_*/lambda_*/rds_* actions and likewise do not mention "
+    "those resource types in any text field.\n"
+    "2. Use ONLY real resource identifiers (IDs, names) that appear VERBATIM in the context block above. "
+    "Never invent example values. If a name like 'my-dep', 'my-cluster', 'api-server', 'default' (as a "
+    "namespace), 'i-0abc123' appears in your output but NOT in the context, you have hallucinated — remove it. "
+    "If you cannot find a real resource name in the context, do not mention any resource of that type.\n"
     "3. PREFER executable actions over 'investigate'. If you can see a stopped EC2 instance ID, "
     "use ec2_start to actually start it. If an ECS service is down, use ecs_redeploy. "
     "Only use 'investigate' when you genuinely cannot determine the right fix from the data.\n"
     "4. Fewer, precise actions beat many vague ones. Only include actions with clear evidence.\n"
     "5. Set confidence below 0.5 when key data is missing.\n"
     "6. Similar past incidents are BACKGROUND ONLY. NEVER mention them in root_cause or summary. "
-    "Root cause must be based purely on the AWS/K8s/GitHub data in this incident."
+    "Root cause must be based purely on the AWS/K8s/GitHub data in this incident.\n"
+    "7. The schema examples below use angle-bracket placeholders like <DEPLOYMENT_FROM_CONTEXT>. "
+    "Those are placeholders — DO NOT copy them literally. Substitute with real values from the context "
+    "or omit the action entirely."
 )
 
 _PROMPT_TEMPLATE = """
@@ -124,18 +131,18 @@ Allowed action types — use ONLY types matching available infrastructure:
     ec2_stop        → {{"type":"ec2_stop","instance_id":"i-xxx","description":"..."}}
 
   ECS actions (AWS required):
-    ecs_redeploy    → {{"type":"ecs_redeploy","cluster":"my-cluster","service":"my-svc","description":"..."}}
-    ecs_scale       → {{"type":"ecs_scale","cluster":"my-cluster","service":"my-svc","desired_count":2,"description":"..."}}
+    ecs_redeploy    → {{"type":"ecs_redeploy","cluster":"<CLUSTER_FROM_CONTEXT>","service":"<SERVICE_FROM_CONTEXT>","description":"..."}}
+    ecs_scale       → {{"type":"ecs_scale","cluster":"<CLUSTER_FROM_CONTEXT>","service":"<SERVICE_FROM_CONTEXT>","desired_count":2,"description":"..."}}
 
   Lambda actions (AWS required):
-    lambda_invoke   → {{"type":"lambda_invoke","function_name":"my-fn","payload":{{}},"description":"..."}}
+    lambda_invoke   → {{"type":"lambda_invoke","function_name":"<FUNCTION_FROM_CONTEXT>","payload":{{}},"description":"..."}}
 
   RDS actions (AWS required):
-    rds_reboot      → {{"type":"rds_reboot","db_instance_id":"my-db","description":"..."}}
+    rds_reboot      → {{"type":"rds_reboot","db_instance_id":"<DB_FROM_CONTEXT>","description":"..."}}
 
   Kubernetes actions (K8s required):
-    k8s_restart     → {{"type":"k8s_restart","deployment":"my-dep","namespace":"default","description":"..."}}
-    k8s_scale       → {{"type":"k8s_scale","deployment":"my-dep","namespace":"default","replicas":3,"description":"..."}}
+    k8s_restart     → {{"type":"k8s_restart","deployment":"<DEPLOYMENT_FROM_CONTEXT>","namespace":"<NAMESPACE_FROM_CONTEXT>","description":"..."}}
+    k8s_scale       → {{"type":"k8s_scale","deployment":"<DEPLOYMENT_FROM_CONTEXT>","namespace":"<NAMESPACE_FROM_CONTEXT>","replicas":3,"description":"..."}}
 
   Always available:
     investigate     → {{"type":"investigate","description":"...","target":"..."}} — use ONLY when action type unknown
@@ -148,9 +155,54 @@ Allowed action types — use ONLY types matching available infrastructure:
 # Fabricated placeholder patterns to detect and strip
 _FAKE_PATTERNS = re.compile(
     r'i-0abc123|api-server|<[^>]+>|your-namespace|production namespace|'
-    r'your-deployment|example\.|placeholder',
+    r'your-deployment|example\.|placeholder|my-dep\b|my-cluster|my-svc|my-fn|my-db',
     re.IGNORECASE
 )
+
+# Markers used in plan text that imply a resource type. When that source is
+# NOT AVAILABLE, the planner should not mention them.
+_K8S_TERMS_RE = re.compile(
+    r'\b(kubernetes|k8s|kubectl|pod|pods|deployment|deployments|namespace|namespaces|'
+    r'replica\s*set|daemonset|statefulset|helm|cluster\s*role|kube-apiserver)\b',
+    re.IGNORECASE
+)
+_AWS_TERMS_RE = re.compile(
+    r'\b(ec2|ecs|rds|lambda|cloudwatch|s3 bucket|sqs|dynamodb|cloudtrail|fargate|asg|'
+    r'aws auto-?scaling)\b',
+    re.IGNORECASE
+)
+
+
+def _scrub_unavailable_mentions(plan: dict, aws_ok: bool, k8s_ok: bool) -> dict:
+    """When an infra source isn't available, strip any mention of it from
+    free-text fields (root_cause, summary, reasoning). Stops the model
+    from inventing pod names / deployments / EC2 IDs that don't exist.
+
+    Conservative: we only redact lines that contain the disallowed term,
+    not the whole field. If after redaction the field is empty, we replace
+    it with a clear "no <source> data" placeholder."""
+
+    def _drop_lines(text: str, pattern: re.Pattern, source_label: str) -> str:
+        if not text or not isinstance(text, str):
+            return text
+        # Split by sentence boundary or newline so we drop the smallest unit.
+        parts = re.split(r'(?<=[.!?])\s+|\n+', text)
+        kept = [p for p in parts if p.strip() and not pattern.search(p)]
+        result = " ".join(kept).strip()
+        if not result:
+            result = f"No {source_label} data available — root cause cannot reference {source_label} resources."
+        return result
+
+    for field in ("root_cause", "summary", "reasoning"):
+        val = plan.get(field)
+        if not val:
+            continue
+        if not k8s_ok:
+            val = _drop_lines(val, _K8S_TERMS_RE, "Kubernetes")
+        if not aws_ok:
+            val = _drop_lines(val, _AWS_TERMS_RE, "AWS")
+        plan[field] = val
+    return plan
 
 
 def _data_summary(ctx: dict) -> str:
@@ -258,6 +310,49 @@ def _strip_fabricated(plan: dict) -> dict:
     return plan
 
 
+# Keys an action dict can use to name the resource it operates on.
+_ACTION_TARGET_KEYS = (
+    "instance_id", "resource_id", "deployment", "deployment_name",
+    "pod", "pod_name", "function_name", "db_instance_id",
+    "cluster", "cluster_name", "service_name",
+)
+
+
+def _collect_known_targets(aws_ctx: dict, k8s_ctx: dict) -> set:
+    """Harvest identifiers from already-collected context for confidence
+    ceiling computation. Lowercase for case-insensitive comparison."""
+    found: set[str] = set()
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in ("id", "name", "instance_id", "function_name",
+                         "deployment", "pod", "service_name", "cluster",
+                         "identifier") and isinstance(v, str) and v:
+                    found.add(v.lower())
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(aws_ctx or {})
+    _walk(k8s_ctx or {})
+    return found
+
+
+def _action_target_in_known(action: dict, known: set) -> bool:
+    """True if action either has no resource target or every named target
+    appears in the collected context."""
+    if not known:
+        # We can't verify, so don't penalise confidence on this signal.
+        return True
+    for key in _ACTION_TARGET_KEYS:
+        target = action.get(key)
+        if target and isinstance(target, str) and target.lower() not in known:
+            return False
+    return True
+
+
 class PlannerAgent(BaseAgent):
     """Uses LLM to generate a structured JSON execution plan."""
 
@@ -297,15 +392,27 @@ class PlannerAgent(BaseAgent):
         description = state.get("description", "")
         classification = _classify_incident(description)
 
+        # Pass compact summaries instead of raw json.dumps(...)[:N]. Cuts
+        # input tokens ~60% and prevents byte-truncation from slicing off
+        # high-signal fields (e.g. `state: stopped` ending up past byte 2000).
+        from app.llm.context_summary import (
+            summarize_aws_for_prompt,
+            summarize_k8s_for_prompt,
+            summarize_github_for_prompt,
+        )
+        aws_summary    = summarize_aws_for_prompt(aws_ctx)
+        k8s_summary    = summarize_k8s_for_prompt(k8s_ctx)
+        github_summary = summarize_github_for_prompt(github_ctx)
+
         prompt = _PROMPT_TEMPLATE.format(
             incident_id       = state.get("incident_id", "unknown"),
             description       = description,
             aws_available     = _data_summary(aws_ctx),
             k8s_available     = _data_summary(k8s_ctx),
             github_available  = _data_summary(github_ctx),
-            aws_context       = json.dumps(aws_ctx, default=str)[:2000],
-            k8s_context       = json.dumps(k8s_ctx, default=str)[:1500],
-            github_context    = json.dumps(github_ctx, default=str)[:1000],
+            aws_context       = json.dumps(aws_summary, default=str, separators=(",", ":")),
+            k8s_context       = json.dumps(k8s_summary, default=str, separators=(",", ":")),
+            github_context    = json.dumps(github_summary, default=str, separators=(",", ":")),
             similar_incidents = json.dumps(state.get("similar_incidents", []), default=str)[:800],
             focus_hint        = _focus_hint(classification),
         )
@@ -315,8 +422,24 @@ class PlannerAgent(BaseAgent):
         _provider_order = [_global, "groq", "claude", "openai"] if _global else ["groq", "claude", "openai"]
         # deduplicate while preserving order
         seen = set(); _provider_order = [p for p in _provider_order if not (p in seen or seen.add(p))]
+
+        # For high-severity incidents, refuse to silently downgrade to small
+        # Llama models. If Anthropic/OpenAI are unavailable, we'd rather
+        # return an empty plan and escalate to a human than have an 8B
+        # model emit a plausible-looking restart on prod.
+        severity = str(state.get("severity", "")).lower()
+        _WEAK_PROVIDERS = {"groq", "ollama"}
+        require_strong = severity in ("critical", "high")
+        if require_strong:
+            _provider_order = [p for p in _provider_order if p not in _WEAK_PROVIDERS]
+
         last_exc = None
         for attempt in range(4):
+            if not _provider_order:
+                last_exc = RuntimeError(
+                    f"no strong-capability LLM provider available for severity={severity!r}"
+                )
+                break
             try:
                 preferred = _provider_order[min(attempt, len(_provider_order) - 1)]
                 llm = LLMFactory.get(preferred=preferred)
@@ -342,6 +465,11 @@ class PlannerAgent(BaseAgent):
                 # Strip fabricated identifiers from data_gaps
                 plan = _strip_fabricated(plan)
 
+                # Scrub mentions of unavailable infra (K8s, AWS) from free-text
+                # fields. Stops the model from hallucinating pod names or
+                # deployment names when those integrations aren't configured.
+                plan = _scrub_unavailable_mentions(plan, aws_ok=aws_ok, k8s_ok=k8s_ok)
+
                 # Cap confidence when no real infra data
                 if not aws_ok and not k8s_ok:
                     plan["confidence"] = min(plan.get("confidence", 0.3), 0.4)
@@ -354,6 +482,34 @@ class PlannerAgent(BaseAgent):
                         if not github_ok:
                             gaps.append("GitHub context unavailable — check GITHUB_TOKEN")
                         plan["data_gaps"] = gaps
+
+                # Deterministic confidence ceiling. The LLM is free to emit
+                # any number it likes, but auto-execution gates against this
+                # value — so we cap it by signals we can actually verify.
+                # Weights: AWS 0.3, K8s 0.3, GitHub 0.1, similar-incident-match 0.2,
+                # all-action-targets-resolve 0.1. Always at least 0.3 so a
+                # valid no-data plan can still be reviewed by a human.
+                similar_match = bool(state.get("similar_incidents"))
+                actions = plan.get("actions") or []
+                known = _collect_known_targets(aws_ctx, k8s_ctx)
+                targets_resolve = bool(actions) and all(
+                    _action_target_in_known(a, known) for a in actions
+                )
+                ceiling = 0.3 + (
+                    (0.3 if aws_ok else 0.0)
+                    + (0.3 if k8s_ok else 0.0)
+                    + (0.1 if github_ok else 0.0)
+                    + (0.2 if similar_match else 0.0)
+                    + (0.1 if targets_resolve else 0.0)
+                )
+                ceiling = min(ceiling, 1.0)
+                llm_conf = float(plan.get("confidence", 0.0) or 0.0)
+                plan["confidence"] = min(llm_conf, ceiling)
+                plan["confidence_ceiling"] = ceiling
+                plan["confidence_signals"] = {
+                    "aws_ok": aws_ok, "k8s_ok": k8s_ok, "github_ok": github_ok,
+                    "similar_match": similar_match, "targets_resolve": targets_resolve,
+                }
 
                 state["plan"] = plan
                 self._log(

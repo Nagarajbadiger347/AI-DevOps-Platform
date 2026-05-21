@@ -44,11 +44,16 @@ logs/
 *.db-wal
 *.sqlite3
 
-# Vector/runtime databases
+# Vector/runtime databases (legacy — pgvector now backs storage)
 chroma_db/
 chroma_backups/
 
-# Runtime data files
+# Runtime data files (war rooms, alert state, fine-tune dumps, post-mortems)
 post_mortems/
 approvals.json
+data/*.json
+data/*.jsonl
 *.pyc
+
+# Backup/temp source files
+*.bak

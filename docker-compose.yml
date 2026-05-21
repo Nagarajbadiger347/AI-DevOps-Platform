@@ -28,6 +28,43 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  # ── PostgreSQL automated backups ──────────────────────────────
+  # Dumps the database every BACKUP_INTERVAL_SECONDS (default 24h) and keeps
+  # the last BACKUP_RETENTION_DAYS (default 14). Backups land in the
+  # app_backups named volume — for off-host durability, mount that volume
+  # to a host path or sync to S3 in BACKUP_S3_BUCKET.
+  db-backup:
+    image: postgres:15-alpine
+    environment:
+      PGHOST:     postgres
+      PGUSER:     ${POSTGRES_USER:-nexusops}
+      PGDATABASE: ${POSTGRES_DB:-nexusops}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS:   ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_S3_BUCKET:        ${BACKUP_S3_BUCKET:-}
+      AWS_ACCESS_KEY_ID:       ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY:   ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION:              ${AWS_REGION:-us-east-1}
+    volumes:
+      - app_backups:/backups
+      - ./scripts/db_backup.sh:/usr/local/bin/db_backup.sh:ro
+    entrypoint: ["sh", "/usr/local/bin/db_backup.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   # ── PostgreSQL metrics exporter ───────────────────────────────
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:latest
@@ -41,6 +78,14 @@ services:
     restart: unless-stopped
     networks:
       - internal
+    # NOTE: image is distroless — no shell/wget/curl, so we rely on the
+    # process exiting non-zero to detect failure plus Prometheus scrape
+    # success in alert_rules.yml (PostgresExporterDown).
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
     logging:
       driver: json-file
       options: { max-size: "5m", max-file: "2" }
@@ -59,14 +104,56 @@ services:
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--storage.tsdb.retention.time=200h'
       - '--web.enable-lifecycle'
-    ports:
-      - "9090:9090"
+    expose:
+      - "9090"
     restart: unless-stopped
     networks:
       - internal
     depends_on:
-      - redis-exporter
-      - postgres-exporter
+      redis-exporter:
+        condition: service_started
+      postgres-exporter:
+        condition: service_started
+      alertmanager:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9090/-/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Alertmanager (alert routing) ──────────────────────────────
+  alertmanager:
+    image: prom/alertmanager:latest
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    expose:
+      - "9093"
+    restart: unless-stopped
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9093/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
@@ -95,10 +182,12 @@ services:
     build:
       context: .
       target: final
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - app_logs:/app/logs
+      - app_data:/app/data
+      - app_post_mortems:/app/post_mortems
     environment:
       - PYTHONPATH=/app
       - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
@@ -134,18 +223,31 @@ services:
   # ── Grafana dashboards ────────────────────────────────────────
   grafana:
     image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     volumes:
       - grafana_data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost/grafana/}
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
     restart: unless-stopped
     networks:
       - internal
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
@@ -195,6 +297,13 @@ services:
     restart: unless-stopped
     networks:
       - internal
+    # NOTE: image is scratch — no shell, no wget. Exporter is monitored via
+    # Prometheus scrape success (RedisExporterDown alert) instead.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
     logging:
       driver: json-file
       options: { max-size: "5m", max-file: "2" }
@@ -202,9 +311,13 @@ services:
 volumes:
   redis_data:
   app_logs:
+  app_data:
+  app_post_mortems:
+  app_backups:
   postgres_data:
   prometheus_data:
   grafana_data:
+  alertmanager_data:
 
 networks:
   internal:

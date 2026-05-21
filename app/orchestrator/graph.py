@@ -155,13 +155,14 @@ def plan(state: PipelineState) -> PipelineState:
             state.update(result)
 
     except Exception as exc:
-        _bus.emit_stage(iid, "plan", "failed", f"Planner failed: {exc}")
+        _bus.emit_stage(iid, "plan", "failed", f"Planner failed: {type(exc).__name__}: {exc}")
         logger.error("plan_node_failed", extra={
             "incident_id": state.get("incident_id"),
             "trace_id":    state.get("trace_id"),
-            "error":       str(exc),
-        })
-        state.setdefault("errors", []).append(f"plan: {exc}")
+            "error":       repr(exc),
+            "error_type":  type(exc).__name__,
+        }, exc_info=True)
+        state.setdefault("errors", []).append(f"plan: {type(exc).__name__}: {exc}")
         # Inject a stub plan so routing can still escalate cleanly
         state.setdefault("plan", {"confidence": 0.0, "risk": "unknown", "actions": []})
 

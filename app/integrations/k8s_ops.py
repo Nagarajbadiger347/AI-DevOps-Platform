@@ -5,6 +5,10 @@ import time
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
+# Hard ceiling on any kube-apiserver call. Without this, a hung apiserver
+# wedges the entire monitor loop / request worker.
+_K8S_TIMEOUT = int(os.getenv("K8S_REQUEST_TIMEOUT_SECONDS", "10"))
+
 
 def _load_config() -> bool:
     """Load K8s config. Returns True on success.
@@ -45,7 +49,7 @@ def restart_deployment(namespace: str, deployment: str) -> dict:
                 }
             }
         }
-        apps.patch_namespaced_deployment(name=deployment, namespace=namespace, body=patch)
+        apps.patch_namespaced_deployment(name=deployment, namespace=namespace, body=patch, _request_timeout=_K8S_TIMEOUT)
         return {"success": True, "message": f"Rolling restart triggered for {deployment} in {namespace}"}
     except ApiException as e:
         return {"success": False, "error": f"API error {e.status}: {e.reason}"}
@@ -62,7 +66,7 @@ def scale_deployment(namespace: str, deployment: str, replicas: int) -> dict:
     try:
         apps = client.AppsV1Api()
         patch = {"spec": {"replicas": replicas}}
-        apps.patch_namespaced_deployment_scale(name=deployment, namespace=namespace, body=patch)
+        apps.patch_namespaced_deployment_scale(name=deployment, namespace=namespace, body=patch, _request_timeout=_K8S_TIMEOUT)
         return {
             "success": True,
             "message": f"Deployment {deployment} in {namespace} scaled to {replicas} replica(s)",
@@ -79,7 +83,7 @@ def get_pod_logs(namespace: str, pod: str, container: str = "", tail_lines: int 
         return {"success": False, "error": "K8s config not found"}
     try:
         v1 = client.CoreV1Api()
-        kwargs = dict(namespace=namespace, name=pod, tail_lines=tail_lines, timestamps=True)
+        kwargs = dict(namespace=namespace, name=pod, tail_lines=tail_lines, timestamps=True, _request_timeout=_K8S_TIMEOUT)
         if container:
             kwargs["container"] = container
         logs = v1.read_namespaced_pod_log(**kwargs)
@@ -98,7 +102,7 @@ def list_namespaces() -> dict:
         return {"success": False, "error": "K8s config not found"}
     try:
         v1 = client.CoreV1Api()
-        ns_list = v1.list_namespace()
+        ns_list = v1.list_namespace(_request_timeout=_K8S_TIMEOUT)
         namespaces = [
             {"name": ns.metadata.name, "status": ns.status.phase}
             for ns in ns_list.items
@@ -117,9 +121,9 @@ def list_pods(namespace: str = "") -> dict:
     try:
         v1 = client.CoreV1Api()
         if namespace:
-            pod_list = v1.list_namespaced_pod(namespace)
+            pod_list = v1.list_namespaced_pod(namespace, _request_timeout=_K8S_TIMEOUT)
         else:
-            pod_list = v1.list_pod_for_all_namespaces()
+            pod_list = v1.list_pod_for_all_namespaces(_request_timeout=_K8S_TIMEOUT)
         pods = []
         for p in pod_list.items:
             restarts = sum(
@@ -151,9 +155,9 @@ def list_deployments(namespace: str = "") -> dict:
     try:
         apps = client.AppsV1Api()
         if namespace:
-            dep_list = apps.list_namespaced_deployment(namespace)
+            dep_list = apps.list_namespaced_deployment(namespace, _request_timeout=_K8S_TIMEOUT)
         else:
-            dep_list = apps.list_deployment_for_all_namespaces()
+            dep_list = apps.list_deployment_for_all_namespaces(_request_timeout=_K8S_TIMEOUT)
         deployments = [
             {
                 "name":       d.metadata.name,
@@ -179,9 +183,9 @@ def get_cluster_events(namespace: str = "", limit: int = 50) -> dict:
     try:
         v1 = client.CoreV1Api()
         if namespace:
-            evt_list = v1.list_namespaced_event(namespace, field_selector="type=Warning")
+            evt_list = v1.list_namespaced_event(namespace, field_selector="type=Warning", _request_timeout=_K8S_TIMEOUT)
         else:
-            evt_list = v1.list_event_for_all_namespaces(field_selector="type=Warning")
+            evt_list = v1.list_event_for_all_namespaces(field_selector="type=Warning", _request_timeout=_K8S_TIMEOUT)
         events = []
         for e in evt_list.items[:limit]:
             events.append({
@@ -219,7 +223,7 @@ def delete_pod(namespace: str, pod: str) -> dict:
         return {"success": False, "error": "K8s config not found"}
     try:
         v1 = client.CoreV1Api()
-        v1.delete_namespaced_pod(name=pod, namespace=namespace)
+        v1.delete_namespaced_pod(name=pod, namespace=namespace, _request_timeout=_K8S_TIMEOUT)
         return {"success": True, "pod": pod, "namespace": namespace,
                 "message": f"Pod {pod} deleted — will be rescheduled automatically"}
     except ApiException as e:
@@ -234,7 +238,7 @@ def cordon_node(node: str) -> dict:
         return {"success": False, "error": "K8s config not found"}
     try:
         v1 = client.CoreV1Api()
-        v1.patch_node(name=node, body={"spec": {"unschedulable": True}})
+        v1.patch_node(name=node, body={"spec": {"unschedulable": True}}, _request_timeout=_K8S_TIMEOUT)
         return {"success": True, "node": node, "message": f"Node {node} cordoned — no new pods will be scheduled"}
     except ApiException as e:
         return {"success": False, "error": f"API error {e.status}: {e.reason}"}
@@ -248,7 +252,7 @@ def uncordon_node(node: str) -> dict:
         return {"success": False, "error": "K8s config not found"}
     try:
         v1 = client.CoreV1Api()
-        v1.patch_node(name=node, body={"spec": {"unschedulable": False}})
+        v1.patch_node(name=node, body={"spec": {"unschedulable": False}}, _request_timeout=_K8S_TIMEOUT)
         return {"success": True, "node": node, "message": f"Node {node} uncordoned — accepting pods again"}
     except ApiException as e:
         return {"success": False, "error": f"API error {e.status}: {e.reason}"}
@@ -262,7 +266,7 @@ def get_resource_usage(namespace: str = "default") -> dict:
         return {"success": False, "error": "K8s config not found"}
     try:
         v1 = client.CoreV1Api()
-        pod_list = v1.list_namespaced_pod(namespace) if namespace else v1.list_pod_for_all_namespaces()
+        pod_list = v1.list_namespaced_pod(namespace, _request_timeout=_K8S_TIMEOUT) if namespace else v1.list_pod_for_all_namespaces(_request_timeout=_K8S_TIMEOUT)
         usage = []
         for p in pod_list.items:
             for c in (p.spec.containers or []):

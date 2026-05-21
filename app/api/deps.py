@@ -198,6 +198,13 @@ def _resolve_auth(
         except HTTPException:
             username = None
             jwt_role = None
+    # Did this request bring ANY credential? Used by require_* to reject
+    # anonymous callers — without this guard, a synthetic "viewer" role was
+    # being handed out for requests with no token/cookie/X-User at all.
+    import os as _os
+    _auth_off = _os.getenv("AUTH_ENABLED", "true").lower() not in ("1", "true", "yes")
+    had_credential = bool(token_str) or bool(x_user)
+
     if not username and x_user:
         username = x_user.strip().lower()
     if not username:
@@ -218,42 +225,50 @@ def _resolve_auth(
     ctx = AuthContext(username=username, role=role, tenant_id=tenant_id,
                       workspace_id=jwt_workspace or "", plan_name=plan_name)
     ctx._bad_token = bool(token_str) and username == "anonymous" and not jwt_role
+    # _no_auth: request carried no credential at all. require_* will reject
+    # unless AUTH_ENABLED=false (dev-only bypass enforced upstream by
+    # validate_security() in production).
+    ctx._no_auth = (not had_credential) and not _auth_off
     return ctx
 
 
-def require_super_admin(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+def _reject_unauthenticated(auth: AuthContext) -> None:
+    if getattr(auth, "_no_auth", False):
+        raise HTTPException(status_code=401, detail="Authentication required")
     if getattr(auth, "_bad_token", False):
         raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+
+
+def require_super_admin(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    _reject_unauthenticated(auth)
     if auth.role != "super_admin":
         raise HTTPException(status_code=403, detail="Super-admin access required")
     return auth
 
 
 def require_admin(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
-    if getattr(auth, "_bad_token", False):
-        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+    _reject_unauthenticated(auth)
     if auth.role not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Admin access required")
     return auth
 
 
 def require_operator(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
-    if getattr(auth, "_bad_token", False):
-        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+    _reject_unauthenticated(auth)
     if auth.role not in ("super_admin", "admin", "operator", "developer"):
         raise HTTPException(status_code=403, detail="Operator role or above required")
     return auth
 
 
 def require_developer(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
-    if getattr(auth, "_bad_token", False):
-        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+    _reject_unauthenticated(auth)
     if auth.role not in ("super_admin", "admin", "developer"):
         raise HTTPException(status_code=403, detail="Role 'developer' or above required")
     return auth
 
 
 def require_viewer(auth: AuthContext = Depends(_resolve_auth)) -> AuthContext:
+    _reject_unauthenticated(auth)
     if auth.role not in ("super_admin", "admin", "developer", "viewer"):
         raise HTTPException(status_code=403, detail="Authentication required")
     return auth

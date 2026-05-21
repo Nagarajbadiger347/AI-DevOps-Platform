@@ -20,8 +20,15 @@ Slack notification, and VS Code bridge output.
 from __future__ import annotations
 
 import datetime
+import threading
+import time as _time
 
 from app.core.logging import get_logger, new_correlation_id, new_trace_id, set_context
+from app.core.metrics import (
+    incidents_run_total,
+    incidents_failed_total,
+    incident_duration_seconds,
+)
 from app.orchestrator.graph import pipeline_graph
 from app.orchestrator.state import PipelineState, initial_state
 
@@ -291,6 +298,8 @@ def run_pipeline(
     state["correlation_id"] = cid
     state["trace_id"]       = trace_id
 
+    incidents_run_total.labels(tenant_id=tenant_id, severity=severity).inc()
+    _start = _time.monotonic()
     try:
         final_state: dict = pipeline_graph.invoke(state)
     except Exception as exc:
@@ -305,6 +314,16 @@ def run_pipeline(
             "errors":       state.get("errors", []) + [str(exc)],
             "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
+        incidents_failed_total.labels(tenant_id=tenant_id, failure_reason="unhandled_exception").inc()
+    finally:
+        incident_duration_seconds.observe(_time.monotonic() - _start)
+    if final_state.get("status") == "failed" and "unhandled_exception" not in (
+        " ".join(final_state.get("errors", []) or [])
+    ):
+        incidents_failed_total.labels(
+            tenant_id=tenant_id,
+            failure_reason=str(final_state.get("error_reason") or "pipeline_error"),
+        ).inc()
 
     logger.info("pipeline_finished", extra={
         "incident_id":      incident_id,
@@ -316,8 +335,15 @@ def run_pipeline(
         "errors":           len(final_state.get("errors", [])),
     })
 
-    # Auto-post to Slack: dedicated channel + full briefing
-    _slack_notify_pipeline(incident_id, description, final_state, triggered_by=user or "system")
+    # Post to Slack off the hot path — a slow Slack response (or 5+s
+    # channel-create) used to stretch every pipeline run end-to-end.
+    threading.Thread(
+        target=_slack_notify_pipeline,
+        args=(incident_id, description, final_state),
+        kwargs={"triggered_by": user or "system"},
+        daemon=True,
+        name=f"slack-notify-{incident_id}",
+    ).start()
 
     # VS Code bridge output
     try:
